@@ -1,0 +1,40 @@
+# Node / Frontend
+node_modules/
+dist/
+.env
+.env.local
+
+# Python / Backend
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Tauri / Rust
+target/
+src-tauri/target/
+
+# Downloads folder (don't commit downloaded media)
+backend/downloads/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VSCode
+.vscode/settings.json
+
+# Ignore Python junk
+venv/
+__pycache__/
+*.pyc
+
+# Ignore Node/React junk
+node_modules/
+dist/
+build/
+
+# Ignore Tauri junk
+src-tauri/target/
