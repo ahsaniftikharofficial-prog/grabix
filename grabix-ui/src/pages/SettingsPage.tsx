@@ -1,83 +1,122 @@
-import React, { useState } from "react";
-import Topbar from "../components/Topbar";
+import { useState } from "react";
+import { useTheme } from "../context/ThemeContext";
+import { IconFolder, IconSun, IconMoon, IconInfo, IconCheck } from "../components/Icons";
 
-interface Props { theme: string; onToggleTheme: () => void; }
-
-function Toggle({ on, onChange }: { on: boolean; onChange: () => void }) {
+interface SettingRowProps { label: string; sub: string; children: React.ReactNode; }
+function SettingRow({ label, sub, children }: SettingRowProps) {
   return (
-    <div onClick={onChange} className="relative cursor-pointer flex-shrink-0" style={{ width: "38px", height: "22px", background: on ? "var(--accent)" : "var(--surface2)", borderRadius: "99px", border: "1px solid var(--border)", transition: "background 0.2s" }}>
-      <div style={{ position: "absolute", top: "2px", left: on ? "18px" : "2px", width: "16px", height: "16px", background: "#fff", borderRadius: "50%", transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 0", borderBottom: "1px solid var(--border)" }}>
+      <div style={{ flex: 1, paddingRight: 20 }}>
+        <div style={{ fontSize: 13, fontWeight: 500 }}>{label}</div>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>{sub}</div>
+      </div>
+      <div>{children}</div>
     </div>
   );
 }
 
-export default function SettingsPage({ theme, onToggleTheme }: Props) {
-  const [autoFetch, setAutoFetch]         = useState(true);
-  const [notifications, setNotifications] = useState(true);
-  const [quality, setQuality]             = useState("1080p");
-  const [format, setFormat]               = useState("MP4");
-  const [maxDL, setMaxDL]                 = useState("3");
-  const [subLang, setSubLang]             = useState("English");
-
-  const Section = ({ title }: { title: string }) => (
-    <div className="text-xs font-bold uppercase tracking-widest mb-3 mt-7 first:mt-0" style={{ color: "var(--text3)" }}>{title}</div>
-  );
-
-  const Row = ({ label, desc, right }: { label: string; desc?: string; right: React.ReactNode }) => (
-    <div className="flex items-center justify-between px-4 py-3.5 rounded-xl mb-2" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
-      <div>
-        <div className="text-sm font-medium" style={{ color: "var(--text)" }}>{label}</div>
-        {desc && <div className="text-xs mt-0.5" style={{ color: "var(--text3)" }}>{desc}</div>}
-      </div>
-      {right}
+function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div onClick={() => onChange(!value)} style={{
+      width: 40, height: 22, borderRadius: 99, cursor: "pointer",
+      background: value ? "var(--accent)" : "var(--border)",
+      position: "relative", transition: "background 0.2s",
+      flexShrink: 0,
+    }}>
+      <div style={{
+        position: "absolute", top: 3, left: value ? 21 : 3,
+        width: 16, height: 16, borderRadius: "50%",
+        background: "white", transition: "left 0.2s",
+        boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
+      }} />
     </div>
   );
+}
 
-  const Sel = ({ value, onChange, opts }: { value: string; onChange: (v: string) => void; opts: string[] }) => (
-    <select value={value} onChange={(e) => onChange(e.target.value)} className="px-3 py-1.5 rounded-lg text-xs outline-none" style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)" }}>
-      {opts.map((o) => <option key={o}>{o}</option>)}
-    </select>
-  );
+export default function SettingsPage() {
+  const { theme, toggle } = useTheme();
+  const [autoFetch, setAutoFetch] = useState(true);
+  const [notifications, setNotifications] = useState(true);
+  const [format, setFormat] = useState("mp4");
+  const [quality, setQuality] = useState("1080p");
+  const [saved, setSaved] = useState(false);
+
+  const save = () => { setSaved(true); setTimeout(() => setSaved(false), 2000); };
 
   return (
-    <div className="flex flex-col h-full">
-      <Topbar title="Settings" theme={theme} onToggleTheme={onToggleTheme} />
-      <div className="flex-1 overflow-y-auto p-8" style={{ maxWidth: "640px" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <div style={{ padding: "14px 24px", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 600 }}>Settings</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 1 }}>Configure GRABIX</div>
+        </div>
+        <button className="btn btn-primary" style={{ height: 34, fontSize: 12 }} onClick={save}>
+          {saved ? <><IconCheck size={13} /> Saved</> : "Save changes"}
+        </button>
+      </div>
 
-        <Section title="General" />
-        <Row label="Dark Mode" desc="Switch between dark and light theme" right={<Toggle on={theme === "dark"} onChange={onToggleTheme} />} />
-        <Row label="Auto-fetch URL info" desc="Fetch video details when URL is pasted" right={<Toggle on={autoFetch} onChange={() => setAutoFetch(!autoFetch)} />} />
-        <Row label="Download notifications" desc="Notify when download completes" right={<Toggle on={notifications} onChange={() => setNotifications(!notifications)} />} />
+      <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px", maxWidth: 560 }}>
 
-        <Section title="Downloads" />
-        <Row label="Default quality" desc="Preferred video resolution" right={<Sel value={quality} onChange={setQuality} opts={["4K","1080p","720p","480p","360p"]} />} />
-        <Row label="Default format" desc="Preferred output format" right={<Sel value={format} onChange={setFormat} opts={["MP4","MKV","WebM","MP3","M4A"]} />} />
-        <Row label="Max concurrent downloads" desc="How many downloads run at once" right={<Sel value={maxDL} onChange={setMaxDL} opts={["1","2","3","4","5"]} />} />
-        <Row label="Default subtitle language" right={<Sel value={subLang} onChange={setSubLang} opts={["None","English","Urdu","Hindi","Japanese","Arabic"]} />} />
-        <Row
-          label="Download location"
-          desc="~/Downloads/GRABIX"
-          right={<button className="text-xs px-3 py-1.5 rounded-lg" style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text2)" }}>Change</button>}
-        />
+        {/* Section */}
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>Appearance</div>
+        <div className="card card-padded" style={{ marginBottom: 20 }}>
+          <SettingRow label="Theme" sub="Switch between light and dark mode">
+            <button className="btn btn-ghost" style={{ gap: 6, fontSize: 13 }} onClick={toggle}>
+              {theme === "dark" ? <IconSun size={14} /> : <IconMoon size={14} />}
+              {theme === "dark" ? "Light mode" : "Dark mode"}
+            </button>
+          </SettingRow>
+        </div>
 
-        <Section title="Backend" />
-        <Row
-          label="Backend status"
-          desc="FastAPI running at http://127.0.0.1:8000"
-          right={
-            <span className="text-xs px-2.5 py-1 rounded-full font-medium" style={{ background: "rgba(46,125,50,0.1)", color: "var(--green)" }}>
-              ● Running
-            </span>
-          }
-        />
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>Downloads</div>
+        <div className="card card-padded" style={{ marginBottom: 20 }}>
+          <SettingRow label="Download folder" sub="Where files are saved on your computer">
+            <button className="btn btn-ghost" style={{ gap: 6, fontSize: 12 }}>
+              <IconFolder size={14} />
+              ~/Downloads/GRABIX
+            </button>
+          </SettingRow>
+          <SettingRow label="Default format" sub="Format used when starting a video download">
+            <select value={format} onChange={e => setFormat(e.target.value)}
+              style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+              <option value="mp4">MP4 (video)</option>
+              <option value="mp3">MP3 (audio)</option>
+              <option value="webm">WebM</option>
+            </select>
+          </SettingRow>
+          <SettingRow label="Default quality" sub="Video quality preference">
+            <select value={quality} onChange={e => setQuality(e.target.value)}
+              style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+              <option>1080p</option><option>720p</option><option>480p</option><option>360p</option>
+            </select>
+          </SettingRow>
+        </div>
 
-        <Section title="About" />
-        <Row
-          label="GRABIX"
-          desc="Version 0.1.0 — Phase 1 Foundation"
-          right={<span className="text-xs px-2.5 py-1 rounded-full font-medium" style={{ background: "var(--accent-bg)", color: "var(--accent)" }}>Up to date</span>}
-        />
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>Behaviour</div>
+        <div className="card card-padded" style={{ marginBottom: 20 }}>
+          <SettingRow label="Auto-fetch on paste" sub="Automatically fetch video info when a URL is pasted">
+            <Toggle value={autoFetch} onChange={setAutoFetch} />
+          </SettingRow>
+          <SettingRow label="Download notifications" sub="Show a notification when a download completes">
+            <Toggle value={notifications} onChange={setNotifications} />
+          </SettingRow>
+        </div>
 
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>About</div>
+        <div className="card card-padded">
+          <SettingRow label="Version" sub="Current GRABIX version">
+            <span style={{ fontSize: 13, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>0.2.0 · Phase 2</span>
+          </SettingRow>
+          <SettingRow label="Backend" sub="FastAPI + yt-dlp + FFmpeg">
+            <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--text-success)" }}>
+              <IconCheck size={13} /> Active
+            </div>
+          </SettingRow>
+          <div style={{ paddingTop: 10, display: "flex", alignItems: "flex-start", gap: 8, color: "var(--text-muted)", fontSize: 12 }}>
+            <IconInfo size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+            GRABIX is free and open source. For legal use only — respect copyright.
+          </div>
+        </div>
       </div>
     </div>
   );
