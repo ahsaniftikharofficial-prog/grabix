@@ -3,7 +3,8 @@ import {
   IconSearch, IconPaste, IconLink, IconRefresh,
   IconVideo, IconAudio, IconImage, IconSubtitle,
   IconDownload, IconX, IconCheck, IconAlert,
-  IconPlay, IconClock, IconScissors,
+  IconPlay, IconPause, IconStop, IconClock, IconScissors,
+  IconFolder, IconInfo,
 } from "../components/Icons";
 import TrimSlider from "../components/TrimSlider";
 
@@ -22,13 +23,19 @@ interface VideoInfo {
 
 interface QueueItem {
   id: string;
+  serverId: string;
+  url: string;
   title: string;
   thumbnail: string;
   format: string;
   fileType: FileType;
-  status: "queued" | "downloading" | "processing" | "done" | "error";
+  status: "queued" | "downloading" | "processing" | "done" | "error" | "paused" | "canceling" | "failed" | "canceled";
   percent: number;
   speed: string;
+  eta: string;
+  downloaded: string;
+  total: string;
+  filePath: string;
   error: string;
 }
 
@@ -58,7 +65,7 @@ export default function DownloaderPage() {
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(0);
   const [trimOpen, setTrimOpen] = useState(false);
-  const [useCpu, setUseCpu] = useState(true);
+  const [useCpu, setUseCpu] = useState(false);
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const pollingRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
 
@@ -99,7 +106,7 @@ export default function DownloaderPage() {
   const handlePaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
     const text = e.clipboardData.getData("text");
     setUrl(text);
-    setTimeout(() => fetchInfo(text), 80);
+    fetchInfo(text);
   };
 
   const handlePasteBtn = async () => {
@@ -115,6 +122,8 @@ export default function DownloaderPage() {
     const taskId = uid();
     const newItem: QueueItem = {
       id: taskId,
+      serverId: "",
+      url: url,
       title: info.title,
       thumbnail: info.thumbnail,
       format: fileType === "video" ? quality : fileType,
@@ -122,6 +131,10 @@ export default function DownloaderPage() {
       status: "queued",
       percent: 0,
       speed: "",
+      eta: "",
+      downloaded: "",
+      total: "",
+      filePath: "",
       error: "",
     };
     setQueue(prev => [newItem, ...prev]);
@@ -132,16 +145,29 @@ export default function DownloaderPage() {
       const data = await res.json();
       const serverTaskId = data.task_id ?? taskId;
 
+      // Store serverId in queue item so action buttons can use it
+      setQueue(prev => prev.map(q => q.id === taskId ? { ...q, serverId: serverTaskId } : q));
+
       // Poll progress
       const interval = setInterval(async () => {
         try {
           const pr = await fetch(`${API}/download-status/${serverTaskId}`);
           const pd = await pr.json();
           setQueue(prev => prev.map(q => q.id === taskId
-            ? { ...q, status: pd.status, percent: pd.percent ?? 0, speed: pd.speed ?? "", error: pd.error ?? "" }
+            ? {
+                ...q,
+                status: pd.status,
+                percent: pd.percent ?? 0,
+                speed: pd.speed ?? "",
+                eta: pd.eta ?? "",
+                downloaded: pd.downloaded ?? "",
+                total: pd.total ?? "",
+                filePath: pd.file_path ?? "",
+                error: pd.error ?? "",
+              }
             : q
           ));
-          if (pd.status === "done" || pd.status === "error") {
+          if (["done", "failed", "canceled", "error"].includes(pd.status)) {
             clearInterval(interval);
             pollingRef.current.delete(taskId);
           }
@@ -170,6 +196,20 @@ export default function DownloaderPage() {
   };
 
   const activeCount = queue.filter(q => q.status === "downloading" || q.status === "queued" || q.status === "processing").length;
+
+  const doAction = async (item: QueueItem, action: string) => {
+    if (!item.serverId) return;
+    try {
+      await fetch(`${API}/downloads/${item.serverId}/action?action=${action}`, { method: "POST" });
+    } catch { /* backend offline */ }
+  };
+
+  const doReveal = async (item: QueueItem) => {
+    if (!item.filePath) return;
+    try {
+      await fetch(`${API}/open-download-folder?path=${encodeURIComponent(item.filePath)}`, { method: "POST" });
+    } catch { /* offline */ }
+  };
 
   const FILE_TYPES: { id: FileType; label: string; Icon: React.FC<any> }[] = [
     { id: "video",    label: "Video",     Icon: IconVideo },
@@ -412,8 +452,8 @@ export default function DownloaderPage() {
                     >
                       ⚡ No CPU
                     </button>
-                    <span className="tooltip-box" style={{ width: 200, whiteSpace: "normal", lineHeight: 1.5 }}>
-                      Fast cut — no re-encoding. File saves instantly, but trim points may be slightly off (±2s) due to keyframe alignment.
+                    <span className="tooltip-box" style={{ width: 190, whiteSpace: "normal", lineHeight: 1.5 }}>
+                      ✅ Recommended. Instant, no re-encode. Trim snaps to nearest keyframe (±2s). No FFmpeg needed.
                     </span>
                   </div>
                   {/* With CPU button */}
@@ -425,8 +465,8 @@ export default function DownloaderPage() {
                     >
                       🔧 With CPU
                     </button>
-                    <span className="tooltip-box" style={{ width: 200, whiteSpace: "normal", lineHeight: 1.5 }}>
-                      Precise cut — re-encodes the trimmed segment with FFmpeg. Trim is frame-accurate but takes longer and uses CPU.
+                    <span className="tooltip-box" style={{ width: 190, whiteSpace: "normal", lineHeight: 1.5 }}>
+                      Frame-accurate trim. Re-encodes with FFmpeg — slower, uses CPU. Requires FFmpeg installed.
                     </span>
                   </div>
                 </div>
@@ -449,7 +489,7 @@ export default function DownloaderPage() {
               Queue ({queue.length})
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {queue.map((item) => <QueueCard key={item.id} item={item} onRemove={removeFromQueue} />)}
+              {queue.map((item) => <QueueCard key={item.id} item={item} onRemove={removeFromQueue} onAction={doAction} onReveal={doReveal} />)}
             </div>
           </div>
         )}
@@ -467,56 +507,201 @@ export default function DownloaderPage() {
   );
 }
 
-function QueueCard({ item, onRemove }: { item: QueueItem; onRemove: (id: string) => void }) {
-  const isActive = item.status === "downloading" || item.status === "queued" || item.status === "processing";
+function QueueCard({
+  item, onRemove, onAction, onReveal,
+}: {
+  item: QueueItem;
+  onRemove: (id: string) => void;
+  onAction: (item: QueueItem, action: string) => void;
+  onReveal: (item: QueueItem) => void;
+}) {
+  const [showProps, setShowProps] = useState(false);
+
+  const isActive   = item.status === "downloading" || item.status === "queued" || item.status === "processing";
+  const isPaused   = item.status === "paused";
+  const isDone     = item.status === "done";
+  const isFailed   = item.status === "failed" || item.status === "error" || item.status === "canceled";
+
   const statusColors: Record<string, string> = {
-    done: "var(--success)", error: "var(--danger)",
-    downloading: "var(--accent)", processing: "var(--warning)", queued: "var(--text-muted)",
+    done: "var(--success)", failed: "var(--danger)", error: "var(--danger)", canceled: "var(--text-muted)",
+    downloading: "var(--accent)", processing: "var(--warning)", queued: "var(--text-muted)", paused: "var(--warning)",
+    canceling: "var(--text-muted)",
   };
   const statusLabels: Record<string, string> = {
-    done: "Done", error: "Failed", downloading: "Downloading…",
-    processing: "Processing…", queued: "Queued",
+    done: "Done", failed: "Failed", error: "Failed", canceled: "Canceled",
+    downloading: "Downloading", processing: "Processing…", queued: "Queued", paused: "Paused",
+    canceling: "Canceling…",
   };
+
+  // Clean up raw speed string: strip ANSI codes and extra whitespace
+  const cleanSpeed = item.speed.replace(/\x1b\[[0-9;]*m/g, "").replace(/\u001b\[[0-9;]*m/g, "").trim();
 
   return (
     <div className="card fade-in" style={{ padding: "12px 14px" }}>
+      {/* ── Row 1: thumbnail + title + action buttons ── */}
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <img src={item.thumbnail} alt="" style={{ width: 48, height: 32, objectFit: "cover", borderRadius: 5, flexShrink: 0, border: "1px solid var(--border)" }} />
+
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.title}</div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 2 }}>
-            <span style={{ fontSize: 11, color: statusColors[item.status], fontWeight: 500 }}>
-              {statusLabels[item.status]}
+            <span style={{ fontSize: 11, color: statusColors[item.status] ?? "var(--text-muted)", fontWeight: 600 }}>
+              {statusLabels[item.status] ?? item.status}
             </span>
-            {item.speed && <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{item.speed}</span>}
-            <span style={{ fontSize: 11, color: "var(--text-muted)", marginLeft: "auto" }}>
-              {item.format.toUpperCase()}
-            </span>
+            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{item.format.toUpperCase()}</span>
           </div>
         </div>
-        <div className="tooltip-wrap">
-          <button className="btn-icon" style={{ width: 28, height: 28 }} onClick={() => onRemove(item.id)}>
-            <IconX size={13} />
-          </button>
-          <span className="tooltip-box">Remove</span>
+
+        {/* ── Action buttons ── */}
+        <div style={{ display: "flex", gap: 4, alignItems: "center", flexShrink: 0 }}>
+          {/* Pause — only while downloading */}
+          {isActive && item.status === "downloading" && (
+            <div className="tooltip-wrap">
+              <button className="btn-icon" style={{ width: 28, height: 28 }} onClick={() => onAction(item, "pause")}>
+                <IconPause size={13} />
+              </button>
+              <span className="tooltip-box">Pause</span>
+            </div>
+          )}
+          {/* Resume — only while paused */}
+          {isPaused && (
+            <div className="tooltip-wrap">
+              <button className="btn-icon" style={{ width: 28, height: 28 }} onClick={() => onAction(item, "resume")}>
+                <IconPlay size={13} />
+              </button>
+              <span className="tooltip-box">Resume</span>
+            </div>
+          )}
+          {/* Stop — while active or paused */}
+          {(isActive || isPaused) && (
+            <div className="tooltip-wrap">
+              <button className="btn-icon" style={{ width: 28, height: 28, color: "var(--text-danger)" }} onClick={() => onAction(item, "cancel")}>
+                <IconStop size={13} />
+              </button>
+              <span className="tooltip-box">Stop</span>
+            </div>
+          )}
+          {/* Retry — only when failed/canceled */}
+          {isFailed && item.serverId && (
+            <div className="tooltip-wrap">
+              <button className="btn-icon" style={{ width: 28, height: 28 }} onClick={() => onAction(item, "retry")}>
+                <IconRefresh size={13} />
+              </button>
+              <span className="tooltip-box">Retry</span>
+            </div>
+          )}
+          {/* Reveal in Explorer — always when done; backend falls back to DOWNLOAD_DIR if no file path */}
+          {isDone && (
+            <div className="tooltip-wrap">
+              <button className="btn-icon" style={{ width: 28, height: 28 }} onClick={() => onReveal(item)}>
+                <IconFolder size={13} />
+              </button>
+              <span className="tooltip-box">Reveal in Explorer</span>
+            </div>
+          )}
+          {/* Properties — show inline details */}
+          {(isDone || isFailed) && (
+            <div className="tooltip-wrap">
+              <button className={`btn-icon${showProps ? " active" : ""}`} style={{ width: 28, height: 28 }} onClick={() => setShowProps(v => !v)}>
+                <IconInfo size={13} />
+              </button>
+              <span className="tooltip-box">Properties</span>
+            </div>
+          )}
+          {/* Remove */}
+          <div className="tooltip-wrap">
+            <button className="btn-icon" style={{ width: 28, height: 28 }} onClick={() => onRemove(item.id)}>
+              <IconX size={13} />
+            </button>
+            <span className="tooltip-box">Remove</span>
+          </div>
         </div>
       </div>
 
-      {isActive && (
-        <div style={{ marginTop: 8 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--text-muted)", marginBottom: 4, fontFamily: "var(--font-mono)" }}>
-            <span>{item.percent}%</span>
-            <span>{item.speed}</span>
-          </div>
+      {/* ── Row 2: Progress bar + stats ── */}
+      {(isActive || isPaused) && (
+        <div style={{ marginTop: 10 }}>
+          {/* Progress bar */}
           <div className="progress-bar-bg">
-            <div className="progress-bar-fill" style={{ width: `${item.percent}%` }} />
+            <div className="progress-bar-fill" style={{ width: `${item.percent}%`, opacity: isPaused ? 0.5 : 1 }} />
           </div>
+          {/* Stats row */}
+          <div style={{ display: "flex", alignItems: "center", gap: 0, marginTop: 6 }}>
+            {/* Percent pill */}
+            <span style={{
+              fontSize: 11, fontWeight: 700, color: "var(--text-accent)",
+              background: "var(--accent-light)", padding: "2px 7px", borderRadius: 99, marginRight: 8,
+            }}>
+              {item.percent}%
+            </span>
+            {/* Downloaded / Total */}
+            {item.downloaded && (
+              <span style={{ fontSize: 11, color: "var(--text-secondary)", marginRight: 6 }}>
+                {item.downloaded}{item.total ? ` / ${item.total}` : ""}
+              </span>
+            )}
+            {/* Speed */}
+            {cleanSpeed && (
+              <span style={{
+                fontSize: 11, fontWeight: 600, color: "var(--text-primary)",
+                background: "var(--bg-surface2)", padding: "1px 6px", borderRadius: 5, marginRight: 6,
+              }}>
+                ↓ {cleanSpeed}
+              </span>
+            )}
+            {/* ETA */}
+            {item.eta && item.eta !== "0s" && (
+              <span style={{ fontSize: 11, color: "var(--text-muted)", marginLeft: "auto", display: "flex", alignItems: "center", gap: 3 }}>
+                <IconClock size={11} /> {item.eta}
+              </span>
+            )}
+          </div>
+          {/* File path while downloading */}
+          {item.filePath && (
+            <div style={{ marginTop: 4, fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {item.filePath}
+            </div>
+          )}
         </div>
       )}
 
-      {item.status === "error" && (
+      {/* ── Done: compact summary ── */}
+      {isDone && (
+        <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-success)" }}>
+          <IconCheck size={12} />
+          <span>Download complete</span>
+          {item.total && <span style={{ color: "var(--text-muted)" }}>· {item.total}</span>}
+        </div>
+      )}
+
+      {/* ── Error message ── */}
+      {(item.status === "error" || item.status === "failed") && (
         <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-danger)", display: "flex", alignItems: "center", gap: 5 }}>
           <IconAlert size={13} /> {item.error || "Download failed. Try again."}
+        </div>
+      )}
+
+      {/* ── Properties panel (inline toggle) ── */}
+      {showProps && (
+        <div style={{
+          marginTop: 10, padding: "10px 12px",
+          background: "var(--bg-surface2)", borderRadius: "var(--radius-sm)",
+          fontSize: 11, color: "var(--text-secondary)",
+          display: "flex", flexDirection: "column", gap: 5,
+        }}>
+          {[
+            ["Type",   item.fileType.charAt(0).toUpperCase() + item.fileType.slice(1)],
+            ["Format", item.format.toUpperCase()],
+            ["Status", statusLabels[item.status] ?? item.status],
+            ["Size",   item.total || "—"],
+            ["Path",   item.filePath || "—"],
+            ["URL",    item.url || "—"],
+          ].map(([label, value]) => (
+            <div key={label} style={{ display: "flex", gap: 0 }}>
+              <span style={{ color: "var(--text-muted)", minWidth: 54, flexShrink: 0 }}>{label}</span>
+              <span style={{ wordBreak: "break-all", color: "var(--text-primary)" }}>{value}</span>
+            </div>
+          ))}
         </div>
       )}
     </div>

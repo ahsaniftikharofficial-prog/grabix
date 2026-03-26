@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import yt_dlp, os, uuid, sqlite3, shutil, threading, subprocess, time, json
+import yt_dlp, os, uuid, sqlite3, shutil, threading, subprocess, time, json, re
 from pathlib import Path
 from datetime import datetime
 
@@ -18,6 +18,11 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 downloads: dict = {}
 download_controls: dict = {}
 FFMPEG_PATH = shutil.which("ffmpeg")
+
+
+def _strip_ansi(s: str) -> str:
+    """Remove ANSI terminal color codes from a string."""
+    return re.sub(r"\x1b\[[0-9;]*[mGKH]", "", s or "").strip()
 
 
 def has_ffmpeg() -> bool:
@@ -152,7 +157,7 @@ def home():
 
 @app.get("/check-link")
 def check_link(url: str):
-    opts = {"quiet": True, "noplaylist": True, "skip_download": True}
+    opts = {"quiet": True, "no_warnings": True, "no_color": True, "noplaylist": True, "skip_download": True, "socket_timeout": 8}
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -194,20 +199,32 @@ def _height_to_label(h: int) -> str:
 def _get_formats(info: dict) -> list[str]:
     """
     Return a sorted list of quality label strings, e.g. ["4K","2K","1080p","720p","480p"].
-    Only heights actually present in the video's format list are returned.
+    Only heights from REAL, downloadable video streams are included.
+    Audio-only tracks, storyboards, and streams without a video codec are excluded.
     """
     seen_heights: set[int] = set()
 
     for f in (info.get("formats") or []):
         h = f.get("height")
-        if h and isinstance(h, int) and h > 0:
-            seen_heights.add(h)
+        if not h or not isinstance(h, int) or h <= 0:
+            continue
+        # Skip audio-only streams (vcodec="none" means no video track)
+        if f.get("vcodec", "none") == "none":
+            continue
+        # Skip storyboard / image tracks (fps < 1 or explicitly marked)
+        fps = f.get("fps")
+        if fps is not None and fps < 1:
+            continue
+        # Skip formats with no download URL
+        if not f.get("url") and not f.get("fragment_base_url") and not f.get("fragments"):
+            continue
+        seen_heights.add(h)
 
     if not seen_heights:
-        # Fallback when format list is unavailable (e.g. live streams)
+        # Fallback when format list is unavailable (e.g. live streams, private videos)
         return ["1080p", "720p", "480p", "360p"]
 
-    # Snap each real height to a standard label, keep the tallest representative
+    # Snap each real height to a standard label, keep the tallest representative per label
     label_to_max_height: dict[str, int] = {}
     for h in seen_heights:
         label = _height_to_label(h)
@@ -398,16 +415,21 @@ def get_history():
 
 @app.post("/open-download-folder")
 def open_download_folder(path: str = ""):
+    # If the specific file doesn't exist, fall back to the DOWNLOAD_DIR folder
     target = Path(path) if path else Path(DOWNLOAD_DIR)
+    if not target.exists():
+        target = Path(DOWNLOAD_DIR)
     if not target.exists():
         raise HTTPException(status_code=404, detail="Download folder not found")
 
     try:
         if os.name == "nt":
             if target.is_file():
+                # Highlight the specific file in Explorer
                 subprocess.Popen(["explorer", "/select,", str(target)])
             else:
-                os.startfile(str(target))
+                # Open the folder
+                subprocess.Popen(["explorer", str(target)])
         else:
             raise HTTPException(status_code=501, detail="Open folder is currently implemented for Windows only")
     except OSError as exc:
@@ -480,6 +502,34 @@ def update_settings(data: dict):
 
 
 # ── Download Task ─────────────────────────────────────────────────────────────
+def _resolve_final_file(raw_path: str, download_dir: str) -> str:
+    """
+    After yt-dlp finishes, return the path to the real output file.
+    The progress hook often stores a .part temp filename or a pre-merge filename.
+    """
+    if raw_path:
+        p = Path(raw_path)
+        # .part file: yt-dlp renames it on completion, try without suffix
+        if p.suffix == ".part":
+            candidate = p.with_suffix("")
+            if candidate.exists() and candidate.is_file():
+                return str(candidate)
+        elif p.exists() and p.is_file():
+            return str(p)
+
+    # Fallback: find the most recently modified non-.part file in DOWNLOAD_DIR
+    try:
+        files = [f for f in Path(download_dir).iterdir()
+                 if f.is_file() and f.suffix != ".part"]
+        if files:
+            newest = max(files, key=lambda f: f.stat().st_mtime)
+            return str(newest)
+    except Exception:
+        pass
+
+    return download_dir
+
+
 def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
                    subtitle_lang, thumbnail_format, trim_start, trim_end, trim_enabled, use_cpu=True):
     downloads[dl_id]["status"] = "downloading"
@@ -498,10 +548,10 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
             total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             pct = round((downloaded_bytes / total_bytes) * 100, 1) if total_bytes else 0
             raw_speed = d.get("speed")
-            speed = d.get("_speed_str", "")
+            speed = _strip_ansi(d.get("_speed_str", ""))
             if not speed and raw_speed:
                 speed = f"{_format_bytes(raw_speed)}/s"
-            eta = d.get("_eta_str", "") or _format_eta(d.get("eta"))
+            eta = _strip_ansi(d.get("_eta_str", "")) or _format_eta(d.get("eta"))
             downloads[dl_id].update({
                 "percent": pct,
                 "speed": speed,
@@ -563,7 +613,11 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
 
-        file_path = downloads[dl_id].get("file_path") or DOWNLOAD_DIR
+        # Resolve real output file — progress hook stores temp/partial path,
+        # after merge/postprocessing the final file may have a different name.
+        raw_path = downloads[dl_id].get("file_path", "")
+        file_path = _resolve_final_file(raw_path, DOWNLOAD_DIR)
+        downloads[dl_id]["file_path"] = file_path
         downloads[dl_id]["status"] = "done"
         downloads[dl_id]["percent"] = 100
         db_update_status(dl_id, "done", file_path)
