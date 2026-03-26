@@ -1,35 +1,41 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { ThemeProvider } from "./context/ThemeContext";
 import Sidebar, { type Page } from "./components/Sidebar";
 import DownloaderPage from "./pages/DownloaderPage";
 import LibraryPage from "./pages/LibraryPage";
 import BrowsePage from "./pages/BrowsePage";
-import QueuePage from "./pages/QueuePage";
 import SettingsPage from "./pages/SettingsPage";
-import { type QueueItem } from "./types/queue";
 import "./index.css";
-
-const API = "http://127.0.0.1:8000";
 
 function Inner() {
   const [page, setPage] = useState<Page>("downloader");
   const [backendOk, setBackendOk] = useState(false);
-  const [queue, setQueue] = useState<QueueItem[]>([]);
-  const pollingRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+  const [activeDownloads, setActiveDownloads] = useState(0);
 
   useEffect(() => {
-    fetch(`${API}/`)
-      .then(() => setBackendOk(true))
-      .catch(() => setBackendOk(false));
+    // Check backend health + count active downloads every 2 seconds
+    const check = () => {
+      fetch("http://127.0.0.1:8000/downloads")
+        .then(r => r.json())
+        .then((items: { status: string }[]) => {
+          setBackendOk(true);
+          const count = items.filter(
+            i => i.status === "downloading" || i.status === "queued" || i.status === "processing"
+          ).length;
+          setActiveDownloads(count);
+        })
+        .catch(() => {
+          setBackendOk(false);
+          setActiveDownloads(0);
+        });
+    };
+    check();
+    const id = setInterval(check, 2000);
+    return () => clearInterval(id);
   }, []);
 
-  const activeDownloads = queue.filter(
-    q => q.status === "downloading" || q.status === "queued" || q.status === "processing"
-  ).length;
-
   const PAGES: Record<Page, React.ReactNode> = {
-    downloader: <DownloaderPage queue={queue} setQueue={setQueue} pollingRef={pollingRef} />,
-    queue:      <QueuePage queue={queue} setQueue={setQueue} />,
+    downloader: <DownloaderPage />,
     library:    <LibraryPage />,
     browse:     <BrowsePage />,
     settings:   <SettingsPage />,

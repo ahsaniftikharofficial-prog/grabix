@@ -7,10 +7,17 @@ import {
 
 const API = "http://127.0.0.1:8000";
 
+async function openFolder(path: string = "") {
+  try {
+    await fetch(`${API}/open-download-folder?path=${encodeURIComponent(path)}`, { method: "POST" });
+  } catch { /* backend offline */ }
+}
+
 interface LibItem {
   id: string; title: string; thumbnail: string;
   type: "video" | "audio" | "thumbnail";
   size: string; date: string; duration: string;
+  filePath: string;
 }
 
 function toLibItem(row: Record<string, any>): LibItem {
@@ -20,7 +27,7 @@ function toLibItem(row: Record<string, any>): LibItem {
   const s = Math.floor(secs % 60);
   const duration = m + ":" + s.toString().padStart(2, "0");
   const date = row.created_at ? new Date(row.created_at).toLocaleDateString() : "";
-  return { id: row.id, title: row.title ?? "Unknown", thumbnail: row.thumbnail ?? "", type, size: "", date, duration };
+  return { id: row.id, title: row.title ?? "Unknown", thumbnail: row.thumbnail ?? "", type, size: "", date, duration, filePath: row.file_path ?? "" };
 }
 
 export default function LibraryPage() {
@@ -52,7 +59,7 @@ export default function LibraryPage() {
           <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 1 }}>{loading ? "Loading…" : `${items.length} downloaded files`}</div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn-icon" title="Open downloads folder"><IconFolder size={16} /></button>
+          <button className="btn-icon" title="Open downloads folder" onClick={() => openFolder()}><IconFolder size={16} /></button>
           <button className={`btn-icon${view === "grid" ? " active" : ""}`} onClick={() => setView("grid")} title="Grid view"><IconGrid size={16} /></button>
           <button className={`btn-icon${view === "list" ? " active" : ""}`} onClick={() => setView("list")} title="List view"><IconList size={16} /></button>
         </div>
@@ -112,12 +119,17 @@ function LibListItem({ item }: { item: LibItem }) {
           <span style={{ display: "flex", alignItems: "center", gap: 3 }}><IconClock size={11} />{item.duration}</span>
           <span>{item.size}</span>
           <span>{item.date}</span>
+          {item.filePath && (
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 280, color: "var(--text-muted)" }}>
+              {item.filePath}
+            </span>
+          )}
         </div>
       </div>
       <div style={{ display: "flex", gap: 6 }}>
         <div className="tooltip-wrap">
-          <button className="btn-icon" style={{ width: 28, height: 28 }} title="Open file"><IconFolder size={13} /></button>
-          <span className="tooltip-box">Open file</span>
+          <button className="btn-icon" style={{ width: 28, height: 28 }} title="Open file location" onClick={() => openFolder(item.filePath)}><IconFolder size={13} /></button>
+          <span className="tooltip-box">Open file location</span>
         </div>
         <div className="tooltip-wrap">
           <button className="btn-icon" style={{ width: 28, height: 28, color: "var(--text-danger)" }} title="Delete"><IconTrash size={13} /></button>
