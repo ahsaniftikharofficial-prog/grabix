@@ -1,16 +1,15 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useCallback } from "react";
 import {
   IconSearch, IconPaste, IconLink, IconRefresh,
   IconVideo, IconAudio, IconImage, IconSubtitle,
   IconDownload, IconX, IconCheck, IconAlert,
-  IconPlay, IconPause, IconStop, IconClock, IconScissors,
-  IconFolder, IconInfo,
+  IconPlay, IconClock, IconScissors,
 } from "../components/Icons";
 import TrimSlider from "../components/TrimSlider";
+import { type FileType, type QueueItem } from "../types/queue";
 
 const API = "http://127.0.0.1:8000";
 
-type FileType = "video" | "audio" | "thumbnail" | "subtitle";
 type Status = "idle" | "loading" | "ok" | "error";
 
 interface VideoInfo {
@@ -21,22 +20,10 @@ interface VideoInfo {
   formats: string[];
 }
 
-interface QueueItem {
-  id: string;
-  serverId: string;
-  url: string;
-  title: string;
-  thumbnail: string;
-  format: string;
-  fileType: FileType;
-  status: "queued" | "downloading" | "processing" | "done" | "error" | "paused" | "canceling" | "failed" | "canceled";
-  percent: number;
-  speed: string;
-  eta: string;
-  downloaded: string;
-  total: string;
-  filePath: string;
-  error: string;
+interface Props {
+  queue: QueueItem[];
+  setQueue: React.Dispatch<React.SetStateAction<QueueItem[]>>;
+  pollingRef: React.MutableRefObject<Map<string, ReturnType<typeof setInterval>>>;
 }
 
 const MOCK_INFO: VideoInfo = {
@@ -55,7 +42,7 @@ function secs(s: number) {
 
 function uid() { return Math.random().toString(36).slice(2); }
 
-export default function DownloaderPage() {
+export default function DownloaderPage({ queue, setQueue, pollingRef }: Props) {
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState<Status>("idle");
   const [info, setInfo] = useState<VideoInfo | null>(null);
@@ -66,8 +53,6 @@ export default function DownloaderPage() {
   const [trimEnd, setTrimEnd] = useState(0);
   const [trimOpen, setTrimOpen] = useState(false);
   const [useCpu, setUseCpu] = useState(false);
-  const [queue, setQueue] = useState<QueueItem[]>([]);
-  const pollingRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
 
   const fetchInfo = useCallback(async (inputUrl: string) => {
     if (!inputUrl.trim()) return;
@@ -102,7 +87,6 @@ export default function DownloaderPage() {
     }
   }, []);
 
-  // Auto-fetch on paste
   const handlePaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
     const text = e.clipboardData.getData("text");
     setUrl(text);
@@ -123,7 +107,7 @@ export default function DownloaderPage() {
     const newItem: QueueItem = {
       id: taskId,
       serverId: "",
-      url: url,
+      url,
       title: info.title,
       thumbnail: info.thumbnail,
       format: fileType === "video" ? quality : fileType,
@@ -140,15 +124,16 @@ export default function DownloaderPage() {
     setQueue(prev => [newItem, ...prev]);
 
     try {
-      const trimEnabled = trimOpen && trimEnd - trimStart < info!.duration;
-      const res = await fetch(`${API}/download?url=${encodeURIComponent(url)}&dl_type=${fileType}&quality=${quality}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}`);
+      const trimEnabled = trimOpen && trimEnd - trimStart < info.duration;
+      const res = await fetch(
+        `${API}/download?url=${encodeURIComponent(url)}&dl_type=${fileType}&quality=${quality}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}`
+      );
       const data = await res.json();
       const serverTaskId = data.task_id ?? taskId;
 
-      // Store serverId in queue item so action buttons can use it
       setQueue(prev => prev.map(q => q.id === taskId ? { ...q, serverId: serverTaskId } : q));
 
-      // Poll progress
+      // Poll progress — interval stored in shared pollingRef so it survives page switches
       const interval = setInterval(async () => {
         try {
           const pr = await fetch(`${API}/download-status/${serverTaskId}`);
@@ -189,33 +174,15 @@ export default function DownloaderPage() {
     }
   };
 
-  const removeFromQueue = (id: string) => {
-    const interval = pollingRef.current.get(id);
-    if (interval) { clearInterval(interval); pollingRef.current.delete(id); }
-    setQueue(prev => prev.filter(q => q.id !== id));
-  };
-
-  const activeCount = queue.filter(q => q.status === "downloading" || q.status === "queued" || q.status === "processing").length;
-
-  const doAction = async (item: QueueItem, action: string) => {
-    if (!item.serverId) return;
-    try {
-      await fetch(`${API}/downloads/${item.serverId}/action?action=${action}`, { method: "POST" });
-    } catch { /* backend offline */ }
-  };
-
-  const doReveal = async (item: QueueItem) => {
-    if (!item.filePath) return;
-    try {
-      await fetch(`${API}/open-download-folder?path=${encodeURIComponent(item.filePath)}`, { method: "POST" });
-    } catch { /* offline */ }
-  };
+  const activeCount = queue.filter(
+    q => q.status === "downloading" || q.status === "queued" || q.status === "processing"
+  ).length;
 
   const FILE_TYPES: { id: FileType; label: string; Icon: React.FC<any> }[] = [
-    { id: "video",    label: "Video",     Icon: IconVideo },
-    { id: "audio",    label: "Audio",     Icon: IconAudio },
-    { id: "thumbnail",label: "Thumbnail", Icon: IconImage },
-    { id: "subtitle", label: "Subtitle",  Icon: IconSubtitle },
+    { id: "video",     label: "Video",     Icon: IconVideo },
+    { id: "audio",     label: "Audio",     Icon: IconAudio },
+    { id: "thumbnail", label: "Thumbnail", Icon: IconImage },
+    { id: "subtitle",  label: "Subtitle",  Icon: IconSubtitle },
   ];
 
   return (
@@ -244,11 +211,6 @@ export default function DownloaderPage() {
               {activeCount} downloading
             </span>
           )}
-          {queue.length > 0 && (
-            <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => setQueue([])}>
-              Clear all
-            </button>
-          )}
         </div>
       </div>
 
@@ -261,7 +223,6 @@ export default function DownloaderPage() {
             Video URL
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            {/* Input */}
             <div style={{ position: "relative", flex: 1 }}>
               <div style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }}>
                 <IconLink size={15} color="var(--text-muted)" />
@@ -284,14 +245,12 @@ export default function DownloaderPage() {
                 </button>
               )}
             </div>
-            {/* Paste */}
             <div className="tooltip-wrap">
               <button className="btn-icon" onClick={handlePasteBtn} title="Paste from clipboard">
                 <IconPaste size={15} />
               </button>
               <span className="tooltip-box">Paste from clipboard</span>
             </div>
-            {/* Fetch */}
             <button
               className="btn btn-primary"
               onClick={() => fetchInfo(url)}
@@ -304,7 +263,6 @@ export default function DownloaderPage() {
             </button>
           </div>
 
-          {/* Error */}
           {status === "error" && (
             <div className="fade-in" style={{
               marginTop: 10, padding: "10px 14px", borderRadius: "var(--radius-sm)",
@@ -322,7 +280,6 @@ export default function DownloaderPage() {
         {status === "ok" && info && (
           <div className="card card-padded fade-in">
             <div style={{ display: "flex", gap: 14, marginBottom: 16 }}>
-              {/* Thumbnail */}
               <div style={{ position: "relative", flexShrink: 0 }}>
                 <img
                   src={info.thumbnail}
@@ -341,7 +298,6 @@ export default function DownloaderPage() {
                 </div>
               </div>
 
-              {/* Meta */}
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 600, lineHeight: 1.4, marginBottom: 4 }}>{info.title}</div>
                 <div style={{ fontSize: 12, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
@@ -349,7 +305,6 @@ export default function DownloaderPage() {
                   {secs(info.duration)}
                   {info.uploader && <> · {info.uploader}</>}
                 </div>
-                {/* Source badge */}
                 <div style={{
                   display: "inline-flex", alignItems: "center", gap: 5,
                   background: "var(--accent-light)", color: "var(--text-accent)",
@@ -402,10 +357,9 @@ export default function DownloaderPage() {
               </div>
             )}
 
-            {/* ── TRIM TOGGLE + PANEL (Video only) ── */}
+            {/* ── TRIM (Video only) ── */}
             {fileType === "video" && (
               <div className="fade-in" style={{ marginBottom: 14 }}>
-                {/* Toggle button row */}
                 <button
                   className={`btn btn-ghost${trimOpen ? " active" : ""}`}
                   style={{ fontSize: 12, gap: 6 }}
@@ -420,7 +374,6 @@ export default function DownloaderPage() {
                   )}
                 </button>
 
-                {/* Collapsible trim panel */}
                 {trimOpen && (
                   <TrimSlider
                     duration={info.duration}
@@ -434,16 +387,18 @@ export default function DownloaderPage() {
 
             {/* ── DOWNLOAD BUTTON ROW ── */}
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <button className="btn btn-primary" style={{ height: 40, paddingLeft: 20, paddingRight: 20, fontSize: 14 }} onClick={startDownload}>
+              <button
+                className="btn btn-primary"
+                style={{ height: 40, paddingLeft: 20, paddingRight: 20, fontSize: 14 }}
+                onClick={startDownload}
+              >
                 <IconDownload size={15} />
                 Download {fileType === "video" ? quality : fileType}
                 {fileType === "video" && trimOpen && trimEnd - trimStart < info.duration && ` (${secs(trimEnd - trimStart)})`}
               </button>
 
-              {/* CPU mode buttons — only relevant when trim is active */}
               {fileType === "video" && trimOpen && (
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  {/* No CPU button */}
                   <div className="tooltip-wrap">
                     <button
                       className={`quality-chip${!useCpu ? " active" : ""}`}
@@ -456,7 +411,6 @@ export default function DownloaderPage() {
                       ✅ Recommended. Instant, no re-encode. Trim snaps to nearest keyframe (±2s). No FFmpeg needed.
                     </span>
                   </div>
-                  {/* With CPU button */}
                   <div className="tooltip-wrap">
                     <button
                       className={`quality-chip${useCpu ? " active" : ""}`}
@@ -482,20 +436,8 @@ export default function DownloaderPage() {
           </div>
         )}
 
-        {/* ── DOWNLOAD QUEUE ── */}
-        {queue.length > 0 && (
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 8 }}>
-              Queue ({queue.length})
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {queue.map((item) => <QueueCard key={item.id} item={item} onRemove={removeFromQueue} onAction={doAction} onReveal={doReveal} />)}
-            </div>
-          </div>
-        )}
-
         {/* ── EMPTY STATE ── */}
-        {status === "idle" && queue.length === 0 && (
+        {status === "idle" && (
           <div className="empty-state">
             <IconLink size={40} color="var(--text-muted)" />
             <p>Paste a video link to get started</p>
@@ -503,207 +445,6 @@ export default function DownloaderPage() {
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-function QueueCard({
-  item, onRemove, onAction, onReveal,
-}: {
-  item: QueueItem;
-  onRemove: (id: string) => void;
-  onAction: (item: QueueItem, action: string) => void;
-  onReveal: (item: QueueItem) => void;
-}) {
-  const [showProps, setShowProps] = useState(false);
-
-  const isActive   = item.status === "downloading" || item.status === "queued" || item.status === "processing";
-  const isPaused   = item.status === "paused";
-  const isDone     = item.status === "done";
-  const isFailed   = item.status === "failed" || item.status === "error" || item.status === "canceled";
-
-  const statusColors: Record<string, string> = {
-    done: "var(--success)", failed: "var(--danger)", error: "var(--danger)", canceled: "var(--text-muted)",
-    downloading: "var(--accent)", processing: "var(--warning)", queued: "var(--text-muted)", paused: "var(--warning)",
-    canceling: "var(--text-muted)",
-  };
-  const statusLabels: Record<string, string> = {
-    done: "Done", failed: "Failed", error: "Failed", canceled: "Canceled",
-    downloading: "Downloading", processing: "Processing…", queued: "Queued", paused: "Paused",
-    canceling: "Canceling…",
-  };
-
-  // Clean up raw speed string: strip ANSI codes and extra whitespace
-  const cleanSpeed = item.speed.replace(/\x1b\[[0-9;]*m/g, "").replace(/\u001b\[[0-9;]*m/g, "").trim();
-
-  return (
-    <div className="card fade-in" style={{ padding: "12px 14px" }}>
-      {/* ── Row 1: thumbnail + title + action buttons ── */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <img src={item.thumbnail} alt="" style={{ width: 48, height: 32, objectFit: "cover", borderRadius: 5, flexShrink: 0, border: "1px solid var(--border)" }} />
-
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.title}</div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 2 }}>
-            <span style={{ fontSize: 11, color: statusColors[item.status] ?? "var(--text-muted)", fontWeight: 600 }}>
-              {statusLabels[item.status] ?? item.status}
-            </span>
-            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{item.format.toUpperCase()}</span>
-          </div>
-        </div>
-
-        {/* ── Action buttons ── */}
-        <div style={{ display: "flex", gap: 4, alignItems: "center", flexShrink: 0 }}>
-          {/* Pause — only while downloading */}
-          {isActive && item.status === "downloading" && (
-            <div className="tooltip-wrap">
-              <button className="btn-icon" style={{ width: 28, height: 28 }} onClick={() => onAction(item, "pause")}>
-                <IconPause size={13} />
-              </button>
-              <span className="tooltip-box">Pause</span>
-            </div>
-          )}
-          {/* Resume — only while paused */}
-          {isPaused && (
-            <div className="tooltip-wrap">
-              <button className="btn-icon" style={{ width: 28, height: 28 }} onClick={() => onAction(item, "resume")}>
-                <IconPlay size={13} />
-              </button>
-              <span className="tooltip-box">Resume</span>
-            </div>
-          )}
-          {/* Stop — while active or paused */}
-          {(isActive || isPaused) && (
-            <div className="tooltip-wrap">
-              <button className="btn-icon" style={{ width: 28, height: 28, color: "var(--text-danger)" }} onClick={() => onAction(item, "cancel")}>
-                <IconStop size={13} />
-              </button>
-              <span className="tooltip-box">Stop</span>
-            </div>
-          )}
-          {/* Retry — only when failed/canceled */}
-          {isFailed && item.serverId && (
-            <div className="tooltip-wrap">
-              <button className="btn-icon" style={{ width: 28, height: 28 }} onClick={() => onAction(item, "retry")}>
-                <IconRefresh size={13} />
-              </button>
-              <span className="tooltip-box">Retry</span>
-            </div>
-          )}
-          {/* Reveal in Explorer — always when done; backend falls back to DOWNLOAD_DIR if no file path */}
-          {isDone && (
-            <div className="tooltip-wrap">
-              <button className="btn-icon" style={{ width: 28, height: 28 }} onClick={() => onReveal(item)}>
-                <IconFolder size={13} />
-              </button>
-              <span className="tooltip-box">Reveal in Explorer</span>
-            </div>
-          )}
-          {/* Properties — show inline details */}
-          {(isDone || isFailed) && (
-            <div className="tooltip-wrap">
-              <button className={`btn-icon${showProps ? " active" : ""}`} style={{ width: 28, height: 28 }} onClick={() => setShowProps(v => !v)}>
-                <IconInfo size={13} />
-              </button>
-              <span className="tooltip-box">Properties</span>
-            </div>
-          )}
-          {/* Remove */}
-          <div className="tooltip-wrap">
-            <button className="btn-icon" style={{ width: 28, height: 28 }} onClick={() => onRemove(item.id)}>
-              <IconX size={13} />
-            </button>
-            <span className="tooltip-box">Remove</span>
-          </div>
-        </div>
-      </div>
-
-      {/* ── Row 2: Progress bar + stats ── */}
-      {(isActive || isPaused) && (
-        <div style={{ marginTop: 10 }}>
-          {/* Progress bar */}
-          <div className="progress-bar-bg">
-            <div className="progress-bar-fill" style={{ width: `${item.percent}%`, opacity: isPaused ? 0.5 : 1 }} />
-          </div>
-          {/* Stats row */}
-          <div style={{ display: "flex", alignItems: "center", gap: 0, marginTop: 6 }}>
-            {/* Percent pill */}
-            <span style={{
-              fontSize: 11, fontWeight: 700, color: "var(--text-accent)",
-              background: "var(--accent-light)", padding: "2px 7px", borderRadius: 99, marginRight: 8,
-            }}>
-              {item.percent}%
-            </span>
-            {/* Downloaded / Total */}
-            {item.downloaded && (
-              <span style={{ fontSize: 11, color: "var(--text-secondary)", marginRight: 6 }}>
-                {item.downloaded}{item.total ? ` / ${item.total}` : ""}
-              </span>
-            )}
-            {/* Speed */}
-            {cleanSpeed && (
-              <span style={{
-                fontSize: 11, fontWeight: 600, color: "var(--text-primary)",
-                background: "var(--bg-surface2)", padding: "1px 6px", borderRadius: 5, marginRight: 6,
-              }}>
-                ↓ {cleanSpeed}
-              </span>
-            )}
-            {/* ETA */}
-            {item.eta && item.eta !== "0s" && (
-              <span style={{ fontSize: 11, color: "var(--text-muted)", marginLeft: "auto", display: "flex", alignItems: "center", gap: 3 }}>
-                <IconClock size={11} /> {item.eta}
-              </span>
-            )}
-          </div>
-          {/* File path while downloading */}
-          {item.filePath && (
-            <div style={{ marginTop: 4, fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {item.filePath}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── Done: compact summary ── */}
-      {isDone && (
-        <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-success)" }}>
-          <IconCheck size={12} />
-          <span>Download complete</span>
-          {item.total && <span style={{ color: "var(--text-muted)" }}>· {item.total}</span>}
-        </div>
-      )}
-
-      {/* ── Error message ── */}
-      {(item.status === "error" || item.status === "failed") && (
-        <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-danger)", display: "flex", alignItems: "center", gap: 5 }}>
-          <IconAlert size={13} /> {item.error || "Download failed. Try again."}
-        </div>
-      )}
-
-      {/* ── Properties panel (inline toggle) ── */}
-      {showProps && (
-        <div style={{
-          marginTop: 10, padding: "10px 12px",
-          background: "var(--bg-surface2)", borderRadius: "var(--radius-sm)",
-          fontSize: 11, color: "var(--text-secondary)",
-          display: "flex", flexDirection: "column", gap: 5,
-        }}>
-          {[
-            ["Type",   item.fileType.charAt(0).toUpperCase() + item.fileType.slice(1)],
-            ["Format", item.format.toUpperCase()],
-            ["Status", statusLabels[item.status] ?? item.status],
-            ["Size",   item.total || "—"],
-            ["Path",   item.filePath || "—"],
-            ["URL",    item.url || "—"],
-          ].map(([label, value]) => (
-            <div key={label} style={{ display: "flex", gap: 0 }}>
-              <span style={{ color: "var(--text-muted)", minWidth: 54, flexShrink: 0 }}>{label}</span>
-              <span style={{ wordBreak: "break-all", color: "var(--text-primary)" }}>{value}</span>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

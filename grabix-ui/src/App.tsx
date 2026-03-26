@@ -1,25 +1,35 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { ThemeProvider } from "./context/ThemeContext";
 import Sidebar, { type Page } from "./components/Sidebar";
 import DownloaderPage from "./pages/DownloaderPage";
 import LibraryPage from "./pages/LibraryPage";
 import BrowsePage from "./pages/BrowsePage";
+import QueuePage from "./pages/QueuePage";
 import SettingsPage from "./pages/SettingsPage";
+import { type QueueItem } from "./types/queue";
 import "./index.css";
+
+const API = "http://127.0.0.1:8000";
 
 function Inner() {
   const [page, setPage] = useState<Page>("downloader");
   const [backendOk, setBackendOk] = useState(false);
-  const [activeDownloads] = useState(0);
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const pollingRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
 
   useEffect(() => {
-    fetch("http://127.0.0.1:8000/")
+    fetch(`${API}/`)
       .then(() => setBackendOk(true))
       .catch(() => setBackendOk(false));
   }, []);
 
+  const activeDownloads = queue.filter(
+    q => q.status === "downloading" || q.status === "queued" || q.status === "processing"
+  ).length;
+
   const PAGES: Record<Page, React.ReactNode> = {
-    downloader: <DownloaderPage />,
+    downloader: <DownloaderPage queue={queue} setQueue={setQueue} pollingRef={pollingRef} />,
+    queue:      <QueuePage queue={queue} setQueue={setQueue} />,
     library:    <LibraryPage />,
     browse:     <BrowsePage />,
     settings:   <SettingsPage />,
