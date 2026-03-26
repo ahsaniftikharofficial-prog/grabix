@@ -1,117 +1,90 @@
-import { useState } from "react";
+import { useTheme } from "../context/ThemeContext";
+import {
+  IconDownload, IconLibrary, IconSettings, IconBrowse,
+  IconSun, IconMoon,
+} from "./Icons";
 
-type Page = "home" | "downloader" | "queue" | "library" | "anime" | "movies" | "settings";
+export type Page = "downloader" | "library" | "browse" | "settings";
 
 interface Props {
-  active: Page;
-  onNav: (page: Page) => void;
+  page: Page;
+  setPage: (p: Page) => void;
+  activeDownloads: number;
+  backendOk: boolean;
 }
 
-const navItems: { id: Page; icon: string; label: string }[] = [
-  { id: "home",       icon: "⌂",  label: "Home" },
-  { id: "downloader", icon: "↓",  label: "Downloader" },
-  { id: "queue",      icon: "≡",  label: "Queue" },
-  { id: "library",    icon: "▣",  label: "Library" },
-  { id: "anime",      icon: "⛩",  label: "Anime & Manga" },
-  { id: "movies",     icon: "▶",  label: "Movies" },
+const NAV: { id: Page; label: string; Icon: React.FC<any> }[] = [
+  { id: "downloader", label: "Downloader", Icon: IconDownload },
+  { id: "library",    label: "Library",    Icon: IconLibrary },
+  { id: "browse",     label: "Browse",     Icon: IconBrowse },
+  { id: "settings",   label: "Settings",   Icon: IconSettings },
 ];
 
-export default function Sidebar({ active, onNav }: Props) {
-  const [open, setOpen] = useState(false);
-
-  const itemBase = `
-    flex items-center gap-3 w-full px-3.5 py-2.5 text-left
-    border-l-2 transition-all duration-150 cursor-pointer
-    text-sm whitespace-nowrap overflow-hidden
-  `;
+export default function Sidebar({ page, setPage, activeDownloads, backendOk }: Props) {
+  const { theme, toggle } = useTheme();
 
   return (
-    <aside
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-      style={{
-        width: open ? "220px" : "56px",
-        transition: "width 0.22s cubic-bezier(0.4,0,0.2,1)",
-        background: "var(--surface)",
-        borderRight: "1px solid var(--border)",
-        flexShrink: 0,
-        display: "flex",
-        flexDirection: "column",
-        zIndex: 20,
-      }}
-    >
+    <aside style={{
+      width: "var(--sidebar-w)",
+      background: "var(--bg-sidebar)",
+      borderRight: "1px solid var(--border)",
+      display: "flex",
+      flexDirection: "column",
+      flexShrink: 0,
+      height: "100vh",
+    }}>
       {/* Logo */}
-      <div
-        style={{ borderBottom: "1px solid var(--border)" }}
-        className="flex items-center gap-2.5 px-3.5 h-14 overflow-hidden"
-      >
-        <div
-          style={{ background: "var(--accent)", flexShrink: 0 }}
-          className="w-7 h-7 rounded-lg flex items-center justify-center text-white font-bold text-sm"
-        >
-          G
+      <div style={{ padding: "18px 16px 14px", borderBottom: "1px solid var(--border)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{
+            width: 30, height: 30, borderRadius: 8,
+            background: "var(--accent)", display: "flex",
+            alignItems: "center", justifyContent: "center",
+          }}>
+            <IconDownload size={15} color="white" />
+          </div>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: 1, color: "var(--text-primary)" }}>GRABIX</div>
+            <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 0 }}>media downloader</div>
+          </div>
         </div>
-        <span
-          style={{
-            fontWeight: 800,
-            letterSpacing: "0.06em",
-            color: "var(--text)",
-            opacity: open ? 1 : 0,
-            transition: "opacity 0.15s",
-            fontSize: "15px",
-          }}
-        >
-          GRABIX
-        </span>
       </div>
 
-      {/* Nav items */}
-      <nav className="flex-1 py-2">
-        {navItems.map(({ id, icon, label }) => {
-          const isActive = active === id;
-          return (
-            <button
-              key={id}
-              onClick={() => onNav(id)}
-              className={itemBase}
-              style={{
-                borderLeftColor: isActive ? "var(--accent)" : "transparent",
-                background: isActive ? "var(--accent-bg)" : "transparent",
-                color: isActive ? "var(--accent)" : "var(--text2)",
-              }}
-            >
-              <span style={{ fontSize: "16px", flexShrink: 0, width: "20px", textAlign: "center" }}>
-                {icon}
-              </span>
-              <span
-                style={{
-                  opacity: open ? 1 : 0,
-                  transition: "opacity 0.12s",
-                  fontWeight: isActive ? 500 : 400,
-                  color: isActive ? "var(--accent)" : "var(--text2)",
-                }}
-              >
-                {label}
-              </span>
-            </button>
-          );
-        })}
+      {/* Nav */}
+      <nav style={{ padding: "10px 8px", flex: 1 }}>
+        <div style={{ fontSize: 10, fontWeight: 600, color: "var(--text-muted)", letterSpacing: 1, padding: "4px 12px 8px", textTransform: "uppercase" }}>
+          Menu
+        </div>
+        {NAV.map(({ id, label, Icon }) => (
+          <div
+            key={id}
+            className={`nav-item${page === id ? " active" : ""}`}
+            onClick={() => setPage(id)}
+          >
+            <Icon size={16} />
+            {label}
+            {id === "downloader" && activeDownloads > 0 && (
+              <span className="nav-badge">{activeDownloads}</span>
+            )}
+          </div>
+        ))}
       </nav>
 
-      {/* Settings at bottom */}
-      <div style={{ borderTop: "1px solid var(--border)" }} className="py-2">
-        <button
-          onClick={() => onNav("settings")}
-          className={itemBase}
-          style={{
-            borderLeftColor: active === "settings" ? "var(--accent)" : "transparent",
-            background: active === "settings" ? "var(--accent-bg)" : "transparent",
-            color: active === "settings" ? "var(--accent)" : "var(--text2)",
-          }}
-        >
-          <span style={{ fontSize: "16px", flexShrink: 0, width: "20px", textAlign: "center" }}>⚙</span>
-          <span style={{ opacity: open ? 1 : 0, transition: "opacity 0.12s" }}>Settings</span>
-        </button>
+      {/* Bottom */}
+      <div style={{ padding: "10px 8px", borderTop: "1px solid var(--border)" }}>
+        {/* Backend status */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", marginBottom: 4 }}>
+          <span className={`status-dot ${backendOk ? "online" : "offline"}`} />
+          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+            {backendOk ? "Backend connected" : "Backend offline"}
+          </span>
+        </div>
+
+        {/* Theme toggle */}
+        <div className="nav-item" onClick={toggle} style={{ gap: 10 }}>
+          {theme === "dark" ? <IconSun size={16} /> : <IconMoon size={16} />}
+          {theme === "dark" ? "Light mode" : "Dark mode"}
+        </div>
       </div>
     </aside>
   );
