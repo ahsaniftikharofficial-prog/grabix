@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useState } from "react";
 
 type Page = "home" | "downloader" | "queue" | "library" | "anime" | "movies" | "settings";
 

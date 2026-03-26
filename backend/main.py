@@ -1,6 +1,6 @@
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import yt_dlp, os, uuid, sqlite3
+import yt_dlp, os, uuid, sqlite3, shutil, threading, subprocess, time
 from pathlib import Path
 from datetime import datetime
 
@@ -13,6 +13,39 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # In-memory progress store
 downloads: dict = {}
+download_controls: dict = {}
+FFMPEG_PATH = shutil.which("ffmpeg")
+
+
+def has_ffmpeg() -> bool:
+    return FFMPEG_PATH is not None
+
+
+def _format_bytes(num: float | int | None) -> str:
+    if not num:
+        return ""
+    value = float(num)
+    units = ["B", "KB", "MB", "GB", "TB"]
+    idx = 0
+    while value >= 1024 and idx < len(units) - 1:
+        value /= 1024
+        idx += 1
+    if idx == 0:
+        return f"{int(value)} {units[idx]}"
+    return f"{value:.1f} {units[idx]}"
+
+
+def _format_eta(seconds: float | int | None) -> str:
+    if seconds is None:
+        return ""
+    safe = max(0, int(seconds))
+    mins, secs = divmod(safe, 60)
+    hours, mins = divmod(mins, 60)
+    if hours:
+        return f"{hours}h {mins}m"
+    if mins:
+        return f"{mins}m {secs}s"
+    return f"{secs}s"
 
 # ── DB Setup ──────────────────────────────────────────────────────────────────
 def init_db():
@@ -80,6 +113,85 @@ def _get_formats(info: dict) -> list:
             result.append({"height": h, "label": f"{h}p"})
     return sorted(result, key=lambda x: -x["height"])
 
+
+def _build_video_format_selector(quality: str) -> str:
+    if quality == "best":
+        if has_ffmpeg():
+            return "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+        return "best[ext=mp4]/best"
+
+    h = quality.replace("p", "")
+    if has_ffmpeg():
+        return f"bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]/best[height<={h}][ext=mp4]/best[height<={h}]"
+    return f"best[height<={h}][ext=mp4]/best[height<={h}]/best"
+
+
+def _create_download_record(dl_id: str, title: str = "", params: dict | None = None) -> dict:
+    downloads[dl_id] = {
+        "id": dl_id,
+        "status": "queued",
+        "percent": 0,
+        "speed": "",
+        "eta": "",
+        "downloaded": "",
+        "total": "",
+        "size": "",
+        "title": title,
+        "error": "",
+        "file_path": "",
+        "folder": DOWNLOAD_DIR,
+        "created_at": datetime.now().isoformat(),
+        "params": params or {},
+    }
+    download_controls[dl_id] = {
+        "pause": threading.Event(),
+        "cancel": threading.Event(),
+        "thread": None,
+    }
+    return downloads[dl_id]
+
+
+def _public_download(d: dict) -> dict:
+    return {
+        "id": d.get("id"),
+        "status": d.get("status"),
+        "percent": d.get("percent", 0),
+        "speed": d.get("speed", ""),
+        "eta": d.get("eta", ""),
+        "downloaded": d.get("downloaded", ""),
+        "total": d.get("total", ""),
+        "size": d.get("size", ""),
+        "title": d.get("title", ""),
+        "error": d.get("error", ""),
+        "file_path": d.get("file_path", ""),
+        "folder": d.get("folder", DOWNLOAD_DIR),
+        "created_at": d.get("created_at", ""),
+        "dl_type": (d.get("params") or {}).get("dl_type", ""),
+    }
+
+
+def _start_download_thread(dl_id: str):
+    params = downloads[dl_id]["params"]
+    worker = threading.Thread(
+        target=_download_task,
+        args=(
+            dl_id,
+            params["url"],
+            params["dl_type"],
+            params["quality"],
+            params["audio_format"],
+            params["audio_quality"],
+            params["subtitle_lang"],
+            params["thumbnail_format"],
+            params["trim_start"],
+            params["trim_end"],
+            params["trim_enabled"],
+        ),
+        daemon=True,
+    )
+    download_controls[dl_id]["thread"] = worker
+    worker.start()
+
 @app.post("/download")
 def start_download(
     url: str,
@@ -92,10 +204,21 @@ def start_download(
     trim_start: float = 0,
     trim_end: float = 0,
     trim_enabled: bool = False,
-    background_tasks: BackgroundTasks = None,
 ):
     dl_id = str(uuid.uuid4())
-    downloads[dl_id] = {"status": "queued", "percent": 0, "speed": "", "eta": "", "title": ""}
+    params = {
+        "url": url,
+        "dl_type": dl_type,
+        "quality": quality,
+        "audio_format": audio_format,
+        "audio_quality": audio_quality,
+        "subtitle_lang": subtitle_lang,
+        "thumbnail_format": thumbnail_format,
+        "trim_start": trim_start,
+        "trim_end": trim_end,
+        "trim_enabled": trim_enabled,
+    }
+    _create_download_record(dl_id, params=params)
 
     # Quick metadata fetch for DB
     try:
@@ -116,16 +239,19 @@ def start_download(
     except:
         pass
 
-    background_tasks.add_task(
-        _download_task, dl_id, url, dl_type, quality,
-        audio_format, audio_quality, subtitle_lang,
-        thumbnail_format, trim_start, trim_end, trim_enabled
-    )
+    _start_download_thread(dl_id)
     return {"id": dl_id, "folder": DOWNLOAD_DIR}
 
 @app.get("/download-status/{dl_id}")
 def download_status(dl_id: str):
-    return downloads.get(dl_id, {"status": "not_found"})
+    item = downloads.get(dl_id)
+    return _public_download(item) if item else {"status": "not_found"}
+
+
+@app.get("/downloads")
+def list_downloads():
+    ordered = sorted(downloads.values(), key=lambda item: item.get("created_at", ""), reverse=True)
+    return [_public_download(item) for item in ordered]
 
 @app.get("/history")
 def get_history():
@@ -135,35 +261,133 @@ def get_history():
     keys = ["id","url","title","thumbnail","channel","duration","dl_type","file_path","status","created_at"]
     return [dict(zip(keys, r)) for r in rows]
 
+
+@app.post("/open-download-folder")
+def open_download_folder(path: str = ""):
+    target = Path(path) if path else Path(DOWNLOAD_DIR)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Download folder not found")
+
+    try:
+        if os.name == "nt":
+            if target.is_file():
+                subprocess.Popen(["explorer", "/select,", str(target)])
+            else:
+                os.startfile(str(target))
+        else:
+            raise HTTPException(status_code=501, detail="Open folder is currently implemented for Windows only")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"opened": str(target)}
+
+
+@app.post("/downloads/{dl_id}/action")
+def download_action(dl_id: str, action: str):
+    if dl_id not in downloads:
+        raise HTTPException(status_code=404, detail="Download not found")
+
+    item = downloads[dl_id]
+    controls = download_controls.get(dl_id)
+    if controls is None:
+        raise HTTPException(status_code=404, detail="Download controls not found")
+
+    if action == "pause":
+        controls["pause"].set()
+        if item["status"] == "downloading":
+            item["status"] = "paused"
+            db_update_status(dl_id, "paused", item.get("file_path", ""))
+    elif action == "resume":
+        controls["pause"].clear()
+        if item["status"] == "paused":
+            item["status"] = "downloading"
+            db_update_status(dl_id, "downloading", item.get("file_path", ""))
+    elif action == "cancel":
+        controls["cancel"].set()
+        item["status"] = "canceling"
+    elif action == "retry":
+        if item["status"] not in {"failed", "canceled"}:
+            raise HTTPException(status_code=400, detail="Only failed or canceled downloads can be retried")
+        controls["pause"].clear()
+        controls["cancel"].clear()
+        item.update({
+            "status": "queued",
+            "percent": 0,
+            "speed": "",
+            "eta": "",
+            "downloaded": "",
+            "total": "",
+            "size": "",
+            "error": "",
+            "file_path": "",
+        })
+        db_update_status(dl_id, "queued")
+        _start_download_thread(dl_id)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported action")
+
+    return _public_download(item)
+
+
+@app.post("/downloads/stop-all")
+def stop_all_downloads():
+    for dl_id, item in downloads.items():
+        if item["status"] in {"queued", "downloading", "paused", "canceling"}:
+            controls = download_controls.get(dl_id)
+            if controls:
+                controls["cancel"].set()
+            item["status"] = "canceling"
+    return {"status": "stopping"}
+
 # ── Download Task ─────────────────────────────────────────────────────────────
 def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
                    subtitle_lang, thumbnail_format, trim_start, trim_end, trim_enabled):
     downloads[dl_id]["status"] = "downloading"
+    downloads[dl_id]["error"] = ""
+    controls = download_controls[dl_id]
 
     def progress_hook(d):
+        while controls["pause"].is_set() and not controls["cancel"].is_set():
+            time.sleep(0.2)
+
+        if controls["cancel"].is_set():
+            raise RuntimeError("Download canceled")
+
         if d["status"] == "downloading":
-            raw = d.get("_percent_str", "0%").strip().replace("%","")
-            try: pct = float(raw)
-            except: pct = 0
+            downloaded_bytes = d.get("downloaded_bytes") or 0
+            total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            pct = round((downloaded_bytes / total_bytes) * 100, 1) if total_bytes else 0
+            raw_speed = d.get("speed")
+            speed = d.get("_speed_str", "")
+            if not speed and raw_speed:
+                speed = f"{_format_bytes(raw_speed)}/s"
+            eta = d.get("_eta_str", "") or _format_eta(d.get("eta"))
             downloads[dl_id].update({
-                "percent": round(pct, 1),
-                "speed": d.get("_speed_str", ""),
-                "eta": d.get("_eta_str", ""),
+                "percent": pct,
+                "speed": speed,
+                "eta": eta,
+                "downloaded": _format_bytes(downloaded_bytes),
+                "total": _format_bytes(total_bytes),
+                "size": _format_bytes(total_bytes or downloaded_bytes),
+                "file_path": d.get("filename", downloads[dl_id].get("file_path", "")),
             })
         elif d["status"] == "finished":
             downloads[dl_id]["percent"] = 100
+            downloads[dl_id]["eta"] = "0s"
+            downloads[dl_id]["speed"] = ""
+            downloads[dl_id]["downloaded"] = downloads[dl_id].get("total") or downloads[dl_id].get("downloaded", "")
+            downloads[dl_id]["size"] = downloads[dl_id].get("total") or downloads[dl_id].get("size", "")
+            downloads[dl_id]["file_path"] = d.get("filename", downloads[dl_id].get("file_path", ""))
 
     template = f"{DOWNLOAD_DIR}/%(title)s.%(ext)s"
-    opts: dict = {"outtmpl": template, "noplaylist": True, "progress_hooks": [progress_hook]}
+    opts: dict = {"outtmpl": template, "noplaylist": True, "progress_hooks": [progress_hook], "continuedl": True}
 
     try:
         if dl_type == "video":
-            fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
-            if quality != "best":
-                h = quality.replace("p","")
-                fmt = f"bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]/best[height<={h}]"
-            opts["format"] = fmt
+            opts["format"] = _build_video_format_selector(quality)
             if trim_enabled and trim_end > trim_start:
+                if not has_ffmpeg():
+                    raise RuntimeError("Trimming requires FFmpeg. Install FFmpeg or turn off Trim.")
                 opts["download_ranges"] = yt_dlp.utils.download_range_func(
                     None, [(trim_start, trim_end)]
                 )
@@ -171,16 +395,18 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
 
         elif dl_type == "audio":
             opts["format"] = "bestaudio/best"
-            opts["postprocessors"] = [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": audio_format,
-                "preferredquality": audio_quality,
-            }]
+            if has_ffmpeg():
+                opts["postprocessors"] = [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": audio_format,
+                    "preferredquality": audio_quality,
+                }]
 
         elif dl_type == "thumbnail":
             opts["skip_download"] = True
             opts["writethumbnail"] = True
-            opts["postprocessors"] = [{"key": "FFmpegThumbnailsConvertor", "format": thumbnail_format}]
+            if has_ffmpeg():
+                opts["postprocessors"] = [{"key": "FFmpegThumbnailsConvertor", "format": thumbnail_format}]
 
         elif dl_type == "subtitle":
             opts["skip_download"] = True
@@ -191,12 +417,15 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
 
-        file_path = f"{DOWNLOAD_DIR}"
+        file_path = downloads[dl_id].get("file_path") or f"{DOWNLOAD_DIR}"
         downloads[dl_id]["status"] = "done"
         downloads[dl_id]["percent"] = 100
         db_update_status(dl_id, "done", file_path)
 
     except Exception as e:
-        downloads[dl_id]["status"] = "failed"
+        status = "canceled" if controls["cancel"].is_set() else "failed"
+        downloads[dl_id]["status"] = status
         downloads[dl_id]["error"] = str(e)
-        db_update_status(dl_id, "failed")
+        db_update_status(dl_id, status, downloads[dl_id].get("file_path", ""))
+    finally:
+        controls["pause"].clear()

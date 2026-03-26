@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import Topbar from "../components/Topbar";
 
 const BACKEND = "http://127.0.0.1:8000";
