@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import yt_dlp, os, uuid, sqlite3, shutil, threading, subprocess, time
+import yt_dlp, os, uuid, sqlite3, shutil, threading, subprocess, time, json
 from pathlib import Path
 from datetime import datetime
 
@@ -9,6 +9,9 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 
 DOWNLOAD_DIR = str(Path.home() / "Downloads" / "GRABIX")
 DB_PATH = str(Path.home() / "Downloads" / "GRABIX" / "grabix.db")
+SETTINGS_PATH = str(Path.home() / "Downloads" / "GRABIX" / "grabix_settings.json")
+
+# Always create the download directory before any DB or file operations
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # In-memory progress store
@@ -47,107 +50,195 @@ def _format_eta(seconds: float | int | None) -> str:
         return f"{mins}m {secs}s"
     return f"{secs}s"
 
+
 # ── DB Setup ──────────────────────────────────────────────────────────────────
-def init_db():
+def get_db_connection():
+    """Return a new sqlite3 connection with row_factory set."""
     con = sqlite3.connect(DB_PATH)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS history (
-            id TEXT PRIMARY KEY,
-            url TEXT,
-            title TEXT,
-            thumbnail TEXT,
-            channel TEXT,
-            duration INTEGER,
-            dl_type TEXT,
-            file_path TEXT,
-            status TEXT,
-            created_at TEXT
-        )
-    """)
-    con.commit(); con.close()
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def init_db():
+    """Create all required tables if they don't exist."""
+    try:
+        con = get_db_connection()
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS history (
+                id TEXT PRIMARY KEY,
+                url TEXT,
+                title TEXT,
+                thumbnail TEXT,
+                channel TEXT,
+                duration INTEGER,
+                dl_type TEXT,
+                file_path TEXT,
+                status TEXT,
+                created_at TEXT
+            )
+        """)
+        con.commit()
+        con.close()
+        print("[GRABIX] Database initialized successfully.")
+    except Exception as e:
+        print(f"[GRABIX] DB init error: {e}")
+
 
 init_db()
 
+
 def db_insert(row: dict):
-    con = sqlite3.connect(DB_PATH)
-    con.execute("INSERT OR REPLACE INTO history VALUES (?,?,?,?,?,?,?,?,?,?)", (
-        row["id"], row["url"], row["title"], row["thumbnail"],
-        row["channel"], row["duration"], row["dl_type"],
-        row["file_path"], row["status"], row["created_at"]
-    ))
-    con.commit(); con.close()
+    try:
+        con = get_db_connection()
+        con.execute("INSERT OR REPLACE INTO history VALUES (?,?,?,?,?,?,?,?,?,?)", (
+            row["id"], row["url"], row["title"], row["thumbnail"],
+            row["channel"], row["duration"], row["dl_type"],
+            row["file_path"], row["status"], row["created_at"]
+        ))
+        con.commit()
+        con.close()
+    except Exception as e:
+        print(f"[GRABIX] db_insert error: {e}")
+
 
 def db_update_status(dl_id: str, status: str, file_path: str = ""):
-    con = sqlite3.connect(DB_PATH)
-    con.execute("UPDATE history SET status=?, file_path=? WHERE id=?", (status, file_path, dl_id))
-    con.commit(); con.close()
+    try:
+        con = get_db_connection()
+        con.execute("UPDATE history SET status=?, file_path=? WHERE id=?", (status, file_path, dl_id))
+        con.commit()
+        con.close()
+    except Exception as e:
+        print(f"[GRABIX] db_update_status error: {e}")
+
+
+# ── Settings ──────────────────────────────────────────────────────────────────
+DEFAULT_SETTINGS = {
+    "theme": "dark",
+    "auto_fetch": True,
+    "notifications": True,
+    "default_format": "mp4",
+    "default_quality": "1080p",
+    "download_folder": DOWNLOAD_DIR,
+}
+
+
+def load_settings() -> dict:
+    try:
+        if os.path.exists(SETTINGS_PATH):
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+                # Merge with defaults so any new keys are always present
+                return {**DEFAULT_SETTINGS, **saved}
+    except Exception as e:
+        print(f"[GRABIX] load_settings error: {e}")
+    return DEFAULT_SETTINGS.copy()
+
+
+def save_settings_to_disk(data: dict):
+    try:
+        current = load_settings()
+        current.update(data)
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(current, f, indent=2)
+    except Exception as e:
+        print(f"[GRABIX] save_settings error: {e}")
+
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/")
 def home():
     return {"status": "GRABIX Backend Running"}
 
+
 @app.get("/check-link")
 def check_link(url: str):
-    # FIX: Added socket_timeout to prevent "read operation timed out" error.
-    # FIX: Added extract_flat=False to ensure full duration is returned.
-    # FIX: noplaylist=True prevents fetching entire playlists by accident.
-    opts = {
-        "quiet": True,
-        "noplaylist": True,
-        "skip_download": True,
-        "socket_timeout": 15,
-    }
+    opts = {"quiet": True, "noplaylist": True, "skip_download": True}
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            formats = _get_formats(info)
             return {
                 "valid": True,
                 "title": info.get("title", "Unknown"),
                 "thumbnail": info.get("thumbnail", ""),
-                # FIX: was "duration" in the extractor but frontend expected "duration_seconds"
-                # Now we return both so either side works.
-                "duration": info.get("duration", 0),
                 "duration_seconds": info.get("duration", 0),
                 "uploader": info.get("channel") or info.get("uploader", ""),
-                "channel": info.get("channel") or info.get("uploader", ""),
-                # FIX: return plain string list like ["1080p","720p"] not objects
-                "formats": formats,
+                "formats": _get_formats(info),
             }
     except Exception as e:
         return {"valid": False, "error": str(e)}
 
 
+# ── Quality helpers ───────────────────────────────────────────────────────────
+# Standard quality tiers: height → display label
+_HEIGHT_LABELS = {
+    144: "144p",
+    240: "240p",
+    360: "360p",
+    480: "480p",
+    720: "720p",
+    1080: "1080p",
+    1440: "2K",
+    2160: "4K",
+}
+
+
+def _height_to_label(h: int) -> str:
+    """Snap an arbitrary pixel height to the nearest standard label."""
+    if h in _HEIGHT_LABELS:
+        return _HEIGHT_LABELS[h]
+    tiers = sorted(_HEIGHT_LABELS.keys())
+    closest = min(tiers, key=lambda t: abs(t - h))
+    return _HEIGHT_LABELS[closest]
+
+
 def _get_formats(info: dict) -> list[str]:
-    """Return a clean sorted list of quality strings like ['2160p','1080p','720p',...]"""
-    seen, result = set(), []
+    """
+    Return a sorted list of quality label strings, e.g. ["4K","2K","1080p","720p","480p"].
+    Only heights actually present in the video's format list are returned.
+    """
+    seen_heights: set[int] = set()
+
     for f in (info.get("formats") or []):
         h = f.get("height")
-        if h and h not in seen:
-            seen.add(h)
-            result.append(h)
-    # Sort descending, convert to strings
-    return [f"{h}p" for h in sorted(result, reverse=True)] or ["1080p", "720p", "480p", "360p"]
+        if h and isinstance(h, int) and h > 0:
+            seen_heights.add(h)
+
+    if not seen_heights:
+        # Fallback when format list is unavailable (e.g. live streams)
+        return ["1080p", "720p", "480p", "360p"]
+
+    # Snap each real height to a standard label, keep the tallest representative
+    label_to_max_height: dict[str, int] = {}
+    for h in seen_heights:
+        label = _height_to_label(h)
+        if label not in label_to_max_height or h > label_to_max_height[label]:
+            label_to_max_height[label] = h
+
+    # Sort descending by height
+    ordered = sorted(label_to_max_height.items(), key=lambda x: x[1], reverse=True)
+    return [label for label, _ in ordered]
+
+
+def _label_to_max_height(label: str) -> int:
+    """Convert a quality label back to a pixel height for yt-dlp format selection."""
+    reverse = {v: k for k, v in _HEIGHT_LABELS.items()}
+    return reverse.get(label, 1080)
 
 
 def _build_video_format_selector(quality: str) -> str:
-    if quality == "best":
-        if has_ffmpeg():
-            return "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
-        return "best[ext=mp4]/best"
-
-    h = quality.replace("p", "")
+    h = _label_to_max_height(quality)
     if has_ffmpeg():
-        # FIX: removed [ext=mp4] from bestvideo selector — many videos only have webm at
-        # high resolutions. Let ffmpeg merge whatever is best, then remux to mp4.
         return (
-            f"bestvideo[height<={h}]+bestaudio/best[height<={h}][ext=mp4]"
-            f"/best[height<={h}]/best"
+            f"bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]"
+            f"/bestvideo[height<={h}]+bestaudio"
+            f"/best[height<={h}][ext=mp4]"
+            f"/best[height<={h}]"
+            f"/best"
         )
     return f"best[height<={h}][ext=mp4]/best[height<={h}]/best"
 
 
+# ── Download record helpers ───────────────────────────────────────────────────
 def _create_download_record(dl_id: str, title: str = "", params: dict | None = None) -> dict:
     downloads[dl_id] = {
         "id": dl_id,
@@ -208,13 +299,16 @@ def _start_download_thread(dl_id: str):
             params["trim_start"],
             params["trim_end"],
             params["trim_enabled"],
+            params.get("use_cpu", True),
         ),
         daemon=True,
     )
     download_controls[dl_id]["thread"] = worker
     worker.start()
 
-@app.post("/download")
+
+# FIX 3: Changed from POST to GET — frontend calls this as a plain fetch() GET
+@app.get("/download")
 def start_download(
     url: str,
     dl_type: str = "video",
@@ -226,6 +320,7 @@ def start_download(
     trim_start: float = 0,
     trim_end: float = 0,
     trim_enabled: bool = False,
+    use_cpu: bool = True,
 ):
     dl_id = str(uuid.uuid4())
     params = {
@@ -239,12 +334,13 @@ def start_download(
         "trim_start": trim_start,
         "trim_end": trim_end,
         "trim_enabled": trim_enabled,
+        "use_cpu": use_cpu,
     }
     _create_download_record(dl_id, params=params)
 
-    # Quick metadata fetch for DB (non-blocking, best-effort)
+    # Quick metadata fetch for history DB — non-blocking, errors are swallowed
     try:
-        with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True, "socket_timeout": 10}) as ydl:
+        with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True, "noplaylist": True}) as ydl:
             info = ydl.extract_info(url, download=False)
             meta = {
                 "id": dl_id, "url": url,
@@ -258,20 +354,25 @@ def start_download(
             }
             downloads[dl_id]["title"] = meta["title"]
             db_insert(meta)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[GRABIX] metadata fetch (non-fatal): {e}")
 
     _start_download_thread(dl_id)
-    return {"id": dl_id, "folder": DOWNLOAD_DIR}
+    # Return both "task_id" and "id" so any frontend variant works
+    return {"task_id": dl_id, "id": dl_id, "folder": DOWNLOAD_DIR}
 
 
-# FIX: Added /progress/{dl_id} alias — frontend was calling this endpoint
-# but only /download-status/{dl_id} existed. Both now work.
-@app.get("/progress/{dl_id}")
+# FIX 1: This is the correct endpoint name the frontend polls
 @app.get("/download-status/{dl_id}")
 def download_status(dl_id: str):
     item = downloads.get(dl_id)
     return _public_download(item) if item else {"status": "not_found"}
+
+
+# Keep /progress/{dl_id} as an alias so nothing breaks
+@app.get("/progress/{dl_id}")
+def progress_alias(dl_id: str):
+    return download_status(dl_id)
 
 
 @app.get("/downloads")
@@ -279,13 +380,20 @@ def list_downloads():
     ordered = sorted(downloads.values(), key=lambda item: item.get("created_at", ""), reverse=True)
     return [_public_download(item) for item in ordered]
 
+
+# FIX 2 + FIX 3 (Library): Proper error handling so "no such table" never reaches the UI
 @app.get("/history")
 def get_history():
-    con = sqlite3.connect(DB_PATH)
-    rows = con.execute("SELECT * FROM history ORDER BY created_at DESC LIMIT 100").fetchall()
-    con.close()
-    keys = ["id","url","title","thumbnail","channel","duration","dl_type","file_path","status","created_at"]
-    return [dict(zip(keys, r)) for r in rows]
+    try:
+        # Re-run init in case the DB file was deleted after startup
+        init_db()
+        con = get_db_connection()
+        rows = con.execute("SELECT * FROM history ORDER BY created_at DESC LIMIT 100").fetchall()
+        con.close()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"[GRABIX] get_history error: {e}")
+        return []
 
 
 @app.post("/open-download-folder")
@@ -337,15 +445,8 @@ def download_action(dl_id: str, action: str):
         controls["pause"].clear()
         controls["cancel"].clear()
         item.update({
-            "status": "queued",
-            "percent": 0,
-            "speed": "",
-            "eta": "",
-            "downloaded": "",
-            "total": "",
-            "size": "",
-            "error": "",
-            "file_path": "",
+            "status": "queued", "percent": 0, "speed": "", "eta": "",
+            "downloaded": "", "total": "", "size": "", "error": "", "file_path": "",
         })
         db_update_status(dl_id, "queued")
         _start_download_thread(dl_id)
@@ -365,9 +466,22 @@ def stop_all_downloads():
             item["status"] = "canceling"
     return {"status": "stopping"}
 
+
+# ── Settings routes ───────────────────────────────────────────────────────────
+@app.get("/settings")
+def get_settings():
+    return load_settings()
+
+
+@app.post("/settings")
+def update_settings(data: dict):
+    save_settings_to_disk(data)
+    return load_settings()
+
+
 # ── Download Task ─────────────────────────────────────────────────────────────
 def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
-                   subtitle_lang, thumbnail_format, trim_start, trim_end, trim_enabled):
+                   subtitle_lang, thumbnail_format, trim_start, trim_end, trim_enabled, use_cpu=True):
     downloads[dl_id]["status"] = "downloading"
     downloads[dl_id]["error"] = ""
     controls = download_controls[dl_id]
@@ -384,10 +498,10 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
             total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             pct = round((downloaded_bytes / total_bytes) * 100, 1) if total_bytes else 0
             raw_speed = d.get("speed")
-            speed = d.get("_speed_str", "").strip()
+            speed = d.get("_speed_str", "")
             if not speed and raw_speed:
                 speed = f"{_format_bytes(raw_speed)}/s"
-            eta = d.get("_eta_str", "").strip() or _format_eta(d.get("eta"))
+            eta = d.get("_eta_str", "") or _format_eta(d.get("eta"))
             downloads[dl_id].update({
                 "percent": pct,
                 "speed": speed,
@@ -406,28 +520,24 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
             downloads[dl_id]["file_path"] = d.get("filename", downloads[dl_id].get("file_path", ""))
 
     template = f"{DOWNLOAD_DIR}/%(title)s.%(ext)s"
-    opts: dict = {
-        "outtmpl": template,
-        "noplaylist": True,
-        "progress_hooks": [progress_hook],
-        "continuedl": True,
-        "socket_timeout": 30,
-    }
+    opts: dict = {"outtmpl": template, "noplaylist": True, "progress_hooks": [progress_hook], "continuedl": True}
 
     try:
         if dl_type == "video":
             opts["format"] = _build_video_format_selector(quality)
-            # FIX: only apply trim when trim_enabled is True
             if trim_enabled and trim_end > trim_start:
-                if not has_ffmpeg():
-                    raise RuntimeError("Trimming requires FFmpeg. Install FFmpeg or turn off Trim.")
+                # Always set the download range — this is what actually restricts what yt-dlp fetches
                 opts["download_ranges"] = yt_dlp.utils.download_range_func(
-                    None, [(trim_start, trim_end)]
+                    None, [(float(trim_start), float(trim_end))]
                 )
-                opts["force_keyframes_at_cuts"] = True
-            # FIX: merge into mp4 container when ffmpeg available
-            if has_ffmpeg():
-                opts["merge_output_format"] = "mp4"
+                if use_cpu:
+                    # Precise cut: re-encode with FFmpeg for frame-accurate trim
+                    if not has_ffmpeg():
+                        raise RuntimeError("Precise trim (With CPU) requires FFmpeg. Switch to 'No CPU' mode or install FFmpeg.")
+                    opts["force_keyframes_at_cuts"] = True
+                else:
+                    # Fast cut: no re-encode, trim aligns to nearest keyframe (±2s)
+                    opts["force_keyframes_at_cuts"] = False
 
         elif dl_type == "audio":
             opts["format"] = "bestaudio/best"
@@ -453,7 +563,7 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
 
-        file_path = downloads[dl_id].get("file_path") or f"{DOWNLOAD_DIR}"
+        file_path = downloads[dl_id].get("file_path") or DOWNLOAD_DIR
         downloads[dl_id]["status"] = "done"
         downloads[dl_id]["percent"] = 100
         db_update_status(dl_id, "done", file_path)

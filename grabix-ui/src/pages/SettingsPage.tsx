@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useTheme } from "../context/ThemeContext";
 import { IconFolder, IconSun, IconMoon, IconInfo, IconCheck } from "../components/Icons";
+
+const API = "http://127.0.0.1:8000";
 
 interface SettingRowProps { label: string; sub: string; children: React.ReactNode; }
 function SettingRow({ label, sub, children }: SettingRowProps) {
@@ -40,8 +42,37 @@ export default function SettingsPage() {
   const [format, setFormat] = useState("mp4");
   const [quality, setQuality] = useState("1080p");
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState(false);
 
-  const save = () => { setSaved(true); setTimeout(() => setSaved(false), 2000); };
+  // Load settings from backend on mount
+  useEffect(() => {
+    fetch(`${API}/settings`)
+      .then(r => r.json())
+      .then((data: Record<string, any>) => {
+        if (typeof data.auto_fetch === "boolean") setAutoFetch(data.auto_fetch);
+        if (typeof data.notifications === "boolean") setNotifications(data.notifications);
+        if (data.default_format) setFormat(data.default_format);
+        if (data.default_quality) setQuality(data.default_quality);
+      })
+      .catch(() => {/* backend offline — keep defaults */});
+  }, []);
+
+  const save = () => {
+    setSaveError(false);
+    fetch(`${API}/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        theme,
+        auto_fetch: autoFetch,
+        notifications,
+        default_format: format,
+        default_quality: quality,
+      }),
+    })
+      .then(() => { setSaved(true); setTimeout(() => setSaved(false), 2000); })
+      .catch(() => { setSaveError(true); setTimeout(() => setSaveError(false), 3000); });
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
@@ -51,7 +82,7 @@ export default function SettingsPage() {
           <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 1 }}>Configure GRABIX</div>
         </div>
         <button className="btn btn-primary" style={{ height: 34, fontSize: 12 }} onClick={save}>
-          {saved ? <><IconCheck size={13} /> Saved</> : "Save changes"}
+          {saveError ? "Save failed" : saved ? <><IconCheck size={13} /> Saved</> : "Save changes"}
         </button>
       </div>
 
