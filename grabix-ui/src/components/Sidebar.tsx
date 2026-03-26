@@ -1,10 +1,10 @@
 import { useTheme } from "../context/ThemeContext";
 import {
-  IconDownload, IconLibrary, IconSettings, IconBrowse, IconQueue,
-  IconSun, IconMoon,
+  IconDownload, IconLibrary, IconSettings, IconBrowse,
+  IconSun, IconMoon, IconConvert,
 } from "./Icons";
 
-export type Page = "downloader" | "queue" | "library" | "browse" | "settings";
+export type Page = "downloader" | "library" | "converter" | "browse" | "settings";
 
 interface Props {
   page: Page;
@@ -15,8 +15,8 @@ interface Props {
 
 const NAV: { id: Page; label: string; Icon: React.FC<any> }[] = [
   { id: "downloader", label: "Downloader", Icon: IconDownload },
-  { id: "queue",      label: "Queue",      Icon: IconQueue },
   { id: "library",    label: "Library",    Icon: IconLibrary },
+  { id: "converter",  label: "Converter",  Icon: IconConvert },
   { id: "browse",     label: "Browse",     Icon: IconBrowse },
   { id: "settings",   label: "Settings",   Icon: IconSettings },
 ];
@@ -64,8 +64,7 @@ export default function Sidebar({ page, setPage, activeDownloads, backendOk }: P
           >
             <Icon size={16} />
             {label}
-            {/* Badge: show active download count on the Queue nav item */}
-            {id === "queue" && activeDownloads > 0 && (
+            {id === "downloader" && activeDownloads > 0 && (
               <span className="nav-badge">{activeDownloads}</span>
             )}
           </div>

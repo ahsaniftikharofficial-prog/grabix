@@ -3,6 +3,7 @@ import { ThemeProvider } from "./context/ThemeContext";
 import Sidebar, { type Page } from "./components/Sidebar";
 import DownloaderPage from "./pages/DownloaderPage";
 import LibraryPage from "./pages/LibraryPage";
+import ConverterPage from "./pages/ConverterPage";
 import BrowsePage from "./pages/BrowsePage";
 import SettingsPage from "./pages/SettingsPage";
 import "./index.css";
@@ -13,7 +14,6 @@ function Inner() {
   const [activeDownloads, setActiveDownloads] = useState(0);
 
   useEffect(() => {
-    // Check backend health + count active downloads every 2 seconds
     const check = () => {
       fetch("http://127.0.0.1:8000/downloads")
         .then(r => r.json())
@@ -37,6 +37,7 @@ function Inner() {
   const PAGES: Record<Page, React.ReactNode> = {
     downloader: <DownloaderPage />,
     library:    <LibraryPage />,
+    converter:  <ConverterPage />,
     browse:     <BrowsePage />,
     settings:   <SettingsPage />,
   };

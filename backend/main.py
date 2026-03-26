@@ -629,3 +629,258 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         db_update_status(dl_id, status, downloads[dl_id].get("file_path", ""))
     finally:
         controls["pause"].clear()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONVERSION ENGINE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# In-memory store for conversion jobs (same pattern as downloads)
+conversions: dict = {}
+
+def _create_conversion_record(job_id: str, input_path: str, output_format: str) -> dict:
+    conversions[job_id] = {
+        "id": job_id,
+        "status": "queued",
+        "percent": 0,
+        "input_path": input_path,
+        "output_path": "",
+        "output_format": output_format,
+        "error": "",
+        "created_at": datetime.now().isoformat(),
+    }
+    return conversions[job_id]
+
+
+def _conversion_task(job_id: str, input_path: str, output_format: str):
+    """Run FFmpeg to convert input_path to output_format, updating conversions[job_id]."""
+    job = conversions[job_id]
+    job["status"] = "converting"
+    job["percent"] = 5
+
+    if not has_ffmpeg():
+        job["status"] = "failed"
+        job["error"] = "FFmpeg is not installed. Install FFmpeg and add it to PATH."
+        return
+
+    input_p = Path(input_path)
+    if not input_p.exists():
+        job["status"] = "failed"
+        job["error"] = f"File not found: {input_path}"
+        return
+
+    output_path = str(input_p.with_suffix(f".{output_format}"))
+    # Avoid overwriting the source file if same extension
+    if output_path == input_path:
+        stem = input_p.stem + "_converted"
+        output_path = str(input_p.parent / f"{stem}.{output_format}")
+
+    job["output_path"] = output_path
+
+    # Build FFmpeg command. -y = overwrite without asking.
+    cmd = [FFMPEG_PATH, "-y", "-i", input_path]
+
+    # Format-specific encoding flags for quality/compatibility
+    fmt = output_format.lower()
+    if fmt == "mp4":
+        cmd += ["-c:v", "libx264", "-crf", "23", "-preset", "fast", "-c:a", "aac", "-b:a", "192k"]
+    elif fmt == "mp3":
+        cmd += ["-vn", "-c:a", "libmp3lame", "-q:a", "2"]
+    elif fmt == "m4a":
+        cmd += ["-vn", "-c:a", "aac", "-b:a", "192k"]
+    elif fmt == "opus":
+        cmd += ["-vn", "-c:a", "libopus", "-b:a", "128k"]
+    elif fmt == "flac":
+        cmd += ["-vn", "-c:a", "flac"]
+    elif fmt == "wav":
+        cmd += ["-vn", "-c:a", "pcm_s16le"]
+    elif fmt == "webm":
+        cmd += ["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0", "-c:a", "libopus"]
+    elif fmt == "mkv":
+        cmd += ["-c:v", "copy", "-c:a", "copy"]
+    elif fmt == "gif":
+        cmd += ["-vf", "fps=10,scale=480:-1:flags=lanczos", "-loop", "0"]
+    else:
+        # Generic passthrough — let FFmpeg decide
+        cmd += ["-c", "copy"]
+
+    cmd.append(output_path)
+
+    try:
+        # Run FFmpeg. We parse stderr for progress via duration/time lines.
+        proc = subprocess.Popen(
+            cmd,
+            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            universal_newlines=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        duration_secs: float = 0.0
+        duration_re = re.compile(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)")
+        time_re = re.compile(r"time=\s*(\d+):(\d+):(\d+\.\d+)")
+
+        for line in proc.stderr:
+            # Parse total duration once
+            if not duration_secs:
+                m = duration_re.search(line)
+                if m:
+                    h, mn, s = float(m.group(1)), float(m.group(2)), float(m.group(3))
+                    duration_secs = h * 3600 + mn * 60 + s
+
+            # Parse current time for progress
+            m = time_re.search(line)
+            if m and duration_secs:
+                h, mn, s = float(m.group(1)), float(m.group(2)), float(m.group(3))
+                current = h * 3600 + mn * 60 + s
+                pct = min(99, round((current / duration_secs) * 100))
+                job["percent"] = pct
+
+        proc.wait()
+
+        if proc.returncode != 0:
+            job["status"] = "failed"
+            job["error"] = "FFmpeg exited with an error. Check that the file is a valid media file."
+            return
+
+        job["percent"] = 100
+        job["status"] = "done"
+        job["output_path"] = output_path
+
+    except Exception as e:
+        job["status"] = "failed"
+        job["error"] = str(e)
+
+
+@app.post("/convert")
+def start_conversion(input_path: str, output_format: str):
+    """Start a background FFmpeg conversion job."""
+    if not input_path or not output_format:
+        raise HTTPException(status_code=400, detail="input_path and output_format are required")
+
+    job_id = str(uuid.uuid4())
+    _create_conversion_record(job_id, input_path, output_format)
+
+    thread = threading.Thread(
+        target=_conversion_task,
+        args=(job_id, input_path, output_format),
+        daemon=True,
+    )
+    thread.start()
+
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/convert-status/{job_id}")
+def convert_status(job_id: str):
+    job = conversions.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STORAGE STATS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/storage-stats")
+def storage_stats():
+    """Return total size + file count of the GRABIX downloads folder."""
+    try:
+        folder = Path(DOWNLOAD_DIR)
+        if not folder.exists():
+            return {"total_bytes": 0, "total_size": "0 B", "file_count": 0, "folder": DOWNLOAD_DIR}
+
+        total = 0
+        count = 0
+        # Count all non-hidden, non-db files
+        for f in folder.rglob("*"):
+            if f.is_file() and not f.name.startswith(".") and f.suffix not in (".db", ".json"):
+                total += f.stat().st_size
+                count += 1
+
+        return {
+            "total_bytes": total,
+            "total_size": _format_bytes(total),
+            "file_count": count,
+            "folder": DOWNLOAD_DIR,
+        }
+    except Exception as e:
+        return {"total_bytes": 0, "total_size": "0 B", "file_count": 0, "folder": DOWNLOAD_DIR, "error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HISTORY MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.delete("/history/{item_id}")
+def delete_history_item(item_id: str, delete_file: bool = False):
+    """
+    Remove a history record from the DB.
+    If delete_file=true, also delete the file from disk.
+    """
+    try:
+        con = get_db_connection()
+        row = con.execute("SELECT file_path FROM history WHERE id=?", (item_id,)).fetchone()
+
+        if not row:
+            con.close()
+            raise HTTPException(status_code=404, detail="History item not found")
+
+        file_path = row["file_path"] or ""
+
+        # Delete the physical file if requested and it exists
+        deleted_file = False
+        if delete_file and file_path:
+            p = Path(file_path)
+            if p.exists() and p.is_file():
+                p.unlink()
+                deleted_file = True
+
+        # Always remove the DB record
+        con.execute("DELETE FROM history WHERE id=?", (item_id,))
+        con.commit()
+        con.close()
+
+        return {"deleted": item_id, "file_deleted": deleted_file, "file_path": file_path}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/history")
+def clear_all_history(delete_files: bool = False):
+    """Clear entire history. Optionally delete all files too."""
+    try:
+        con = get_db_connection()
+        deleted_files = 0
+
+        if delete_files:
+            rows = con.execute("SELECT file_path FROM history WHERE file_path != ''").fetchall()
+            for row in rows:
+                p = Path(row["file_path"])
+                if p.exists() and p.is_file():
+                    try:
+                        p.unlink()
+                        deleted_files += 1
+                    except Exception:
+                        pass
+
+        count = con.execute("SELECT COUNT(*) FROM history").fetchone()[0]
+        con.execute("DELETE FROM history")
+        con.commit()
+        con.close()
+
+        return {"cleared": count, "files_deleted": deleted_files}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ffmpeg-status")
+def ffmpeg_status():
+    """Check if FFmpeg is available."""
+    return {"available": has_ffmpeg(), "path": FFMPEG_PATH or ""}
