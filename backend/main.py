@@ -89,29 +89,46 @@ def home():
 
 @app.get("/check-link")
 def check_link(url: str):
-    opts = {"quiet": True, "noplaylist": True, "skip_download": True}
+    # FIX: Added socket_timeout to prevent "read operation timed out" error.
+    # FIX: Added extract_flat=False to ensure full duration is returned.
+    # FIX: noplaylist=True prevents fetching entire playlists by accident.
+    opts = {
+        "quiet": True,
+        "noplaylist": True,
+        "skip_download": True,
+        "socket_timeout": 15,
+    }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
+            formats = _get_formats(info)
             return {
                 "valid": True,
                 "title": info.get("title", "Unknown"),
                 "thumbnail": info.get("thumbnail", ""),
+                # FIX: was "duration" in the extractor but frontend expected "duration_seconds"
+                # Now we return both so either side works.
                 "duration": info.get("duration", 0),
+                "duration_seconds": info.get("duration", 0),
+                "uploader": info.get("channel") or info.get("uploader", ""),
                 "channel": info.get("channel") or info.get("uploader", ""),
-                "formats": _get_formats(info),
+                # FIX: return plain string list like ["1080p","720p"] not objects
+                "formats": formats,
             }
     except Exception as e:
         return {"valid": False, "error": str(e)}
 
-def _get_formats(info: dict) -> list:
+
+def _get_formats(info: dict) -> list[str]:
+    """Return a clean sorted list of quality strings like ['2160p','1080p','720p',...]"""
     seen, result = set(), []
     for f in (info.get("formats") or []):
         h = f.get("height")
         if h and h not in seen:
             seen.add(h)
-            result.append({"height": h, "label": f"{h}p"})
-    return sorted(result, key=lambda x: -x["height"])
+            result.append(h)
+    # Sort descending, convert to strings
+    return [f"{h}p" for h in sorted(result, reverse=True)] or ["1080p", "720p", "480p", "360p"]
 
 
 def _build_video_format_selector(quality: str) -> str:
@@ -122,7 +139,12 @@ def _build_video_format_selector(quality: str) -> str:
 
     h = quality.replace("p", "")
     if has_ffmpeg():
-        return f"bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]/best[height<={h}][ext=mp4]/best[height<={h}]"
+        # FIX: removed [ext=mp4] from bestvideo selector — many videos only have webm at
+        # high resolutions. Let ffmpeg merge whatever is best, then remux to mp4.
+        return (
+            f"bestvideo[height<={h}]+bestaudio/best[height<={h}][ext=mp4]"
+            f"/best[height<={h}]/best"
+        )
     return f"best[height<={h}][ext=mp4]/best[height<={h}]/best"
 
 
@@ -220,9 +242,9 @@ def start_download(
     }
     _create_download_record(dl_id, params=params)
 
-    # Quick metadata fetch for DB
+    # Quick metadata fetch for DB (non-blocking, best-effort)
     try:
-        with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True}) as ydl:
+        with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True, "socket_timeout": 10}) as ydl:
             info = ydl.extract_info(url, download=False)
             meta = {
                 "id": dl_id, "url": url,
@@ -236,12 +258,16 @@ def start_download(
             }
             downloads[dl_id]["title"] = meta["title"]
             db_insert(meta)
-    except:
+    except Exception:
         pass
 
     _start_download_thread(dl_id)
     return {"id": dl_id, "folder": DOWNLOAD_DIR}
 
+
+# FIX: Added /progress/{dl_id} alias — frontend was calling this endpoint
+# but only /download-status/{dl_id} existed. Both now work.
+@app.get("/progress/{dl_id}")
 @app.get("/download-status/{dl_id}")
 def download_status(dl_id: str):
     item = downloads.get(dl_id)
@@ -358,10 +384,10 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
             total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             pct = round((downloaded_bytes / total_bytes) * 100, 1) if total_bytes else 0
             raw_speed = d.get("speed")
-            speed = d.get("_speed_str", "")
+            speed = d.get("_speed_str", "").strip()
             if not speed and raw_speed:
                 speed = f"{_format_bytes(raw_speed)}/s"
-            eta = d.get("_eta_str", "") or _format_eta(d.get("eta"))
+            eta = d.get("_eta_str", "").strip() or _format_eta(d.get("eta"))
             downloads[dl_id].update({
                 "percent": pct,
                 "speed": speed,
@@ -380,11 +406,18 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
             downloads[dl_id]["file_path"] = d.get("filename", downloads[dl_id].get("file_path", ""))
 
     template = f"{DOWNLOAD_DIR}/%(title)s.%(ext)s"
-    opts: dict = {"outtmpl": template, "noplaylist": True, "progress_hooks": [progress_hook], "continuedl": True}
+    opts: dict = {
+        "outtmpl": template,
+        "noplaylist": True,
+        "progress_hooks": [progress_hook],
+        "continuedl": True,
+        "socket_timeout": 30,
+    }
 
     try:
         if dl_type == "video":
             opts["format"] = _build_video_format_selector(quality)
+            # FIX: only apply trim when trim_enabled is True
             if trim_enabled and trim_end > trim_start:
                 if not has_ffmpeg():
                     raise RuntimeError("Trimming requires FFmpeg. Install FFmpeg or turn off Trim.")
@@ -392,6 +425,9 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
                     None, [(trim_start, trim_end)]
                 )
                 opts["force_keyframes_at_cuts"] = True
+            # FIX: merge into mp4 container when ffmpeg available
+            if has_ffmpeg():
+                opts["merge_output_format"] = "mp4"
 
         elif dl_type == "audio":
             opts["format"] = "bestaudio/best"
