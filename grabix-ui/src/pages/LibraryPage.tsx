@@ -1,131 +1,103 @@
 import { useState } from "react";
-import {
-  IconSearch, IconFilter, IconGrid, IconList,
-  IconFolder, IconTrash, IconVideo, IconAudio, IconImage,
-  IconClock, IconCheck,
-} from "../components/Icons";
+import Topbar from "../components/Topbar";
+import { libraryItems } from "../data/mock";
 
-interface LibItem {
-  id: string; title: string; thumbnail: string;
-  type: "video" | "audio" | "thumbnail";
-  size: string; date: string; duration: string;
-}
+interface Props { theme: string; onToggleTheme: () => void; }
 
-const DEMO: LibItem[] = [
-  { id: "1", title: "One Piece Episode 1074 – Luffy Gear 5", thumbnail: "https://img.youtube.com/vi/dQw4w9WgXcQ/hqdefault.jpg", type: "video", size: "1.2 GB", date: "Today", duration: "23:40" },
-  { id: "2", title: "Oda Rare Interview 2022", thumbnail: "https://img.youtube.com/vi/dQw4w9WgXcQ/hqdefault.jpg", type: "video", size: "340 MB", date: "Yesterday", duration: "14:32" },
-  { id: "3", title: "Binks Sake – Full OST", thumbnail: "https://img.youtube.com/vi/dQw4w9WgXcQ/hqdefault.jpg", type: "audio", size: "8 MB", date: "2 days ago", duration: "3:20" },
-];
-
-export default function LibraryPage() {
+export default function LibraryPage({ theme, onToggleTheme }: Props) {
+  const [view, setView]     = useState<"grid"|"list">("grid");
   const [search, setSearch] = useState("");
-  const [view, setView] = useState<"grid" | "list">("list");
-  const [filter, setFilter] = useState<"all" | "video" | "audio" | "thumbnail">("all");
+  const [filter, setFilter] = useState("All");
+  const [sort, setSort]     = useState("Date");
 
-  const filtered = DEMO.filter(i =>
-    (filter === "all" || i.type === filter) &&
-    i.title.toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = libraryItems
+    .filter((i) => filter === "All" || i.type === filter)
+    .filter((i) => i.title.toLowerCase().includes(search.toLowerCase()));
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      {/* Topbar */}
-      <div style={{ padding: "14px 24px", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div>
-          <div style={{ fontSize: 16, fontWeight: 600 }}>Library</div>
-          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 1 }}>{DEMO.length} downloaded files</div>
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn-icon" title="Open downloads folder"><IconFolder size={16} /></button>
-          <button className={`btn-icon${view === "grid" ? " active" : ""}`} onClick={() => setView("grid")} title="Grid view"><IconGrid size={16} /></button>
-          <button className={`btn-icon${view === "list" ? " active" : ""}`} onClick={() => setView("list")} title="List view"><IconList size={16} /></button>
-        </div>
-      </div>
+    <div className="flex flex-col h-full">
+      <Topbar title="Media Library" theme={theme} onToggleTheme={onToggleTheme} />
+      <div className="flex-1 overflow-y-auto p-8">
 
-      <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
-        {/* Search + filter */}
-        <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
-          <div style={{ position: "relative", flex: 1 }}>
-            <div style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)" }}>
-              <IconSearch size={14} color="var(--text-muted)" />
-            </div>
-            <input className="input-base" style={{ paddingLeft: 38 }} placeholder="Search your library..." value={search} onChange={e => setSearch(e.target.value)} />
+        {/* Toolbar */}
+        <div className="flex items-center gap-2 mb-5 flex-wrap">
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg flex-1" style={{ background: "var(--surface)", border: "1px solid var(--border)", minWidth: "160px" }}>
+            <span style={{ color: "var(--text3)" }}>⌕</span>
+            <input
+              className="flex-1 bg-transparent outline-none text-sm"
+              style={{ color: "var(--text)" }}
+              placeholder="Search library..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
           </div>
-          <button className="btn btn-ghost" style={{ gap: 6 }}><IconFilter size={14} /> Filter</button>
-        </div>
-
-        {/* Type filter chips */}
-        <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-          {(["all","video","audio","thumbnail"] as const).map(f => (
-            <button key={f} className={`quality-chip${filter === f ? " active" : ""}`} onClick={() => setFilter(f)}>
-              {f.charAt(0).toUpperCase() + f.slice(1)}
-            </button>
+          {["All","Video","Audio"].map((f) => (
+            <button key={f} onClick={() => setFilter(f)} className="px-3 py-1.5 rounded-full text-xs font-medium" style={{ background: filter === f ? "var(--accent)" : "var(--surface)", color: filter === f ? "#fff" : "var(--text2)", border: filter === f ? "none" : "1px solid var(--border)" }}>{f}</button>
           ))}
+          <select value={sort} onChange={(e) => setSort(e.target.value)} className="px-3 py-1.5 rounded-lg text-xs outline-none" style={{ background: "var(--surface)", border: "1px solid var(--border)", color: "var(--text)" }}>
+            {["Date","Name","Size"].map((s) => <option key={s}>{s}</option>)}
+          </select>
+          <div className="flex gap-1 p-1 rounded-lg" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
+            {(["grid","list"] as const).map((v) => (
+              <button key={v} onClick={() => setView(v)} className="w-7 h-7 rounded-md flex items-center justify-center text-sm" style={{ background: view === v ? "var(--accent)" : "transparent", color: view === v ? "#fff" : "var(--text2)" }}>
+                {v === "grid" ? "⊞" : "☰"}
+              </button>
+            ))}
+          </div>
         </div>
 
-        {filtered.length === 0 ? (
-          <div className="empty-state"><IconFolder size={40} /><p>No files found</p><span>Your downloads will appear here</span></div>
-        ) : view === "list" ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {filtered.map(item => <LibListItem key={item.id} item={item} />)}
+        {/* Storage bar */}
+        <div className="flex items-center gap-4 p-4 rounded-xl mb-6" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
+          <span style={{ color: "var(--text3)" }}>◉</span>
+          <div className="flex-1">
+            <div className="flex justify-between text-xs mb-1.5">
+              <span style={{ color: "var(--text2)" }}>Storage used</span>
+              <span className="font-medium" style={{ color: "var(--text)" }}>38.4 GB / 500 GB</span>
+            </div>
+            <div className="h-1 rounded-full overflow-hidden" style={{ background: "var(--surface2)" }}>
+              <div className="h-full rounded-full" style={{ width: "7.6%", background: "var(--accent)" }} />
+            </div>
           </div>
-        ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
-            {filtered.map(item => <LibGridItem key={item.id} item={item} />)}
+        </div>
+
+        {/* Grid view */}
+        {view === "grid" && (
+          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(180px,1fr))" }}>
+            {filtered.map((item) => (
+              <div key={item.id} className="rounded-xl overflow-hidden cursor-pointer group" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
+                <div className="h-28 overflow-hidden" style={{ background: "var(--surface2)" }}>
+                  <img src={item.thumb} alt={item.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200" />
+                </div>
+                <div className="p-3">
+                  <div className="text-xs font-medium truncate" style={{ color: "var(--text)" }}>{item.title}</div>
+                  <div className="text-xs mt-1" style={{ color: "var(--text3)" }}>{item.type} · {item.size}</div>
+                </div>
+              </div>
+            ))}
           </div>
         )}
-      </div>
-    </div>
-  );
-}
 
-function TypeIcon({ type }: { type: string }) {
-  if (type === "audio") return <IconAudio size={14} color="var(--text-accent)" />;
-  if (type === "thumbnail") return <IconImage size={14} color="var(--text-accent)" />;
-  return <IconVideo size={14} color="var(--text-accent)" />;
-}
+        {/* List view */}
+        {view === "list" && (
+          <div>
+            {filtered.map((item) => (
+              <div key={item.id} className="flex items-center gap-4 px-4 py-3 rounded-xl mb-2 cursor-pointer" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
+                <div className="flex-shrink-0 rounded-lg overflow-hidden" style={{ width: "52px", height: "34px", background: "var(--surface2)" }}>
+                  <img src={item.thumb} alt={item.title} className="w-full h-full object-cover" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium truncate" style={{ color: "var(--text)" }}>{item.title}</div>
+                  <div className="text-xs mt-0.5" style={{ color: "var(--text3)" }}>{item.type} · {item.size} · {item.date}</div>
+                </div>
+                <button className="text-sm opacity-40 hover:opacity-100" style={{ color: "var(--text2)" }}>🗑</button>
+              </div>
+            ))}
+          </div>
+        )}
 
-function LibListItem({ item }: { item: LibItem }) {
-  return (
-    <div className="card" style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 12 }}>
-      <img src={item.thumbnail} alt="" style={{ width: 64, height: 40, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", flexShrink: 0 }} />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.title}</div>
-        <div style={{ display: "flex", gap: 10, marginTop: 3, fontSize: 11, color: "var(--text-muted)", alignItems: "center" }}>
-          <span style={{ display: "flex", alignItems: "center", gap: 3 }}><TypeIcon type={item.type} />{item.type}</span>
-          <span style={{ display: "flex", alignItems: "center", gap: 3 }}><IconClock size={11} />{item.duration}</span>
-          <span>{item.size}</span>
-          <span>{item.date}</span>
-        </div>
-      </div>
-      <div style={{ display: "flex", gap: 6 }}>
-        <div className="tooltip-wrap">
-          <button className="btn-icon" style={{ width: 28, height: 28 }} title="Open file"><IconFolder size={13} /></button>
-          <span className="tooltip-box">Open file</span>
-        </div>
-        <div className="tooltip-wrap">
-          <button className="btn-icon" style={{ width: 28, height: 28, color: "var(--text-danger)" }} title="Delete"><IconTrash size={13} /></button>
-          <span className="tooltip-box">Delete</span>
-        </div>
-      </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text-success)", fontSize: 12 }}>
-        <IconCheck size={13} />
-      </div>
-    </div>
-  );
-}
-
-function LibGridItem({ item }: { item: LibItem }) {
-  return (
-    <div className="card" style={{ overflow: "hidden" }}>
-      <div style={{ position: "relative" }}>
-        <img src={item.thumbnail} alt="" style={{ width: "100%", height: 100, objectFit: "cover" }} />
-        <div style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.7)", color: "white", fontSize: 10, padding: "2px 6px", borderRadius: 4, fontFamily: "var(--font-mono)" }}>{item.duration}</div>
-        <div style={{ position: "absolute", top: 6, left: 6 }}><TypeIcon type={item.type} /></div>
-      </div>
-      <div style={{ padding: "8px 10px" }}>
-        <div style={{ fontSize: 12, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</div>
-        <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{item.size} · {item.date}</div>
+        {filtered.length === 0 && (
+          <div className="text-center mt-16 text-sm" style={{ color: "var(--text3)" }}>No files found.</div>
+        )}
       </div>
     </div>
   );
