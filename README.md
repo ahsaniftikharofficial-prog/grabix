@@ -11,8 +11,8 @@ and library management desktop application.
 - Database: SQLite + SQLAlchemy
 
 ## Development Phases
-- [x] Phase 1 — Foundation (in progress)
-- [ ] Phase 2 — Universal Downloader
-- [ ] Phase 3 — Anime & Manga
-- [ ] Phase 4 — Movie Streaming
+- [ ] Phase 1 — Foundation (Phase Completed)
+- [ ] Phase 2 — Universal Downloader (Phase Completed)
+- [ ] Phase 3 — Anime , Manga , Movies & TV Shows (Phase Completed)
+- [ ] Phase 4 — Adding Apis for anime manga movies and tv shows to get content for streaming   (Current Working)
 - [ ] Phase 5 — Polish & Release
