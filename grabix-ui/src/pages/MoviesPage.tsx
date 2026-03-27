@@ -6,7 +6,7 @@ import { IconSearch, IconStar, IconPlay, IconDownload, IconX, IconRefresh, IconC
 import { IconHeart } from "../components/Icons";
 import { useFavorites } from "../context/FavoritesContext";
 import VidSrcPlayer from "../components/VidSrcPlayer";
-import { getArchiveMovieSources, getMovieSources, type StreamSource } from "../lib/streamProviders";
+import { fetchMovieBoxSources, getArchiveMovieSources, getMovieSources, type StreamSource } from "../lib/streamProviders";
 
 const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzdWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
 const TMDB     = "https://api.themoviedb.org/3";
@@ -19,6 +19,7 @@ interface Movie {
   id: number; title: string; overview: string;
   poster_path: string; backdrop_path?: string;
   vote_average: number; release_date: string;
+  imdb_id?: string;
   genres?: { id: number; name: string }[];
 }
 interface ArchiveItem {
@@ -196,6 +197,45 @@ function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: ()
   useEffect(() => { tf(`/movie/${movie.id}`).then(setFull).catch(() => {}); }, [movie.id]);
 
   const d = full ?? movie;
+  const movieYear = d.release_date ? Number(d.release_date.slice(0, 4)) : undefined;
+
+  const loadMovieBoxSources = async () => {
+    try {
+      return await fetchMovieBoxSources({
+        title: d.title,
+        mediaType: "movie",
+        year: Number.isFinite(movieYear) ? movieYear : undefined,
+      });
+    } catch {
+      return [];
+    }
+  };
+
+  const handlePlay = async () => {
+    const movieBoxSources = await loadMovieBoxSources();
+    onPlay({
+      title: d.title,
+      subtitle: "Movie playback powered by Movie Box direct sources plus GRABIX fallback providers",
+      poster: d.poster_path ? `${IMG_BASE}${d.poster_path}` : undefined,
+      sources: [
+        ...movieBoxSources,
+        ...getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id }),
+      ],
+    });
+  };
+
+  const handleDownload = async () => {
+    const movieBoxSources = await loadMovieBoxSources();
+    const directSource = movieBoxSources[0];
+
+    if (directSource) {
+      await fetch(`${GRABIX}/download?url=${encodeURIComponent(directSource.externalUrl ?? directSource.url)}&dl_type=video`);
+      return;
+    }
+
+    window.open(`https://vidsrc.to/embed/movie/${movie.id}`, "_blank");
+  };
+
   const sendDl = async () => {
     if (!dlUrl.trim()) return;
     setSending(true);
@@ -230,15 +270,10 @@ function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: ()
           {d.overview && <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7, margin: "14px 0" }}>{d.overview}</div>}
 
           <ActionButtons
-            onPlay={() => onPlay({
-              title: d.title,
-              subtitle: "Movie playback powered by your configured stream providers",
-              poster: d.poster_path ? `${IMG_BASE}${d.poster_path}` : undefined,
-              sources: getMovieSources(movie.id),
-            })}
-            onDownload={() => window.open(`https://vidsrc.to/embed/movie/${movie.id}`, "_blank")}
+            onPlay={handlePlay}
+            onDownload={handleDownload}
             favId={`movie-${movie.id}`}
-            favItem={{ id: `movie-${movie.id}`, title: d.title, poster: d.poster_path ? `${IMG_BASE}${d.poster_path}` : "", type: "movie", tmdbId: movie.id }}
+            favItem={{ id: `movie-${movie.id}`, title: d.title, poster: d.poster_path ? `${IMG_BASE}${d.poster_path}` : "", type: "movie", tmdbId: movie.id, imdbId: d.imdb_id }}
           />
 
           <div style={{ background: "var(--bg-surface2)", borderRadius: 10, padding: "14px 16px" }}>

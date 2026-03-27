@@ -3,7 +3,7 @@ import { IconPlay, IconX } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import { FavItem, useFavorites } from "../context/FavoritesContext";
-import { getAnimeSources, getMovieSources, getTvSources, type StreamSource } from "../lib/streamProviders";
+import { fetchMovieBoxSources, getAnimeSources, getMovieSources, getTvSources, type StreamSource } from "../lib/streamProviders";
 
 export default function FavoritesPage() {
   const { favorites, remove } = useFavorites();
@@ -12,15 +12,28 @@ export default function FavoritesPage() {
 
   const filtered = filter === "all" ? favorites : favorites.filter(favorite => favorite.type === filter);
 
-  const playItem = (item: FavItem) => {
+  const playItem = async (item: FavItem) => {
     let sources: StreamSource[] = [];
 
-    if (item.type === "movie" && item.tmdbId) {
-      sources = getMovieSources(item.tmdbId);
+    if (item.source === "moviebox" && item.movieBoxSubjectId && item.movieBoxMediaType) {
+      try {
+        sources = await fetchMovieBoxSources({
+          subjectId: item.movieBoxSubjectId,
+          title: item.title,
+          mediaType: item.movieBoxMediaType,
+          year: item.year,
+          season: 1,
+          episode: 1,
+        });
+      } catch {
+        sources = [];
+      }
+    } else if (item.type === "movie" && item.tmdbId) {
+      sources = getMovieSources({ tmdbId: item.tmdbId, imdbId: item.imdbId });
     } else if (item.type === "anime" && item.tmdbId) {
       sources = getAnimeSources(item.tmdbId);
     } else if (item.type === "series" && item.tmdbId) {
-      sources = getTvSources(item.tmdbId);
+      sources = getTvSources({ tmdbId: item.tmdbId, imdbId: item.imdbId });
     }
 
     if (sources.length === 0) {
@@ -75,8 +88,10 @@ export default function FavoritesPage() {
   );
 }
 
-function FavCard({ item, onPlay, onRemove }: { item: FavItem; onPlay: (item: FavItem) => void; onRemove: (id: string) => void }) {
-  const canPlay = (item.type === "movie" || item.type === "anime" || item.type === "series") && !!item.tmdbId;
+function FavCard({ item, onPlay, onRemove }: { item: FavItem; onPlay: (item: FavItem) => void | Promise<void>; onRemove: (id: string) => void }) {
+  const canPlay = item.source === "moviebox"
+    ? !!item.movieBoxSubjectId
+    : (item.type === "movie" || item.type === "anime" || item.type === "series") && !!item.tmdbId;
   const typeBadge: Record<FavItem["type"], string> = {
     movie: "var(--accent)",
     anime: "var(--text-success)",

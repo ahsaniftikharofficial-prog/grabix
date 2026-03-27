@@ -1,10 +1,15 @@
-import { useState, useEffect } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useTheme } from "../context/ThemeContext";
 import { IconFolder, IconSun, IconMoon, IconInfo, IconCheck } from "../components/Icons";
 
 const API = "http://127.0.0.1:8000";
 
-interface SettingRowProps { label: string; sub: string; children: React.ReactNode; }
+interface SettingRowProps {
+  label: string;
+  sub: string;
+  children: ReactNode;
+}
+
 function SettingRow({ label, sub, children }: SettingRowProps) {
   return (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 0", borderBottom: "1px solid var(--border)" }}>
@@ -17,20 +22,10 @@ function SettingRow({ label, sub, children }: SettingRowProps) {
   );
 }
 
-function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
+function Toggle({ value, onChange }: { value: boolean; onChange: (value: boolean) => void }) {
   return (
-    <div onClick={() => onChange(!value)} style={{
-      width: 40, height: 22, borderRadius: 99, cursor: "pointer",
-      background: value ? "var(--accent)" : "var(--border)",
-      position: "relative", transition: "background 0.2s",
-      flexShrink: 0,
-    }}>
-      <div style={{
-        position: "absolute", top: 3, left: value ? 21 : 3,
-        width: 16, height: 16, borderRadius: "50%",
-        background: "white", transition: "left 0.2s",
-        boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
-      }} />
+    <div onClick={() => onChange(!value)} style={{ width: 40, height: 22, borderRadius: 99, cursor: "pointer", background: value ? "var(--accent)" : "var(--border)", position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
+      <div style={{ position: "absolute", top: 3, left: value ? 21 : 3, width: 16, height: 16, borderRadius: "50%", background: "white", transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.3)" }} />
     </div>
   );
 }
@@ -44,17 +39,18 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState(false);
 
-  // Load settings from backend on mount
   useEffect(() => {
     fetch(`${API}/settings`)
-      .then(r => r.json())
-      .then((data: Record<string, any>) => {
+      .then((response) => response.json())
+      .then((data: Record<string, unknown>) => {
         if (typeof data.auto_fetch === "boolean") setAutoFetch(data.auto_fetch);
         if (typeof data.notifications === "boolean") setNotifications(data.notifications);
-        if (data.default_format) setFormat(data.default_format);
-        if (data.default_quality) setQuality(data.default_quality);
+        if (typeof data.default_format === "string") setFormat(data.default_format);
+        if (typeof data.default_quality === "string") setQuality(data.default_quality);
       })
-      .catch(() => {/* backend offline — keep defaults */});
+      .catch(() => {
+        // Keep defaults when backend settings are unavailable.
+      });
   }, []);
 
   const save = () => {
@@ -70,8 +66,14 @@ export default function SettingsPage() {
         default_quality: quality,
       }),
     })
-      .then(() => { setSaved(true); setTimeout(() => setSaved(false), 2000); })
-      .catch(() => { setSaveError(true); setTimeout(() => setSaveError(false), 3000); });
+      .then(() => {
+        setSaved(true);
+        setTimeout(() => setSaved(false), 2000);
+      })
+      .catch(() => {
+        setSaveError(true);
+        setTimeout(() => setSaveError(false), 3000);
+      });
   };
 
   return (
@@ -87,8 +89,6 @@ export default function SettingsPage() {
       </div>
 
       <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px", maxWidth: 560 }}>
-
-        {/* Section */}
         <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>Appearance</div>
         <div className="card card-padded" style={{ marginBottom: 20 }}>
           <SettingRow label="Theme" sub="Switch between light and dark mode">
@@ -108,17 +108,18 @@ export default function SettingsPage() {
             </button>
           </SettingRow>
           <SettingRow label="Default format" sub="Format used when starting a video download">
-            <select value={format} onChange={e => setFormat(e.target.value)}
-              style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+            <select value={format} onChange={(e) => setFormat(e.target.value)} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
               <option value="mp4">MP4 (video)</option>
               <option value="mp3">MP3 (audio)</option>
               <option value="webm">WebM</option>
             </select>
           </SettingRow>
           <SettingRow label="Default quality" sub="Video quality preference">
-            <select value={quality} onChange={e => setQuality(e.target.value)}
-              style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
-              <option>1080p</option><option>720p</option><option>480p</option><option>360p</option>
+            <select value={quality} onChange={(e) => setQuality(e.target.value)} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+              <option>1080p</option>
+              <option>720p</option>
+              <option>480p</option>
+              <option>360p</option>
             </select>
           </SettingRow>
         </div>
@@ -136,7 +137,7 @@ export default function SettingsPage() {
         <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>About</div>
         <div className="card card-padded">
           <SettingRow label="Version" sub="Current GRABIX version">
-            <span style={{ fontSize: 13, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>0.2.0 · Phase 2</span>
+            <span style={{ fontSize: 13, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>0.4.0 · Phase 4</span>
           </SettingRow>
           <SettingRow label="Backend" sub="FastAPI + yt-dlp + FFmpeg">
             <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--text-success)" }}>
@@ -145,7 +146,7 @@ export default function SettingsPage() {
           </SettingRow>
           <div style={{ paddingTop: 10, display: "flex", alignItems: "flex-start", gap: 8, color: "var(--text-muted)", fontSize: 12 }}>
             <IconInfo size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-            GRABIX is free and open source. For legal use only — respect copyright.
+            GRABIX is free and open source. For legal use only, respect copyright.
           </div>
         </div>
       </div>

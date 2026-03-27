@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import {
   IconSearch, IconPaste, IconLink, IconRefresh,
   IconVideo, IconAudio, IconImage, IconSubtitle,
@@ -39,6 +39,27 @@ interface QueueItem {
   error: string;
 }
 
+function toQueueItem(serverItem: any, previous?: QueueItem): QueueItem {
+  const fileType = (serverItem.dl_type as FileType) || previous?.fileType || "video";
+  return {
+    id: serverItem.id ?? previous?.id ?? uid(),
+    serverId: serverItem.id ?? previous?.serverId ?? "",
+    url: previous?.url ?? "",
+    title: serverItem.title || previous?.title || "Preparing download...",
+    thumbnail: previous?.thumbnail || "",
+    format: previous?.format || fileType,
+    fileType,
+    status: serverItem.status ?? previous?.status ?? "queued",
+    percent: serverItem.percent ?? previous?.percent ?? 0,
+    speed: serverItem.speed ?? previous?.speed ?? "",
+    eta: serverItem.eta ?? previous?.eta ?? "",
+    downloaded: serverItem.downloaded ?? previous?.downloaded ?? "",
+    total: serverItem.total ?? previous?.total ?? "",
+    filePath: serverItem.file_path ?? previous?.filePath ?? "",
+    error: serverItem.error ?? previous?.error ?? "",
+  };
+}
+
 const MOCK_INFO: VideoInfo = {
   title: "One Piece Episode 1074 – Luffy's Gear 5 Awakening",
   thumbnail: "https://img.youtube.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
@@ -72,6 +93,36 @@ export default function DownloaderPage() {
   const [useCpu, setUseCpu] = useState(false);
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const pollingRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+
+  useEffect(() => {
+    let active = true;
+
+    const syncBackendQueue = async () => {
+      try {
+        const response = await fetch(`${API}/downloads`);
+        if (!response.ok) return;
+        const data = (await response.json()) as any[];
+        if (!active) return;
+
+        setQueue((prev) => {
+          const previousById = new Map(prev.map((item) => [item.serverId || item.id, item]));
+          const synced = data.map((serverItem) => toQueueItem(serverItem, previousById.get(serverItem.id)));
+          const pendingLocal = prev.filter((item) => !item.serverId);
+          return [...pendingLocal, ...synced];
+        });
+      } catch {
+        // Ignore sync failures while backend is offline.
+      }
+    };
+
+    void syncBackendQueue();
+    const interval = setInterval(syncBackendQueue, 1000);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, []);
 
   const fetchInfo = useCallback(async (inputUrl: string) => {
     if (!inputUrl.trim()) return;
@@ -149,13 +200,13 @@ export default function DownloaderPage() {
       const data = await res.json();
       const serverTaskId = data.task_id ?? taskId;
 
-      setQueue(prev => prev.map(q => q.id === taskId ? { ...q, serverId: serverTaskId } : q));
+      setQueue(prev => prev.map(q => q.id === taskId ? { ...q, id: serverTaskId, serverId: serverTaskId } : q));
 
       const interval = setInterval(async () => {
         try {
           const pr = await fetch(`${API}/download-status/${serverTaskId}`);
           const pd = await pr.json();
-          setQueue(prev => prev.map(q => q.id === taskId
+          setQueue(prev => prev.map(q => (q.serverId || q.id) === serverTaskId
             ? {
                 ...q,
                 status: pd.status,
@@ -171,11 +222,11 @@ export default function DownloaderPage() {
           ));
           if (["done", "failed", "canceled", "error"].includes(pd.status)) {
             clearInterval(interval);
-            pollingRef.current.delete(taskId);
+            pollingRef.current.delete(serverTaskId);
           }
         } catch { clearInterval(interval); }
       }, 1000);
-      pollingRef.current.set(taskId, interval);
+      pollingRef.current.set(serverTaskId, interval);
 
     } catch {
       let pct = 0;
@@ -209,21 +260,21 @@ export default function DownloaderPage() {
         const res = await fetch(`${API}/download?url=${encodeURIComponent(bUrl)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}`);
         const data = await res.json();
         const serverTaskId = data.task_id ?? taskId;
-        setQueue(prev => prev.map(q => q.id === taskId ? { ...q, serverId: serverTaskId } : q));
+      setQueue(prev => prev.map(q => q.id === taskId ? { ...q, id: serverTaskId, serverId: serverTaskId } : q));
         const interval = setInterval(async () => {
           try {
             const pr = await fetch(`${API}/download-status/${serverTaskId}`);
             const pd = await pr.json();
-            setQueue(prev => prev.map(q => q.id === taskId
+            setQueue(prev => prev.map(q => (q.serverId || q.id) === serverTaskId
               ? { ...q, status: pd.status, percent: pd.percent ?? 0, speed: pd.speed ?? "", eta: pd.eta ?? "", downloaded: pd.downloaded ?? "", total: pd.total ?? "", filePath: pd.file_path ?? "", error: pd.error ?? "" }
               : q
             ));
             if (["done", "failed", "canceled", "error"].includes(pd.status)) {
-              clearInterval(interval); pollingRef.current.delete(taskId);
+              clearInterval(interval); pollingRef.current.delete(serverTaskId);
             }
           } catch { clearInterval(interval); }
         }, 1000);
-        pollingRef.current.set(taskId, interval);
+        pollingRef.current.set(serverTaskId, interval);
       } catch {
         let pct = 0;
         const sim = setInterval(() => {

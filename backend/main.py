@@ -1,10 +1,34 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 import yt_dlp, os, uuid, sqlite3, shutil, threading, subprocess, time, json, re
 from pathlib import Path
 from datetime import datetime
-from urllib.parse import urljoin
-from urllib.request import Request, urlopen
+from difflib import SequenceMatcher
+from urllib.parse import quote, urljoin
+from urllib.request import Request as URLRequest, urlopen
+
+try:
+    from moviebox_api import (
+        Homepage as MovieBoxHomepage,
+        HotMoviesAndTVSeries as MovieBoxHotMoviesAndTVSeries,
+        MovieDetails as MovieBoxMovieDetails,
+        PopularSearch as MovieBoxPopularSearch,
+        DownloadableMovieFilesDetail,
+        DownloadableTVSeriesFilesDetail,
+        Search as MovieBoxSearch,
+        Session as MovieBoxSession,
+        SubjectType as MovieBoxSubjectType,
+        Trending as MovieBoxTrending,
+        TVSeriesDetails as MovieBoxTVSeriesDetails,
+    )
+    from moviebox_api.constants import DOWNLOAD_REQUEST_HEADERS as MOVIEBOX_DOWNLOAD_REQUEST_HEADERS
+    MOVIEBOX_AVAILABLE = True
+    MOVIEBOX_IMPORT_ERROR = ""
+except Exception as exc:
+    MOVIEBOX_AVAILABLE = False
+    MOVIEBOX_IMPORT_ERROR = str(exc)
+    MOVIEBOX_DOWNLOAD_REQUEST_HEADERS = {}
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -182,7 +206,7 @@ def _resolve_embed_target(url: str, max_depth: int = 3) -> str:
     }
 
     for _ in range(max_depth):
-        req = Request(current, headers=headers)
+        req = URLRequest(current, headers=headers)
         with urlopen(req, timeout=12) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
 
@@ -232,6 +256,763 @@ def check_link(url: str):
 
 # ── Quality helpers ───────────────────────────────────────────────────────────
 # Standard quality tiers: height → display label
+MOVIEBOX_CACHE_TTL_SECONDS = 60 * 15
+moviebox_cache: dict[str, tuple[float, object]] = {}
+moviebox_item_registry: dict[str, tuple[float, object]] = {}
+
+
+def _moviebox_assert_available():
+    if not MOVIEBOX_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail=f"moviebox-api is not available: {MOVIEBOX_IMPORT_ERROR or 'not installed'}",
+        )
+
+
+def _moviebox_cache_get(key: str):
+    cached = moviebox_cache.get(key)
+    if not cached:
+        return None
+    expires_at, payload = cached
+    if expires_at <= time.time():
+        moviebox_cache.pop(key, None)
+        return None
+    return payload
+
+
+def _moviebox_cache_set(key: str, payload, ttl: int = MOVIEBOX_CACHE_TTL_SECONDS):
+    moviebox_cache[key] = (time.time() + ttl, payload)
+    return payload
+
+
+def _moviebox_register_item(item):
+    subject_id = str(getattr(item, "subjectId", "") or "")
+    if subject_id:
+        moviebox_item_registry[subject_id] = (
+            time.time() + MOVIEBOX_CACHE_TTL_SECONDS,
+            item,
+        )
+
+
+def _moviebox_register_items(items):
+    for item in items or []:
+        _moviebox_register_item(item)
+
+
+def _moviebox_get_registered_item(subject_id: str | None):
+    if not subject_id:
+        return None
+    cached = moviebox_item_registry.get(str(subject_id))
+    if not cached:
+        return None
+    expires_at, item = cached
+    if expires_at <= time.time():
+        moviebox_item_registry.pop(str(subject_id), None)
+        return None
+    return item
+
+
+def _normalize_moviebox_title(value: str) -> str:
+    cleaned = re.sub(r"\[[^\]]+\]", "", value or "")
+    cleaned = re.sub(r"[^a-z0-9]+", " ", cleaned.lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _moviebox_media_type_value(media_type: str) -> str:
+    normalized = (media_type or "all").strip().lower()
+    if normalized not in {"all", "movie", "series", "anime"}:
+        raise HTTPException(
+            status_code=400,
+            detail="media_type must be one of: all, movie, series, anime",
+        )
+    return normalized
+
+
+def _moviebox_media_type_from_item(item) -> str:
+    if getattr(item, "subjectType", None) == MovieBoxSubjectType.MOVIES:
+        return "movie"
+    return "series"
+
+
+def _moviebox_is_hindi(item) -> bool:
+    title = (getattr(item, "title", "") or "").lower()
+    corner = (getattr(item, "corner", "") or "").lower()
+    country = (getattr(item, "countryName", "") or "").lower()
+    return "hindi" in title or "hindi" in corner or country == "india"
+
+
+def _moviebox_is_anime(item) -> bool:
+    genres = [str(genre).lower() for genre in (getattr(item, "genre", None) or [])]
+    country = (getattr(item, "countryName", "") or "").lower()
+    title = (getattr(item, "title", "") or "").lower()
+    return "anime" in genres or country == "japan" or "anime" in title
+
+
+def _moviebox_release_year(item) -> int | None:
+    release_date = getattr(item, "releaseDate", None)
+    return getattr(release_date, "year", None)
+
+
+def _moviebox_match_score(
+    item,
+    title: str,
+    year: int | None,
+    prefer_hindi: bool = True,
+    anime_only: bool = False,
+) -> float:
+    target = _normalize_moviebox_title(title)
+    candidate = _normalize_moviebox_title(getattr(item, "title", ""))
+    ratio = SequenceMatcher(None, target, candidate).ratio()
+
+    score = ratio * 100
+    if target and candidate == target:
+        score += 30
+    elif target and target in candidate:
+        score += 15
+
+    release_year = _moviebox_release_year(item)
+    if year is not None and release_year == year:
+        score += 25
+
+    if getattr(item, "hasResource", False):
+        score += 10
+    if prefer_hindi and _moviebox_is_hindi(item):
+        score += 12
+    if anime_only:
+        score += 18 if _moviebox_is_anime(item) else -35
+
+    return score
+
+
+def _moviebox_card_payload(item, section: str | None = None) -> dict:
+    raw_poster = str(getattr(getattr(item, "cover", None), "url", "") or "")
+    media_type = _moviebox_media_type_from_item(item)
+
+    return {
+        "id": str(getattr(item, "subjectId", "") or ""),
+        "title": getattr(item, "title", "") or "Unknown",
+        "description": getattr(item, "description", "") or "",
+        "year": _moviebox_release_year(item),
+        "poster": raw_poster,
+        "poster_proxy": _moviebox_poster_proxy_url(raw_poster) if raw_poster else "",
+        "media_type": "anime" if _moviebox_is_anime(item) else media_type,
+        "moviebox_media_type": media_type,
+        "country": getattr(item, "countryName", "") or "",
+        "genres": list(getattr(item, "genre", None) or []),
+        "imdb_rating": getattr(item, "imdbRatingValue", None),
+        "imdb_rating_count": getattr(item, "imdbRatingCount", None),
+        "detail_path": getattr(item, "detailPath", "") or "",
+        "corner": getattr(item, "corner", "") or "",
+        "has_resource": getattr(item, "hasResource", False),
+        "subtitle_languages": list(getattr(item, "subtitles", None) or []),
+        "is_hindi": _moviebox_is_hindi(item),
+        "is_anime": _moviebox_is_anime(item),
+        "section": section or "",
+    }
+
+
+def _moviebox_unique_items(items) -> list:
+    deduped: list = []
+    seen: set[str] = set()
+    for item in items or []:
+        subject_id = str(getattr(item, "subjectId", "") or "")
+        if not subject_id or subject_id in seen:
+            continue
+        seen.add(subject_id)
+        deduped.append(item)
+    return deduped
+
+
+def _moviebox_filter_items(
+    items,
+    media_type: str = "all",
+    hindi_only: bool = False,
+    anime_only: bool = False,
+) -> list:
+    filtered: list = []
+    for item in items or []:
+        item_media_type = _moviebox_media_type_from_item(item)
+        is_anime = _moviebox_is_anime(item)
+        is_hindi = _moviebox_is_hindi(item)
+
+        if media_type == "movie" and item_media_type != "movie":
+            continue
+        if media_type == "series" and item_media_type != "series":
+            continue
+        if media_type == "anime" and not is_anime:
+            continue
+        if anime_only and not is_anime:
+            continue
+        if hindi_only and not is_hindi:
+            continue
+
+        filtered.append(item)
+    return filtered
+
+
+def _moviebox_sort_items(items, sort_by: str = "search", query: str = "") -> list:
+    normalized_sort = (sort_by or "search").lower()
+    if normalized_sort == "rating":
+        return sorted(
+            items,
+            key=lambda item: float(getattr(item, "imdbRatingValue", 0) or 0),
+            reverse=True,
+        )
+    if normalized_sort == "recent":
+        return sorted(
+            items,
+            key=lambda item: (
+                _moviebox_release_year(item) or 0,
+                float(getattr(item, "imdbRatingValue", 0) or 0),
+            ),
+            reverse=True,
+        )
+    return sorted(
+        items,
+        key=lambda item: _moviebox_match_score(item, query, None, True, False),
+        reverse=True,
+    )
+
+
+def _moviebox_pick_category(categories: dict[str, list], keywords: list[str]) -> list:
+    for category_title, items in categories.items():
+        lowered = category_title.lower()
+        if all(keyword in lowered for keyword in keywords):
+            return items
+    return []
+
+
+def _moviebox_subtitle_proxy_url(url: str) -> str:
+    return f"http://127.0.0.1:8000/moviebox/subtitle?url={quote(url, safe='')}"
+
+
+def _moviebox_stream_proxy_url(url: str) -> str:
+    return f"http://127.0.0.1:8000/moviebox/proxy-stream?url={quote(url, safe='')}"
+
+
+def _moviebox_poster_proxy_url(url: str) -> str:
+    return f"http://127.0.0.1:8000/moviebox/poster?url={quote(url, safe='')}"
+
+
+def _moviebox_caption_payload(caption) -> dict:
+    language = getattr(caption, "lanName", None) or getattr(caption, "lan", None) or "Subtitle"
+    raw_url = str(getattr(caption, "url", "") or "")
+    return {
+        "id": str(getattr(caption, "id", "") or language),
+        "language": getattr(caption, "lan", "") or "",
+        "label": language,
+        "url": _moviebox_subtitle_proxy_url(raw_url) if raw_url else "",
+        "original_url": raw_url,
+    }
+
+
+def _moviebox_source_payload(media_file, captions: list[dict] | None = None) -> dict:
+    resolution = int(getattr(media_file, "resolution", 0) or 0)
+    size = int(getattr(media_file, "size", 0) or 0)
+    quality = f"{resolution}p" if resolution > 0 else "Auto"
+    raw_url = str(getattr(media_file, "url", "") or "")
+    return {
+        "provider": "MovieBox",
+        "label": f"MovieBox {quality}",
+        "url": _moviebox_stream_proxy_url(raw_url) if raw_url else "",
+        "original_url": raw_url,
+        "quality": quality,
+        "resolution": resolution,
+        "size_bytes": size,
+        "size_label": _format_bytes(size),
+        "kind": "direct",
+        "mime_type": "video/mp4",
+        "subtitles": captions or [],
+    }
+
+
+def _moviebox_guess_seasons(title: str) -> list[int]:
+    match = re.search(r"S(\d+)\s*-\s*S?(\d+)", title or "", re.IGNORECASE)
+    if match:
+        start = int(match.group(1))
+        end = int(match.group(2))
+        if start <= end:
+            return list(range(start, min(end, start + 24) + 1))
+    match = re.search(r"S(\d+)", title or "", re.IGNORECASE)
+    if match:
+        return [int(match.group(1))]
+    return [1]
+
+
+async def _moviebox_discover_payload():
+    cache_key = "moviebox:discover"
+    cached = _moviebox_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    _moviebox_assert_available()
+    session = MovieBoxSession(timeout=20)
+
+    homepage = await MovieBoxHomepage(session).get_content_model()
+    trending = await MovieBoxTrending(session).get_content_model()
+    hot = await MovieBoxHotMoviesAndTVSeries(session).get_content_model()
+    popular_searches = await MovieBoxPopularSearch(session).get_content_model()
+
+    categories: dict[str, list] = {}
+    for category in list(getattr(homepage, "operatingList", []) or []):
+        items = _moviebox_unique_items(getattr(category, "subjects", []) or [])
+        if items:
+            categories[str(getattr(category, "title", "") or "")] = items
+            _moviebox_register_items(items)
+
+    trending_items = _moviebox_unique_items(getattr(trending, "items", []) or [])
+    hot_items = _moviebox_unique_items(
+        list(getattr(hot, "movies", []) or []) + list(getattr(hot, "tv_series", []) or [])
+    )
+    combined = _moviebox_unique_items(
+        trending_items
+        + hot_items
+        + _moviebox_pick_category(categories, ["top anime"])
+        + _moviebox_pick_category(categories, ["bollywood"])
+        + _moviebox_pick_category(categories, ["western", "tv"])
+        + _moviebox_pick_category(categories, ["indian", "drama"])
+        + _moviebox_pick_category(categories, ["hindi", "dub"])
+    )
+    _moviebox_register_items(trending_items)
+    _moviebox_register_items(hot_items)
+
+    sections = [
+        {
+            "id": "recent",
+            "title": "Recent",
+            "subtitle": "Fresh titles and current releases",
+            "items": [_moviebox_card_payload(item, "recent") for item in _moviebox_sort_items(hot_items, "recent")[:20]],
+        },
+        {
+            "id": "top-rated",
+            "title": "Top Rated",
+            "subtitle": "Highest IMDb-rated picks from Movie Box",
+            "items": [_moviebox_card_payload(item, "top-rated") for item in _moviebox_sort_items(combined, "rating")[:20]],
+        },
+        {
+            "id": "most-popular",
+            "title": "Most Popular",
+            "subtitle": "What people are watching right now",
+            "items": [_moviebox_card_payload(item, "most-popular") for item in trending_items[:20]],
+        },
+        {
+            "id": "hindi",
+            "title": "Hindi Picks",
+            "subtitle": "Hindi-first titles surfaced from Movie Box",
+            "items": [
+                _moviebox_card_payload(item, "hindi")
+                for item in _moviebox_filter_items(
+                    _moviebox_pick_category(categories, ["hindi", "dub"])
+                    + _moviebox_pick_category(categories, ["bollywood"])
+                    + _moviebox_pick_category(categories, ["punjabi"]),
+                    hindi_only=True,
+                )[:20]
+            ],
+        },
+        {
+            "id": "movies",
+            "title": "Movies",
+            "subtitle": "Featured movie picks",
+            "items": [
+                _moviebox_card_payload(item, "movies")
+                for item in _moviebox_filter_items(
+                    _moviebox_pick_category(categories, ["hollywood"]) + list(getattr(hot, "movies", []) or []),
+                    media_type="movie",
+                )[:20]
+            ],
+        },
+        {
+            "id": "series",
+            "title": "TV Shows",
+            "subtitle": "Popular series and drama picks",
+            "items": [
+                _moviebox_card_payload(item, "series")
+                for item in _moviebox_filter_items(
+                    _moviebox_pick_category(categories, ["western", "tv"])
+                    + _moviebox_pick_category(categories, ["top series"])
+                    + list(getattr(hot, "tv_series", []) or []),
+                    media_type="series",
+                )[:20]
+            ],
+        },
+        {
+            "id": "anime",
+            "title": "Anime",
+            "subtitle": "Top anime on Movie Box",
+            "items": [
+                _moviebox_card_payload(item, "anime")
+                for item in _moviebox_filter_items(
+                    _moviebox_pick_category(categories, ["top anime"]) + combined,
+                    media_type="anime",
+                )[:20]
+            ],
+        },
+    ]
+
+    payload = {
+        "sections": [section for section in sections if section["items"]],
+        "popular_searches": [
+            getattr(entry, "title", "")
+            for entry in list(popular_searches or [])
+            if getattr(entry, "title", "")
+        ][:12],
+    }
+    return _moviebox_cache_set(cache_key, payload)
+
+
+async def _moviebox_find_item(
+    title: str,
+    media_type: str,
+    year: int | None = None,
+    prefer_hindi: bool = True,
+    anime_only: bool = False,
+):
+    _moviebox_assert_available()
+
+    normalized_media_type = _moviebox_media_type_value(media_type)
+    subject_type = MovieBoxSubjectType.ALL
+    if normalized_media_type == "movie":
+        subject_type = MovieBoxSubjectType.MOVIES
+    elif normalized_media_type in {"series", "anime"}:
+        subject_type = MovieBoxSubjectType.TV_SERIES
+
+    session = MovieBoxSession(timeout=15)
+    search = MovieBoxSearch(session, query=title, subject_type=subject_type, per_page=16)
+    results = await search.get_content_model()
+
+    items = list(getattr(results, "items", []) or [])
+    if prefer_hindi and "hindi" not in (title or "").lower():
+        extra_results = await MovieBoxSearch(
+            session,
+            query=f"{title} hindi",
+            subject_type=subject_type,
+            per_page=16,
+        ).get_content_model()
+        items.extend(list(getattr(extra_results, "items", []) or []))
+
+    items = _moviebox_unique_items(items)
+    items = _moviebox_filter_items(
+        items,
+        media_type=normalized_media_type,
+        anime_only=normalized_media_type == "anime" or anime_only,
+    )
+    if not items:
+        raise HTTPException(status_code=404, detail="Movie Box returned no matches")
+
+    _moviebox_register_items(items)
+    ranked = sorted(
+        items,
+        key=lambda item: _moviebox_match_score(
+            item,
+            title,
+            year,
+            prefer_hindi=prefer_hindi,
+            anime_only=normalized_media_type == "anime" or anime_only,
+        ),
+        reverse=True,
+    )
+    return session, ranked[0]
+
+
+async def _moviebox_resolve_item(
+    subject_id: str | None = None,
+    title: str | None = None,
+    media_type: str = "movie",
+    year: int | None = None,
+):
+    registered = _moviebox_get_registered_item(subject_id)
+    if registered is not None:
+        return MovieBoxSession(timeout=15), registered
+
+    if not title:
+        raise HTTPException(status_code=400, detail="subject_id or title is required")
+
+    return await _moviebox_find_item(title, media_type, year)
+
+
+def _moviebox_subject_payload(item, detail_model=None) -> dict:
+    detail_subject = None
+    if detail_model is not None:
+        try:
+            detail_subject = detail_model.resData.model_dump().get("subject", {})
+        except Exception:
+            detail_subject = None
+
+    description = getattr(item, "description", "") or ""
+    if isinstance(detail_subject, dict) and detail_subject.get("description"):
+        description = detail_subject["description"]
+
+    payload = _moviebox_card_payload(item)
+    payload["description"] = description
+    payload["duration_seconds"] = getattr(item, "duration", 0) or 0
+    payload["available_seasons"] = (
+        _moviebox_guess_seasons(payload["title"])
+        if payload["moviebox_media_type"] == "series"
+        else []
+    )
+    return payload
+
+
+@app.get("/moviebox/search")
+async def moviebox_search(title: str, media_type: str = "movie", year: int | None = None):
+    normalized_media_type = _moviebox_media_type_value(media_type)
+    _, item = await _moviebox_find_item(title, normalized_media_type, year)
+    return _moviebox_subject_payload(item)
+
+
+@app.get("/moviebox/discover")
+async def moviebox_discover():
+    return await _moviebox_discover_payload()
+
+
+@app.get("/moviebox/search-items")
+async def moviebox_search_items(
+    query: str,
+    page: int = 1,
+    per_page: int = 24,
+    media_type: str = "all",
+    hindi_only: bool = False,
+    anime_only: bool = False,
+    prefer_hindi: bool = True,
+    sort_by: str = "search",
+):
+    normalized_media_type = _moviebox_media_type_value(media_type)
+    safe_page = max(1, page)
+    safe_per_page = min(max(1, per_page), 48)
+    cache_key = (
+        f"moviebox:search:{query}:{safe_page}:{safe_per_page}:{normalized_media_type}:"
+        f"{hindi_only}:{anime_only}:{prefer_hindi}:{sort_by}"
+    )
+    cached = _moviebox_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    _moviebox_assert_available()
+    session = MovieBoxSession(timeout=20)
+    subject_type = MovieBoxSubjectType.ALL
+    if normalized_media_type == "movie":
+        subject_type = MovieBoxSubjectType.MOVIES
+    elif normalized_media_type in {"series", "anime"}:
+        subject_type = MovieBoxSubjectType.TV_SERIES
+
+    results = await MovieBoxSearch(
+        session,
+        query=query,
+        subject_type=subject_type,
+        page=safe_page,
+        per_page=safe_per_page,
+    ).get_content_model()
+    items = list(getattr(results, "items", []) or [])
+
+    if prefer_hindi and "hindi" not in query.lower():
+        extra = await MovieBoxSearch(
+            session,
+            query=f"{query} hindi",
+            subject_type=subject_type,
+            page=1,
+            per_page=min(24, safe_per_page),
+        ).get_content_model()
+        items.extend(list(getattr(extra, "items", []) or []))
+
+    items = _moviebox_unique_items(items)
+    _moviebox_register_items(items)
+    items = _moviebox_filter_items(
+        items,
+        media_type=normalized_media_type,
+        hindi_only=hindi_only,
+        anime_only=anime_only or normalized_media_type == "anime",
+    )
+    ranked = sorted(
+        _moviebox_sort_items(items, sort_by, query),
+        key=lambda item: _moviebox_match_score(
+            item,
+            query,
+            None,
+            prefer_hindi=prefer_hindi,
+            anime_only=anime_only or normalized_media_type == "anime",
+        ),
+        reverse=True,
+    )
+
+    payload = {
+        "query": query,
+        "page": safe_page,
+        "per_page": safe_per_page,
+        "media_type": normalized_media_type,
+        "items": [_moviebox_card_payload(item, "search") for item in ranked],
+    }
+    return _moviebox_cache_set(cache_key, payload)
+
+
+@app.get("/moviebox/details")
+async def moviebox_details(
+    subject_id: str | None = None,
+    title: str | None = None,
+    media_type: str = "movie",
+    year: int | None = None,
+):
+    normalized_media_type = _moviebox_media_type_value(media_type)
+    session, item = await _moviebox_resolve_item(subject_id, title, normalized_media_type, year)
+
+    detail_model = None
+    try:
+        if normalized_media_type == "movie":
+            detail_model = await MovieBoxMovieDetails(item, session).get_content_model()
+        else:
+            detail_model = await MovieBoxTVSeriesDetails(item, session).get_content_model()
+    except Exception:
+        detail_model = None
+
+    return {
+        "provider": "MovieBox",
+        "item": _moviebox_subject_payload(item, detail_model),
+    }
+
+
+@app.get("/moviebox/sources")
+async def moviebox_sources(
+    subject_id: str | None = None,
+    title: str | None = None,
+    media_type: str = "movie",
+    year: int | None = None,
+    season: int = 1,
+    episode: int = 1,
+):
+    normalized_media_type = _moviebox_media_type_value(media_type)
+    if normalized_media_type == "all":
+        raise HTTPException(status_code=400, detail="media_type must not be 'all' for sources")
+
+    cache_key = f"moviebox:sources:{subject_id or title}:{normalized_media_type}:{year}:{season}:{episode}"
+    cached = _moviebox_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    session, item = await _moviebox_resolve_item(subject_id, title, normalized_media_type, year)
+
+    if normalized_media_type == "movie":
+        files = await DownloadableMovieFilesDetail(session, item).get_content_model()
+    else:
+        files = await DownloadableTVSeriesFilesDetail(session, item).get_content_model(season, episode)
+
+    downloads = sorted(
+        list(getattr(files, "downloads", []) or []),
+        key=lambda media_file: int(getattr(media_file, "resolution", 0) or 0),
+        reverse=True,
+    )
+
+    if not downloads:
+        raise HTTPException(status_code=404, detail="Movie Box returned no playable files")
+
+    captions = [
+        _moviebox_caption_payload(caption)
+        for caption in list(getattr(files, "captions", []) or [])
+        if str(getattr(caption, "url", "") or "")
+    ]
+
+    payload = {
+        "provider": "MovieBox",
+        "media_type": normalized_media_type,
+        "title": getattr(item, "title", title or ""),
+        "year": _moviebox_release_year(item),
+        "season": season if normalized_media_type != "movie" else None,
+        "episode": episode if normalized_media_type != "movie" else None,
+        "item": _moviebox_subject_payload(item),
+        "subtitles": captions,
+        "sources": [_moviebox_source_payload(media_file, captions) for media_file in downloads],
+    }
+    return _moviebox_cache_set(cache_key, payload, ttl=60 * 10)
+
+
+def _moviebox_srt_to_vtt(content: str) -> str:
+    safe_content = (content or "").replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+    if safe_content.startswith("WEBVTT"):
+        return safe_content
+
+    converted_lines = ["WEBVTT", ""]
+    for line in safe_content.split("\n"):
+        converted_lines.append(line.replace(",", ".") if "-->" in line else line)
+    return "\n".join(converted_lines)
+
+
+@app.get("/moviebox/subtitle")
+def moviebox_subtitle(url: str):
+    try:
+        request = URLRequest(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://moviebox.ng/",
+            },
+        )
+        with urlopen(request, timeout=20) as response:
+            content = response.read().decode("utf-8", errors="ignore")
+        return Response(content=_moviebox_srt_to_vtt(content), media_type="text/vtt")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Subtitle fetch failed: {exc}")
+
+
+@app.get("/moviebox/poster")
+def moviebox_poster(url: str):
+    try:
+        request = URLRequest(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://moviebox.ng/",
+            },
+        )
+        with urlopen(request, timeout=20) as response:
+            content = response.read()
+            media_type = response.headers.get("Content-Type", "image/jpeg")
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Movie Box poster fetch failed: {exc}")
+
+
+@app.get("/moviebox/proxy-stream")
+def moviebox_proxy_stream(url: str, request: Request):
+    try:
+        headers = dict(MOVIEBOX_DOWNLOAD_REQUEST_HEADERS or {})
+        headers.setdefault("User-Agent", "Mozilla/5.0")
+        range_header = request.headers.get("range")
+        if range_header:
+            headers["Range"] = range_header
+
+        upstream_request = URLRequest(url, headers=headers)
+        upstream_response = urlopen(upstream_request, timeout=30)
+
+        response_headers = {}
+        for header_name in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"):
+            header_value = upstream_response.headers.get(header_name)
+            if header_value:
+                response_headers[header_name] = header_value
+
+        media_type = upstream_response.headers.get("Content-Type", "video/mp4")
+
+        def iter_stream():
+            try:
+                while True:
+                    chunk = upstream_response.read(1024 * 256)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                upstream_response.close()
+
+        return StreamingResponse(
+            iter_stream(),
+            status_code=getattr(upstream_response, "status", 200),
+            headers=response_headers,
+            media_type=media_type,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Movie Box stream proxy failed: {exc}")
+
+
 _HEIGHT_LABELS = {
     144: "144p",
     240: "240p",
@@ -1175,73 +1956,18 @@ def storage_stats():
 # HISTORY MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.delete("/history/{item_id}")
-def delete_history_item(item_id: str, delete_file: bool = False):
-    """
-    Remove a history record from the DB.
-    If delete_file=true, also delete the file from disk.
-    """
-    try:
-        con = get_db_connection()
-        row = con.execute("SELECT file_path FROM history WHERE id=?", (item_id,)).fetchone()
-
-        if not row:
-            con.close()
-            raise HTTPException(status_code=404, detail="History item not found")
-
-        file_path = row["file_path"] or ""
-
-        # Delete the physical file if requested and it exists
-        deleted_file = False
-        if delete_file and file_path:
-            p = Path(file_path)
-            if p.exists() and p.is_file():
-                p.unlink()
-                deleted_file = True
-
-        # Always remove the DB record
-        con.execute("DELETE FROM history WHERE id=?", (item_id,))
-        con.commit()
-        con.close()
-
-        return {"deleted": item_id, "file_deleted": deleted_file, "file_path": file_path}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/history")
-def clear_all_history(delete_files: bool = False):
-    """Clear entire history. Optionally delete all files too."""
-    try:
-        con = get_db_connection()
-        deleted_files = 0
-
-        if delete_files:
-            rows = con.execute("SELECT file_path FROM history WHERE file_path != ''").fetchall()
-            for row in rows:
-                p = Path(row["file_path"])
-                if p.exists() and p.is_file():
-                    try:
-                        p.unlink()
-                        deleted_files += 1
-                    except Exception:
-                        pass
-
-        count = con.execute("SELECT COUNT(*) FROM history").fetchone()[0]
-        con.execute("DELETE FROM history")
-        con.commit()
-        con.close()
-
-        return {"cleared": count, "files_deleted": deleted_files}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.get("/ffmpeg-status")
 def ffmpeg_status():
     """Check if FFmpeg is available."""
     return {"available": has_ffmpeg(), "path": FFMPEG_PATH or ""}
+
+@app.get("/extract-stream")
+async def extract_stream(url: str):
+    result = subprocess.run(
+        ["yt-dlp", "--get-url", "--no-playlist", url],
+        capture_output=True, text=True, timeout=30
+    )
+    direct_url = result.stdout.strip().splitlines()[0]
+    if not direct_url:
+        raise HTTPException(status_code=422, detail="No stream found")
+    return {"url": direct_url, "quality": "Auto"}

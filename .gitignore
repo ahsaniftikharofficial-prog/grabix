@@ -38,3 +38,6 @@ build/
 
 # Ignore Tauri junk
 src-tauri/target/
+repomix-output.xml
+src-only.xml
+repomix-output.xml
