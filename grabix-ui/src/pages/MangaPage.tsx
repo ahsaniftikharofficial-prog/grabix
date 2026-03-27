@@ -3,7 +3,7 @@
 
 import { useState, useEffect } from "react";
 import {
-  IconSearch, IconStar, IconDownload, IconX, IconRefresh,
+  IconSearch, IconDownload, IconX, IconRefresh,
   IconChevronDown, IconCheck,
 } from "../components/Icons";
 

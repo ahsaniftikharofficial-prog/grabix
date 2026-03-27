@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp, os, uuid, sqlite3, shutil, threading, subprocess, time, json, re
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import urljoin
+from urllib.request import Request, urlopen
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -153,6 +155,61 @@ def save_settings_to_disk(data: dict):
 @app.get("/")
 def home():
     return {"status": "GRABIX Backend Running"}
+
+
+def _extract_iframe_src(html: str) -> str:
+    content = html or ""
+    iframe_match = re.search(r'<iframe[^>]+src=["\']([^"\']+)["\']', content, re.IGNORECASE)
+    if iframe_match:
+        return iframe_match.group(1).strip()
+
+    scripted_match = re.search(r"src:\s*['\"]([^'\"]+)['\"]", content, re.IGNORECASE)
+    if scripted_match:
+        return scripted_match.group(1).strip()
+
+    return ""
+
+
+def _resolve_embed_target(url: str, max_depth: int = 3) -> str:
+    current = (url or "").strip()
+    if not current:
+        return ""
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": current,
+    }
+
+    for _ in range(max_depth):
+        req = Request(current, headers=headers)
+        with urlopen(req, timeout=12) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+
+        iframe_src = _extract_iframe_src(html)
+        if not iframe_src:
+            return current
+
+        next_url = urljoin(current, iframe_src)
+        if next_url == current:
+            return current
+
+        if any(host in next_url for host in ("vidsrc.to", "vsembed.ru")):
+            current = next_url
+            continue
+
+        return next_url
+
+    return current
+
+
+@app.get("/resolve-embed")
+def resolve_embed(url: str):
+    try:
+        resolved = _resolve_embed_target(url)
+        return {"url": resolved or url}
+    except Exception as e:
+        return {"url": url, "error": str(e)}
 
 
 @app.get("/check-link")

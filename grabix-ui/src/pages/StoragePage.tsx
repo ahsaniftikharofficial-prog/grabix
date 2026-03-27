@@ -72,7 +72,6 @@ export default function StoragePage() {
   };
 
   const totalBytes    = stats?.folder_total_bytes ?? 0;
-  const trackedBytes  = stats?.total_bytes ?? 0;
   const typeEntries   = Object.entries(stats?.by_type ?? {}).filter(([, v]) => v.bytes > 0);
 
   return (

@@ -1,8 +1,9 @@
 // grabix-ui/src/App.tsx
-// Phase 4: Anime, Manga, Movies pages added
+// Updated: FavoritesProvider + FavoritesPage added
 
 import { useState, useEffect } from "react";
 import { ThemeProvider } from "./context/ThemeContext";
+import { FavoritesProvider } from "./context/FavoritesContext";
 import Sidebar, { type Page } from "./components/Sidebar";
 import DownloaderPage from "./pages/DownloaderPage";
 import LibraryPage    from "./pages/LibraryPage";
@@ -10,6 +11,8 @@ import StoragePage    from "./pages/StoragePage";
 import AnimePage      from "./pages/AnimePage";
 import MangaPage      from "./pages/MangaPage";
 import MoviesPage     from "./pages/MoviesPage";
+import TVSeriesPage   from "./pages/TVSeriesPage";
+import FavoritesPage  from "./pages/FavoritesPage";
 import SettingsPage   from "./pages/SettingsPage";
 import "./index.css";
 
@@ -31,17 +34,14 @@ function Inner() {
     anime:      <AnimePage />,
     manga:      <MangaPage />,
     movies:     <MoviesPage />,
+    series:     <TVSeriesPage />,
+    favorites:  <FavoritesPage />,
     settings:   <SettingsPage />,
   };
 
   return (
     <div style={{ display: "flex", height: "100vh", width: "100vw", overflow: "hidden" }}>
-      <Sidebar
-        page={page}
-        setPage={setPage}
-        activeDownloads={activeDownloads}
-        backendOk={backendOk}
-      />
+      <Sidebar page={page} setPage={setPage} activeDownloads={activeDownloads} backendOk={backendOk} />
       <main style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", background: "var(--bg-app)" }}>
         {PAGES[page]}
       </main>
@@ -52,7 +52,9 @@ function Inner() {
 export default function App() {
   return (
     <ThemeProvider>
-      <Inner />
+      <FavoritesProvider>
+        <Inner />
+      </FavoritesProvider>
     </ThemeProvider>
   );
 }
