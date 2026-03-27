@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { IconCheck, IconDownload, IconPlay, IconRefresh, IconSearch, IconStar, IconX } from "../components/Icons";
+import { useEffect, useMemo, useState } from "react";
+import { IconDownload, IconPlay, IconRefresh, IconSearch, IconStar, IconX } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import { useFavorites } from "../context/FavoritesContext";
@@ -25,6 +25,7 @@ interface Show {
   number_of_episodes?: number;
   status?: string;
   external_ids?: { imdb_id?: string };
+  seasons?: { season_number: number; episode_count?: number; name?: string }[];
 }
 
 type Tab = "trending" | "popular" | "toprated" | "onair";
@@ -139,7 +140,7 @@ export default function TVSeriesPage() {
       </div>
 
       {detail && !player && <SeriesDetail show={detail} tf={tf} onClose={() => setDetail(null)} onPlay={(nextPlayer) => { setDetail(null); setPlayer(nextPlayer); }} />}
-      {player && <VidSrcPlayer title={player.title} subtitle={player.subtitle} poster={player.poster} sources={player.sources} onClose={() => setPlayer(null)} />}
+      {player && <VidSrcPlayer title={player.title} subtitle={player.subtitle} poster={player.poster} sources={player.sources} mediaType="tv" onClose={() => setPlayer(null)} />}
     </div>
   );
 }
@@ -181,18 +182,70 @@ function SeriesActions({ onPlay, onDownload, favId, favItem }: { onPlay: () => v
 
 function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint: string) => Promise<any>; onClose: () => void; onPlay: (player: { title: string; subtitle?: string; poster?: string; sources: StreamSource[] }) => void }) {
   const [full, setFull] = useState<Show | null>(null);
-  const [dlUrl, setDlUrl] = useState("");
-  const [sending, setSending] = useState(false);
-  const [sent, setSent] = useState(false);
   const [season, setSeason] = useState(1);
   const [episode, setEpisode] = useState(1);
+  const [seasonEpisodes, setSeasonEpisodes] = useState<number>(12);
 
   useEffect(() => {
     tf(`/tv/${show.id}?append_to_response=external_ids`).then(setFull).catch(() => {});
   }, [show.id, tf]);
 
+  useEffect(() => {
+    let cancelled = false;
+    tf(`/tv/${show.id}/season/${season}`)
+      .then((seasonData) => {
+        if (cancelled) return;
+        const episodes = Array.isArray(seasonData?.episodes) ? seasonData.episodes.length : 0;
+        setSeasonEpisodes(Math.max(episodes, 1));
+        setEpisode((current) => Math.min(current, Math.max(episodes, 1)));
+      })
+      .catch(() => {
+        if (!cancelled) {
+          const fallback = data.seasons?.find((item) => item.season_number === season)?.episode_count ?? 12;
+          setSeasonEpisodes(Math.max(fallback, 1));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [show.id, season, tf]);
+
   const data = full ?? show;
   const seriesYear = data.first_air_date ? Number(data.first_air_date.slice(0, 4)) : undefined;
+  const availableSeasons = (data.seasons ?? [])
+    .map((item) => item.season_number)
+    .filter((value) => value > 0);
+  const seasonCounts = (data.seasons ?? [])
+    .filter((item) => item.season_number > 0)
+    .map((item) => ({ season: item.season_number, count: Math.max(item.episode_count ?? 0, 0) }));
+  const totalEpisodes = Math.max(
+    data.number_of_episodes ?? seasonCounts.reduce((sum, item) => sum + item.count, 0),
+    seasonEpisodes
+  );
+  const globalEpisodeMap = useMemo(
+    () =>
+      seasonCounts.flatMap((item) =>
+        Array.from({ length: item.count }, (_, index) => ({
+          global: seasonCounts
+            .filter((entry) => entry.season < item.season)
+            .reduce((sum, entry) => sum + entry.count, 0) + index + 1,
+          season: item.season,
+          episode: index + 1,
+        }))
+      ),
+    [JSON.stringify(seasonCounts)]
+  );
+  const episodeGroups = Math.ceil(seasonEpisodes / 50);
+  const selectedGroup = Math.floor((episode - 1) / 50);
+  const episodeStart = selectedGroup * 50 + 1;
+  const episodeEnd = Math.min(seasonEpisodes, episodeStart + 49);
+  const visibleEpisodes = Array.from({ length: Math.max(0, episodeEnd - episodeStart + 1) }, (_, index) => episodeStart + index);
+  const globalEpisodeGroups = Math.ceil(Math.max(totalEpisodes, 1) / 100);
+  const globalEpisode = globalEpisodeMap.find((item) => item.season === season && item.episode === episode)?.global ?? episode;
+  const selectedGlobalGroup = Math.floor((globalEpisode - 1) / 100);
+  const globalStart = selectedGlobalGroup * 100 + 1;
+  const globalEnd = Math.min(totalEpisodes, globalStart + 99);
+  const visibleGlobalEpisodes = Array.from({ length: Math.max(0, globalEnd - globalStart + 1) }, (_, index) => globalStart + index);
 
   const loadMovieBoxSources = async () => {
     try {
@@ -226,24 +279,15 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
     const directSource = movieBoxSources[0];
 
     if (directSource) {
-      await fetch(`${GRABIX}/download?url=${encodeURIComponent(directSource.externalUrl ?? directSource.url)}&dl_type=video`);
+      await fetch(`${GRABIX}/download?url=${encodeURIComponent(directSource.url)}&dl_type=video`);
+      window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
       return;
     }
 
-    window.open(`https://vidsrc.to/embed/tv/${show.id}`, "_blank");
-  };
-
-  const sendDl = async () => {
-    if (!dlUrl.trim()) return;
-    setSending(true);
-    try {
-      await fetch(`${GRABIX}/download?url=${encodeURIComponent(dlUrl.trim())}&dl_type=video`);
-      setSent(true);
-      setTimeout(() => setSent(false), 3000);
-    } catch {
-      // Ignore download send failures in the modal.
-    } finally {
-      setSending(false);
+    const fallbackSource = getTvSources({ tmdbId: show.id, imdbId: data.external_ids?.imdb_id }, { season, episode })[0];
+    if (fallbackSource) {
+      await fetch(`${GRABIX}/download?url=${encodeURIComponent(fallbackSource.url)}&dl_type=video`);
+      window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
     }
   };
 
@@ -278,7 +322,17 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
           <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>Season</div>
-              <input className="input-base" type="number" min={1} value={season} onChange={(e) => setSeason(Math.max(1, Number(e.target.value) || 1))} />
+              {availableSeasons.length > 0 ? (
+                <select className="input-base" value={season} onChange={(e) => setSeason(Number(e.target.value))}>
+                  {availableSeasons.map((value) => (
+                    <option key={value} value={value}>
+                      Season {value}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input className="input-base" type="number" min={1} value={season} onChange={(e) => setSeason(Math.max(1, Number(e.target.value) || 1))} />
+              )}
             </div>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>Episode</div>
@@ -286,22 +340,95 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
             </div>
           </div>
 
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Episodes</div>
+              {episodeGroups > 1 && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {Array.from({ length: episodeGroups }, (_, index) => {
+                    const start = index * 50 + 1;
+                    const end = Math.min(seasonEpisodes, start + 49);
+                    return (
+                      <button
+                        key={`${start}-${end}`}
+                        className={`quality-chip${selectedGroup === index ? " active" : ""}`}
+                        onClick={() => setEpisode(start)}
+                      >
+                        {start}-{end}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", maxHeight: 144, overflowY: "auto", paddingRight: 4 }}>
+              {visibleEpisodes.map((value) => (
+                <button
+                  key={value}
+                  className={`quality-chip${episode === value ? " active" : ""}`}
+                  onClick={() => setEpisode(value)}
+                >
+                  {value}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {globalEpisodeMap.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Overall Episodes</div>
+                {globalEpisodeGroups > 1 && (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {Array.from({ length: globalEpisodeGroups }, (_, index) => {
+                      const start = index * 100 + 1;
+                      const end = Math.min(totalEpisodes, start + 99);
+                      return (
+                        <button
+                          key={`global-${start}-${end}`}
+                          className={`quality-chip${selectedGlobalGroup === index ? " active" : ""}`}
+                          onClick={() => {
+                            const mapping = globalEpisodeMap.find((item) => item.global === start);
+                            if (mapping) {
+                              setSeason(mapping.season);
+                              setEpisode(mapping.episode);
+                            }
+                          }}
+                        >
+                          {start}-{end}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", maxHeight: 144, overflowY: "auto", paddingRight: 4 }}>
+                {visibleGlobalEpisodes.map((value) => {
+                  const mapping = globalEpisodeMap.find((item) => item.global === value);
+                  if (!mapping) return null;
+                  return (
+                    <button
+                      key={`global-${value}`}
+                      className={`quality-chip${globalEpisode === value ? " active" : ""}`}
+                      onClick={() => {
+                        setSeason(mapping.season);
+                        setEpisode(mapping.episode);
+                      }}
+                    >
+                      {value}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <SeriesActions
             onPlay={handlePlay}
             onDownload={handleDownload}
             favId={`series-${show.id}`}
             favItem={{ id: `series-${show.id}`, title: data.name, poster: data.poster_path ? `${IMG_BASE}${data.poster_path}` : "", type: "series", tmdbId: show.id, imdbId: data.external_ids?.imdb_id }}
           />
-
-          <div style={{ background: "var(--bg-surface2)", borderRadius: 10, padding: "14px 16px" }}>
-            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: "var(--text-secondary)" }}>Download from custom URL</div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <input className="input-base" style={{ flex: 1, fontSize: 13 }} placeholder="Paste video URL..." value={dlUrl} onChange={(e) => setDlUrl(e.target.value)} />
-              <button className="btn btn-primary" style={{ gap: 6, flexShrink: 0 }} onClick={sendDl} disabled={sending || !dlUrl.trim()}>
-                {sent ? <><IconCheck size={13} /> Sent!</> : sending ? "Sending..." : <><IconDownload size={13} /> Send</>}
-              </button>
-            </div>
-          </div>
         </div>
       </div>
     </div>

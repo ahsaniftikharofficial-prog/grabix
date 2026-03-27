@@ -8,7 +8,7 @@ import { fetchMovieBoxSources, getAnimeSources, getMovieSources, getTvSources, t
 export default function FavoritesPage() {
   const { favorites, remove } = useFavorites();
   const [filter, setFilter] = useState<"all" | "movie" | "anime" | "manga" | "series">("all");
-  const [player, setPlayer] = useState<{ title: string; poster?: string; sources: StreamSource[] } | null>(null);
+  const [player, setPlayer] = useState<{ title: string; poster?: string; sources: StreamSource[]; mediaType: "movie" | "tv" } | null>(null);
 
   const filtered = filter === "all" ? favorites : favorites.filter(favorite => favorite.type === filter);
 
@@ -45,6 +45,7 @@ export default function FavoritesPage() {
       title: item.title,
       poster: item.poster || undefined,
       sources,
+      mediaType: item.type === "movie" ? "movie" : "tv",
     });
   };
 
@@ -83,7 +84,7 @@ export default function FavoritesPage() {
         )}
       </div>
 
-      {player && <VidSrcPlayer title={player.title} poster={player.poster} sources={player.sources} onClose={() => setPlayer(null)} />}
+      {player && <VidSrcPlayer title={player.title} poster={player.poster} sources={player.sources} mediaType={player.mediaType} onClose={() => setPlayer(null)} />}
     </div>
   );
 }

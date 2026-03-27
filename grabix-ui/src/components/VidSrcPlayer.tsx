@@ -2,6 +2,7 @@ import Hls from "hls.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   IconAlert,
+  IconArrowLeft,
   IconAudio,
   IconExpand,
   IconInfo,
@@ -10,6 +11,7 @@ import {
   IconServers,
   IconSubtitle,
 } from "./Icons";
+import SubtitlePanel from "./SubtitlePanel";
 import { inferStreamKind } from "../lib/streamProviders";
 import type { StreamSource } from "../lib/streamProviders";
 
@@ -23,6 +25,7 @@ interface Props {
   poster?: string;
   embedUrl?: string;
   sources?: StreamSource[];
+  mediaType?: "movie" | "tv";
   onClose: () => void;
   /**
    * Called when the user successfully extracts a direct stream URL.
@@ -37,6 +40,12 @@ type FailureKind =
   | "media_error"
   | "unsupported_source"
   | "open_failed";
+
+interface SubtitleCue {
+  start: number;
+  end: number;
+  text: string;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -69,6 +78,62 @@ function formatTime(value: number): string {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
+function parseTimestamp(value: string): number {
+  const cleaned = value.trim().replace(",", ".");
+  const parts = cleaned.split(":").map(Number);
+  if (parts.some((part) => Number.isNaN(part))) return 0;
+
+  if (parts.length === 3) {
+    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  }
+  if (parts.length === 2) {
+    return parts[0] * 60 + parts[1];
+  }
+  return parts[0] ?? 0;
+}
+
+function parseSubtitleText(content: string): SubtitleCue[] {
+  const normalized = (content || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!normalized) return [];
+
+  const blocks = normalized
+    .replace(/^WEBVTT\s*\n/i, "")
+    .split(/\n\s*\n/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  const cues: SubtitleCue[] = [];
+
+  for (const block of blocks) {
+    const lines = block
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .filter(Boolean);
+
+    if (lines.length < 2) continue;
+
+    const timeLineIndex = lines.findIndex((line) => line.includes("-->"));
+    if (timeLineIndex === -1) continue;
+
+    const timeLine = lines[timeLineIndex];
+    const [startRaw, endRaw] = timeLine.split("-->").map((value) => value.trim());
+    if (!startRaw || !endRaw) continue;
+
+    const start = parseTimestamp(startRaw.split(" ")[0]);
+    const end = parseTimestamp(endRaw.split(" ")[0]);
+    const textLines = lines.slice(timeLineIndex + 1);
+    if (!textLines.length) continue;
+
+    cues.push({
+      start,
+      end,
+      text: textLines.join("\n"),
+    });
+  }
+
+  return cues;
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -79,6 +144,7 @@ export default function VidSrcPlayer({
   subtitle,
   poster,
   sources,
+  mediaType = "movie",
   onClose,
   onExtractedUrl,
 }: Props) {
@@ -159,6 +225,10 @@ export default function VidSrcPlayer({
   const [duration, setDuration] = useState(0);
   const [subtitleUrl, setSubtitleUrl] = useState("");
   const [subtitleName, setSubtitleName] = useState("");
+  const [showSubtitlePanel, setShowSubtitlePanel] = useState(false);
+  const [subtitleCues, setSubtitleCues] = useState<SubtitleCue[]>([]);
+  const [currentCue, setCurrentCue] = useState("");
+  const [subtitleHint, setSubtitleHint] = useState("");
 
   // Stream extraction state
   const [extracting, setExtracting] = useState(false);
@@ -203,7 +273,7 @@ export default function VidSrcPlayer({
       if (hideChromeTimeoutRef.current)
         window.clearTimeout(hideChromeTimeoutRef.current);
     };
-  }, [serverMenuOpen, volumeMenuOpen, subtitleMenuOpen]);
+  }, [serverMenuOpen, volumeMenuOpen, subtitleMenuOpen, showSubtitlePanel]);
 
   // ---------------------------------------------------------------------------
   // Keyboard shortcuts
@@ -291,6 +361,7 @@ export default function VidSrcPlayer({
     setServerMenuOpen(false);
     setVolumeMenuOpen(false);
     setSubtitleMenuOpen(false);
+    setShowSubtitlePanel(false);
     setExtractError("");
     embedLoadedRef.current = false;
 
@@ -518,7 +589,36 @@ export default function VidSrcPlayer({
 
     setSubtitleUrl("");
     setSubtitleName("");
+    setSubtitleCues([]);
+    setCurrentCue("");
+    setSubtitleHint("");
   }, [activeSource]);
+
+  useEffect(() => {
+    if (!subtitleCues.length) {
+      setCurrentCue("");
+      setSubtitleHint("");
+      return;
+    }
+
+    const cue = subtitleCues.find(
+      (item) => currentTime >= item.start && currentTime <= item.end
+    );
+    setCurrentCue(cue?.text ?? "");
+
+    if (cue) {
+      setSubtitleHint("");
+      return;
+    }
+
+    const nextCue = subtitleCues.find((item) => item.start > currentTime);
+    if (nextCue) {
+      setSubtitleHint(`Subtitles loaded. Next line at ${formatTime(nextCue.start)}.`);
+      return;
+    }
+
+    setSubtitleHint("Subtitles loaded.");
+  }, [currentTime, subtitleCues]);
 
   // ---------------------------------------------------------------------------
   // Handlers
@@ -569,7 +669,11 @@ export default function VidSrcPlayer({
     const objectUrl = URL.createObjectURL(file);
     setSubtitleUrl(objectUrl);
     setSubtitleName(file.name);
+    setSubtitleCues([]);
+    setCurrentCue("");
+    setSubtitleHint("Subtitle track loaded.");
     setSubtitleMenuOpen(false);
+    setShowSubtitlePanel(false);
     setFallbackNotice(`Loaded subtitles: ${file.name}`);
     event.target.value = "";
   };
@@ -580,7 +684,11 @@ export default function VidSrcPlayer({
     }
     setSubtitleUrl(url);
     setSubtitleName(label);
+    setSubtitleCues([]);
+    setCurrentCue("");
+    setSubtitleHint("Subtitle track loaded.");
     setSubtitleMenuOpen(false);
+    setShowSubtitlePanel(false);
     setFallbackNotice(`Loaded subtitles: ${label}`);
   };
 
@@ -590,7 +698,30 @@ export default function VidSrcPlayer({
     }
     setSubtitleUrl("");
     setSubtitleName("");
+    setSubtitleCues([]);
+    setCurrentCue("");
+    setSubtitleHint("");
     setSubtitleMenuOpen(false);
+  };
+
+  const handleSubtitleLoaded = (content: string, label: string) => {
+    if (subtitleUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(subtitleUrl);
+    }
+
+    const cues = parseSubtitleText(content);
+    setSubtitleUrl("");
+    setSubtitleName(label);
+    setSubtitleCues(cues);
+    setCurrentCue("");
+    setSubtitleHint(
+      cues.length > 0
+        ? `Subtitles loaded. Next line at ${formatTime(cues[0].start)}.`
+        : "Subtitle file loaded, but no timed lines were found."
+    );
+    setSubtitleMenuOpen(false);
+    setShowSubtitlePanel(false);
+    setFallbackNotice(`Loaded subtitles: ${label}`);
   };
 
   /**
@@ -673,6 +804,19 @@ export default function VidSrcPlayer({
         onChange={onSubtitlePicked}
       />
 
+      <SubtitlePanel
+        mediaTitle={title}
+        mediaType={mediaType}
+        visible={showSubtitlePanel}
+        onClose={() => setShowSubtitlePanel(false)}
+        onSubtitleLoaded={handleSubtitleLoaded}
+        onOpenLocalFile={() => subtitleInputRef.current?.click()}
+        onSelectTrack={handleSubtitleSelect}
+        availableTracks={activeSubtitles}
+        activeSubtitleName={subtitleName}
+        onClearSubtitles={clearSubtitles}
+      />
+
       {activeSource ? (
         <>
           {isEmbedEngine && (
@@ -698,25 +842,47 @@ export default function VidSrcPlayer({
           )}
 
           {isDirectEngine && (
-            <video
-              key={`${activeSource.id}-${reloadKey}`}
-              ref={videoRef}
-              crossOrigin="anonymous"
-              playsInline
-              preload="metadata"
-              poster={poster}
-              className="player-video"
-            >
-              {subtitleUrl && (
-                <track
-                  key={subtitleUrl}
-                  default
-                  kind="subtitles"
-                  label={subtitleName || "Subtitles"}
-                  src={subtitleUrl}
-                />
+            <>
+              <video
+                key={`${activeSource.id}-${reloadKey}`}
+                ref={videoRef}
+                crossOrigin="anonymous"
+                playsInline
+                preload="metadata"
+                poster={poster}
+                className="player-video"
+              >
+                {subtitleUrl && (
+                  <track
+                    key={subtitleUrl}
+                    default
+                    kind="subtitles"
+                    label={subtitleName || "Subtitles"}
+                    src={subtitleUrl}
+                  />
+                )}
+              </video>
+              {currentCue && (
+                <div
+                  style={{
+                    position: "absolute",
+                    bottom: 72,
+                    width: "100%",
+                    textAlign: "center",
+                    color: "white",
+                    textShadow: "2px 2px 4px black",
+                    fontSize: "1.1rem",
+                    lineHeight: 1.45,
+                    pointerEvents: "none",
+                    zIndex: 10,
+                    padding: "0 20px",
+                    whiteSpace: "pre-line",
+                  }}
+                >
+                  {currentCue}
+                </div>
               )}
-            </video>
+            </>
           )}
 
           {isLoading && (
@@ -786,6 +952,13 @@ export default function VidSrcPlayer({
         </div>
       )}
 
+      {!errorText && subtitleHint && (
+        <div className="player-floating-status" style={{ top: 72, bottom: "auto" }}>
+          <IconSubtitle size={14} color="#d7e9ff" />
+          <span>{subtitleHint}</span>
+        </div>
+      )}
+
       <div
         className={`player-hover-ui${showChrome ? " visible" : ""}${
           compactControls ? " compact" : ""
@@ -793,6 +966,16 @@ export default function VidSrcPlayer({
       >
         <div className="player-top-fade" />
         {!compactControls && <div className="player-bottom-fade" />}
+
+        <button
+          className="player-control-icon"
+          onClick={onClose}
+          title="Back"
+          aria-label="Back"
+          style={{ position: "absolute", top: 16, left: 16, zIndex: 12 }}
+        >
+          <IconArrowLeft size={16} color="currentColor" />
+        </button>
 
         <div
           className={`player-controls-wrap${compactControls ? " compact" : ""}`}
@@ -945,53 +1128,16 @@ export default function VidSrcPlayer({
                 <button
                   className="player-control-icon"
                   onClick={() => {
-                    setSubtitleMenuOpen((open) => !open);
+                    setShowSubtitlePanel((open) => !open);
                     setServerMenuOpen(false);
                     setVolumeMenuOpen(false);
+                    setSubtitleMenuOpen(false);
                   }}
                   title="Subtitles"
                   aria-label="Subtitles"
                 >
                   <IconSubtitle size={16} color="currentColor" />
                 </button>
-                {subtitleMenuOpen && (
-                  <div className="player-popover narrow">
-                    <div className="player-popover-label">Subtitles</div>
-                    <button
-                      className="player-popover-item"
-                      onClick={() => subtitleInputRef.current?.click()}
-                    >
-                      <span>
-                        {subtitleName ? "Replace local VTT" : "Load local VTT"}
-                      </span>
-                      <small>{subtitleName || "API slot ready"}</small>
-                    </button>
-                    {activeSubtitles.length > 0 &&
-                      activeSubtitles.map((track) => (
-                        <button
-                          key={track.id}
-                          className="player-popover-item"
-                          onClick={() => handleSubtitleSelect(track.url, track.label)}
-                        >
-                          <span>{track.label}</span>
-                          <small>{track.language || "Movie Box subtitle"}</small>
-                        </button>
-                      ))}
-                    {subtitleUrl && (
-                      <button className="player-popover-item" onClick={clearSubtitles}>
-                        <span>Disable subtitles</span>
-                        <small>Hide the current subtitle track</small>
-                      </button>
-                    )}
-                    <div className="player-mini-note">
-                      {isEmbedEngine
-                        ? "When you share the subtitle API, we can inject it here for supported providers. Embed servers may still limit subtitle control."
-                        : activeSubtitles.length > 0
-                          ? "Movie Box subtitles are ready here, and you can still load a local VTT file."
-                          : "Local VTT works now. API subtitle sources can plug into this panel next."}
-                    </div>
-                  </div>
-                )}
               </div>
 
               {/* Fullscreen */}
@@ -1012,6 +1158,11 @@ export default function VidSrcPlayer({
                     ? `${activeSource.provider} · ${statusText}`
                     : "Waiting for source"}
                 </span>
+                {subtitleName && (
+                  <span style={{ marginLeft: 10 }}>
+                    Subtitle: {subtitleName}
+                  </span>
+                )}
               </div>
             )}
           </div>

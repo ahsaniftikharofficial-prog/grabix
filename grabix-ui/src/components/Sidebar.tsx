@@ -1,5 +1,5 @@
 import { useTheme } from "../context/ThemeContext";
-import { IconBrowse, IconConvert, IconDownload, IconLibrary, IconSettings, IconSun, IconMoon, IconFolder, IconHeart } from "./Icons";
+import { IconBrowse, IconConvert, IconDownload, IconLibrary, IconSettings, IconSun, IconMoon, IconHeart } from "./Icons";
 
 const IconFilm = ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -28,7 +28,7 @@ const IconTv = ({ size = 16, color = "currentColor" }: { size?: number; color?: 
   </svg>
 );
 
-export type Page = "downloader" | "converter" | "library" | "storage" | "anime" | "manga" | "movies" | "moviebox" | "series" | "favorites" | "settings";
+export type Page = "downloader" | "converter" | "library" | "anime" | "manga" | "movies" | "moviebox" | "series" | "favorites" | "settings";
 
 interface Props {
   page: Page;
@@ -44,7 +44,6 @@ const GROUPS = [
       { id: "downloader" as Page, label: "Downloader", Icon: IconDownload },
       { id: "converter" as Page, label: "Converter", Icon: IconConvert },
       { id: "library" as Page, label: "Library", Icon: IconLibrary },
-      { id: "storage" as Page, label: "Storage", Icon: IconFolder },
     ],
   },
   {

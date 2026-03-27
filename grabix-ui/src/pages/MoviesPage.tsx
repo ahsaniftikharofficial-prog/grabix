@@ -2,7 +2,7 @@
 // Updated: Play (VidSrc), Download, Favorite buttons
 
 import { useState, useEffect } from "react";
-import { IconSearch, IconStar, IconPlay, IconDownload, IconX, IconRefresh, IconCheck } from "../components/Icons";
+import { IconSearch, IconStar, IconPlay, IconDownload, IconX, IconRefresh } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import { useFavorites } from "../context/FavoritesContext";
 import VidSrcPlayer from "../components/VidSrcPlayer";
@@ -134,7 +134,7 @@ export default function MoviesPage() {
 
       {detail && !player && <MovieDetail movie={detail} onClose={() => setDetail(null)} tf={tf} onPlay={(nextPlayer) => { setDetail(null); setPlayer(nextPlayer); }} />}
       {freeDetail && !player && <FreeDetail movie={freeDetail} onClose={() => setFD(null)} onPlay={(nextPlayer) => { setFD(null); setPlayer(nextPlayer); }} />}
-      {player && <VidSrcPlayer title={player.title} subtitle={player.subtitle} poster={player.poster} sources={player.sources} onClose={() => setPlayer(null)} />}
+      {player && <VidSrcPlayer title={player.title} subtitle={player.subtitle} poster={player.poster} sources={player.sources} mediaType="movie" onClose={() => setPlayer(null)} />}
     </div>
   );
 }
@@ -190,9 +190,6 @@ function ActionButtons({ onPlay, onDownload, favId, favItem }: { onPlay: () => v
 
 function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: () => void; tf: (e: string) => Promise<any>; onPlay: (player: { title: string; subtitle?: string; poster?: string; sources: StreamSource[] }) => void }) {
   const [full, setFull]       = useState<Movie | null>(null);
-  const [dlUrl, setDlUrl]     = useState("");
-  const [sending, setSending] = useState(false);
-  const [sent, setSent]       = useState(false);
 
   useEffect(() => { tf(`/movie/${movie.id}`).then(setFull).catch(() => {}); }, [movie.id]);
 
@@ -229,18 +226,16 @@ function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: ()
     const directSource = movieBoxSources[0];
 
     if (directSource) {
-      await fetch(`${GRABIX}/download?url=${encodeURIComponent(directSource.externalUrl ?? directSource.url)}&dl_type=video`);
+      await fetch(`${GRABIX}/download?url=${encodeURIComponent(directSource.url)}&dl_type=video`);
+      window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
       return;
     }
 
-    window.open(`https://vidsrc.to/embed/movie/${movie.id}`, "_blank");
-  };
-
-  const sendDl = async () => {
-    if (!dlUrl.trim()) return;
-    setSending(true);
-    try { await fetch(`${GRABIX}/download?url=${encodeURIComponent(dlUrl.trim())}&dl_type=video`); setSent(true); setTimeout(() => setSent(false), 3000); }
-    catch { /* ignore */ } finally { setSending(false); }
+    const fallbackSource = getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id })[0];
+    if (fallbackSource) {
+      await fetch(`${GRABIX}/download?url=${encodeURIComponent(fallbackSource.url)}&dl_type=video`);
+      window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
+    }
   };
 
   return (
@@ -275,16 +270,6 @@ function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: ()
             favId={`movie-${movie.id}`}
             favItem={{ id: `movie-${movie.id}`, title: d.title, poster: d.poster_path ? `${IMG_BASE}${d.poster_path}` : "", type: "movie", tmdbId: movie.id, imdbId: d.imdb_id }}
           />
-
-          <div style={{ background: "var(--bg-surface2)", borderRadius: 10, padding: "14px 16px" }}>
-            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: "var(--text-secondary)" }}>Download from custom URL</div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <input className="input-base" style={{ flex: 1, fontSize: 13 }} placeholder="Paste video URL…" value={dlUrl} onChange={e => setDlUrl(e.target.value)} />
-              <button className="btn btn-primary" style={{ gap: 6, flexShrink: 0 }} onClick={sendDl} disabled={sending || !dlUrl.trim()}>
-                {sent ? <><IconCheck size={13} /> Sent!</> : sending ? "Sending…" : <><IconDownload size={13} /> Send</>}
-              </button>
-            </div>
-          </div>
         </div>
       </div>
     </div>

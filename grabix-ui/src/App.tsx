@@ -5,7 +5,6 @@ import Sidebar, { type Page } from "./components/Sidebar";
 import ConverterPage from "./pages/ConverterPage";
 import DownloaderPage from "./pages/DownloaderPage";
 import LibraryPage from "./pages/LibraryPage";
-import StoragePage from "./pages/StoragePage";
 import AnimePage from "./pages/AnimePage";
 import MangaPage from "./pages/MangaPage";
 import MoviesPage from "./pages/MoviesPage";
@@ -71,7 +70,6 @@ function Inner() {
     downloader: <DownloaderPage />,
     converter: <ConverterPage />,
     library: <LibraryPage />,
-    storage: <StoragePage />,
     anime: <AnimePage />,
     manga: <MangaPage />,
     movies: <MoviesPage />,

@@ -1,14 +1,13 @@
 import { useEffect, useState } from "react";
-import { IconSearch, IconStar, IconPlay, IconDownload, IconX, IconRefresh, IconCheck } from "../components/Icons";
+import { IconSearch, IconStar, IconPlay, IconDownload, IconX, IconRefresh } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import { useFavorites } from "../context/FavoritesContext";
 import VidSrcPlayer from "../components/VidSrcPlayer";
-import { getAnimeSources, type StreamSource } from "../lib/streamProviders";
+import { getAnimeEpisodeSources, getAnimeSources, type StreamSource } from "../lib/streamProviders";
 
 const JIKAN = "https://api.jikan.moe/v4";
-const GRABIX = "http://127.0.0.1:8000";
 const TMDB = "https://api.themoviedb.org/3";
-const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzdWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
+const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzYWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
 
 interface Anime {
   mal_id: number;
@@ -153,7 +152,7 @@ export default function AnimePage() {
           }}
         />
       )}
-      {player && <VidSrcPlayer title={player.title} subtitle={player.subtitle} poster={player.poster} sources={player.sources} onClose={() => setPlayer(null)} />}
+      {player && <VidSrcPlayer title={player.title} subtitle={player.subtitle} poster={player.poster} sources={player.sources} mediaType="tv" onClose={() => setPlayer(null)} />}
     </div>
   );
 }
@@ -174,14 +173,18 @@ function AnimeCard({ anime, onClick }: { anime: Anime; onClick: () => void }) {
 }
 
 function AnimeDetail({ anime, onClose, onPlay }: { anime: Anime; onClose: () => void; onPlay: (player: { title: string; subtitle?: string; poster?: string; sources: StreamSource[] }) => void }) {
-  const [dlUrl, setDlUrl] = useState("");
-  const [sending, setSending] = useState(false);
-  const [sent, setSent] = useState(false);
   const [finding, setFinding] = useState(false);
   const [tmdbId, setTmdbId] = useState<number | null>(null);
+  const [episode, setEpisode] = useState(1);
   const { isFav, toggle } = useFavorites();
   const fav = isFav(`anime-${anime.mal_id}`);
   const title = anime.title_english ?? anime.title;
+  const totalEpisodes = Math.max(anime.episodes ?? 12, 1);
+  const episodeGroups = Math.ceil(totalEpisodes / 50);
+  const selectedGroup = Math.floor((episode - 1) / 50);
+  const episodeStart = selectedGroup * 50 + 1;
+  const episodeEnd = Math.min(totalEpisodes, episodeStart + 49);
+  const visibleEpisodes = Array.from({ length: Math.max(0, episodeEnd - episodeStart + 1) }, (_, index) => episodeStart + index);
 
   useEffect(() => {
     let canceled = false;
@@ -197,32 +200,20 @@ function AnimeDetail({ anime, onClose, onPlay }: { anime: Anime; onClose: () => 
   }, [title]);
 
   const handlePlay = () => {
-    const sources = getAnimeSources(tmdbId, anime.trailer?.embed_url);
+    const sources = episode > 1
+      ? getAnimeEpisodeSources(tmdbId, 1, episode, anime.trailer?.embed_url)
+      : getAnimeSources(tmdbId, anime.trailer?.embed_url);
     if (sources.length > 0) {
       onPlay({
         title,
-        subtitle: "Anime playback powered by your configured stream providers",
+        subtitle: `Anime playback powered by your configured stream providers · Episode ${episode}`,
         poster: anime.images.jpg.large_image_url ?? anime.images.jpg.image_url,
         sources,
       });
       return;
     }
 
-    alert("Stream not available for this title. Try the trailer or paste an episode URL below.");
-  };
-
-  const sendDl = async () => {
-    if (!dlUrl.trim()) return;
-    setSending(true);
-    try {
-      await fetch(`${GRABIX}/download?url=${encodeURIComponent(dlUrl.trim())}&dl_type=video`);
-      setSent(true);
-      setTimeout(() => setSent(false), 3000);
-    } catch {
-      // Ignore download send failures in the modal.
-    } finally {
-      setSending(false);
-    }
+    alert("Stream not available for this title. Try the trailer or a different anime.");
   };
 
   return (
@@ -254,7 +245,7 @@ function AnimeDetail({ anime, onClose, onPlay }: { anime: Anime; onClose: () => 
           ) : anime.trailer?.embed_url ? (
             <div style={{ fontSize: 12, color: "var(--text-warning)", marginBottom: 14 }}>Stream not found, trailer available instead</div>
           ) : (
-            <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>No stream found, paste an episode URL below to download</div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>No stream found for this title right now.</div>
           )}
 
           <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
@@ -274,14 +265,37 @@ function AnimeDetail({ anime, onClose, onPlay }: { anime: Anime; onClose: () => 
             </button>
           </div>
 
-          <div style={{ background: "var(--bg-surface2)", borderRadius: 10, padding: "14px 16px" }}>
-            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4, color: "var(--text-secondary)" }}>Download an episode</div>
-            <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>Paste a legal episode URL to send it to your GRABIX downloader.</div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <input className="input-base" style={{ flex: 1, fontSize: 13 }} placeholder="Paste episode URL..." value={dlUrl} onChange={(e) => setDlUrl(e.target.value)} />
-              <button className="btn btn-primary" style={{ gap: 6, flexShrink: 0 }} onClick={sendDl} disabled={sending || !dlUrl.trim()}>
-                {sent ? <><IconCheck size={13} /> Sent!</> : sending ? "Sending..." : <><IconDownload size={13} /> Send</>}
-              </button>
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Episodes</div>
+              {episodeGroups > 1 && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {Array.from({ length: episodeGroups }, (_, index) => {
+                    const start = index * 50 + 1;
+                    const end = Math.min(totalEpisodes, start + 49);
+                    return (
+                      <button
+                        key={`${start}-${end}`}
+                        className={`quality-chip${selectedGroup === index ? " active" : ""}`}
+                        onClick={() => setEpisode(start)}
+                      >
+                        {start}-{end}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", maxHeight: 144, overflowY: "auto", paddingRight: 4 }}>
+              {visibleEpisodes.map((value) => (
+                <button
+                  key={value}
+                  className={`quality-chip${episode === value ? " active" : ""}`}
+                  onClick={() => setEpisode(value)}
+                >
+                  {value}
+                </button>
+              ))}
             </div>
           </div>
         </div>

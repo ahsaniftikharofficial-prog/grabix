@@ -5,8 +5,10 @@ import yt_dlp, os, uuid, sqlite3, shutil, threading, subprocess, time, json, re
 from pathlib import Path
 from datetime import datetime
 from difflib import SequenceMatcher
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlparse
 from urllib.request import Request as URLRequest, urlopen
+from app.routes.manga import router as manga_router
+from app.routes.subtitles import router as subtitles_router
 
 try:
     from moviebox_api import (
@@ -32,6 +34,8 @@ except Exception as exc:
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.include_router(manga_router, prefix="/manga")
+app.include_router(subtitles_router, prefix="/subtitles")
 
 DOWNLOAD_DIR = str(Path.home() / "Downloads" / "GRABIX")
 DB_PATH = str(Path.home() / "Downloads" / "GRABIX" / "grabix.db")
@@ -1093,6 +1097,69 @@ def _build_video_format_selector(quality: str) -> str:
     return f"best[height<={h}][ext=mp4]/best[height<={h}]/best"
 
 
+def _is_direct_media_url(url: str) -> bool:
+    lowered = (url or "").lower()
+    parsed = urlparse(lowered)
+    if "127.0.0.1:8000/moviebox/proxy-stream" in lowered or "localhost:8000/moviebox/proxy-stream" in lowered:
+        return True
+    return parsed.path.endswith((".mp4", ".m4v", ".mov", ".webm", ".mkv"))
+
+
+def _guess_media_extension(url: str, content_type: str = "") -> str:
+    lowered = (content_type or "").lower()
+    if "mp4" in lowered:
+        return "mp4"
+    if "webm" in lowered:
+        return "webm"
+    if "quicktime" in lowered or "mov" in lowered:
+        return "mov"
+    if "matroska" in lowered or "mkv" in lowered:
+        return "mkv"
+
+    path = urlparse(url).path.lower()
+    for ext in (".mp4", ".webm", ".mov", ".mkv", ".m4v"):
+        if path.endswith(ext):
+            return ext.lstrip(".")
+    return "mp4"
+
+
+def _download_direct_media(dl_id: str, url: str) -> str:
+    target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or f"grabix-{dl_id}"
+    safe_title = re.sub(r'[\\\\/:*?"<>|]+', " ", target_title).strip() or f"grabix-{dl_id}"
+
+    request = URLRequest(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(request, timeout=30) as response:
+        content_type = response.headers.get("Content-Type", "video/mp4")
+        total_bytes = int(response.headers.get("Content-Length", "0") or 0)
+        ext = _guess_media_extension(url, content_type)
+        output_path = str(Path(DOWNLOAD_DIR) / f"{safe_title}.{ext}")
+
+        downloaded_bytes = 0
+        with open(output_path, "wb") as file_obj:
+            while True:
+                controls = download_controls[dl_id]
+                while controls["pause"].is_set() and not controls["cancel"].is_set():
+                    time.sleep(0.2)
+                if controls["cancel"].is_set():
+                    raise RuntimeError("Download canceled")
+
+                chunk = response.read(1024 * 256)
+                if not chunk:
+                    break
+                file_obj.write(chunk)
+                downloaded_bytes += len(chunk)
+                pct = round((downloaded_bytes / total_bytes) * 100, 1) if total_bytes else 0
+                downloads[dl_id].update({
+                    "percent": pct,
+                    "downloaded": _format_bytes(downloaded_bytes),
+                    "total": _format_bytes(total_bytes),
+                    "size": _format_bytes(total_bytes or downloaded_bytes),
+                    "file_path": output_path,
+                })
+
+    return output_path
+
+
 # ── Download record helpers ───────────────────────────────────────────────────
 def _create_download_record(dl_id: str, title: str = "", params: dict | None = None) -> dict:
     downloads[dl_id] = {
@@ -1715,6 +1782,14 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
     opts: dict = {"outtmpl": template, "noplaylist": True, "progress_hooks": [progress_hook], "continuedl": True}
 
     try:
+        if dl_type == "video" and _is_direct_media_url(url):
+            output_path = _download_direct_media(dl_id, url)
+            downloads[dl_id]["file_path"] = output_path
+            downloads[dl_id]["status"] = "done"
+            downloads[dl_id]["percent"] = 100
+            db_update_status(dl_id, "done", output_path)
+            return
+
         if dl_type == "video":
             opts["format"] = _build_video_format_selector(quality)
             if trim_enabled and trim_end > trim_start:

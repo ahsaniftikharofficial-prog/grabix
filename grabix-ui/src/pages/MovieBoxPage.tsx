@@ -31,6 +31,7 @@ interface PlayerState {
   subtitle?: string;
   poster?: string;
   sources: StreamSource[];
+  mediaType: "movie" | "tv";
 }
 
 export default function MovieBoxPage() {
@@ -247,7 +248,7 @@ export default function MovieBoxPage() {
       </div>
 
       {detail && !player && <MovieBoxDetail item={detail} onClose={() => setDetail(null)} onPlay={setPlayer} />}
-      {player && <VidSrcPlayer title={player.title} subtitle={player.subtitle} poster={player.poster} sources={player.sources} onClose={() => setPlayer(null)} />}
+      {player && <VidSrcPlayer title={player.title} subtitle={player.subtitle} poster={player.poster} sources={player.sources} mediaType={player.mediaType} onClose={() => setPlayer(null)} />}
     </div>
   );
 }
@@ -369,6 +370,7 @@ function MovieBoxDetail({
           : `Movie Box direct playback · Season ${season} · Episode ${episode}`,
         poster: details.poster_proxy || details.poster,
         sources,
+        mediaType: details.media_type === "movie" ? "movie" : "tv",
       });
       onClose();
     } catch {
@@ -386,7 +388,7 @@ function MovieBoxDetail({
         return;
       }
 
-      const response = await fetch(`${GRABIX}/download?url=${encodeURIComponent(source.externalUrl ?? source.url)}&dl_type=video`);
+      const response = await fetch(`${GRABIX}/download?url=${encodeURIComponent(source.url)}&dl_type=video`);
       if (!response.ok) {
         throw new Error(`Downloader returned ${response.status}`);
       }
