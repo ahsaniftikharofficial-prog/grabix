@@ -1,44 +1,36 @@
+// grabix-ui/src/App.tsx
+// Phase 4: Anime, Manga, Movies pages added
+
 import { useState, useEffect } from "react";
 import { ThemeProvider } from "./context/ThemeContext";
 import Sidebar, { type Page } from "./components/Sidebar";
 import DownloaderPage from "./pages/DownloaderPage";
-import LibraryPage from "./pages/LibraryPage";
-import ConverterPage from "./pages/ConverterPage";
-import BrowsePage from "./pages/BrowsePage";
-import SettingsPage from "./pages/SettingsPage";
+import LibraryPage    from "./pages/LibraryPage";
+import StoragePage    from "./pages/StoragePage";
+import AnimePage      from "./pages/AnimePage";
+import MangaPage      from "./pages/MangaPage";
+import MoviesPage     from "./pages/MoviesPage";
+import SettingsPage   from "./pages/SettingsPage";
 import "./index.css";
 
 function Inner() {
-  const [page, setPage] = useState<Page>("downloader");
+  const [page, setPage]           = useState<Page>("downloader");
   const [backendOk, setBackendOk] = useState(false);
-  const [activeDownloads, setActiveDownloads] = useState(0);
+  const [activeDownloads]         = useState(0);
 
   useEffect(() => {
-    const check = () => {
-      fetch("http://127.0.0.1:8000/downloads")
-        .then(r => r.json())
-        .then((items: { status: string }[]) => {
-          setBackendOk(true);
-          const count = items.filter(
-            i => i.status === "downloading" || i.status === "queued" || i.status === "processing"
-          ).length;
-          setActiveDownloads(count);
-        })
-        .catch(() => {
-          setBackendOk(false);
-          setActiveDownloads(0);
-        });
-    };
-    check();
-    const id = setInterval(check, 2000);
-    return () => clearInterval(id);
+    fetch("http://127.0.0.1:8000/")
+      .then(() => setBackendOk(true))
+      .catch(() => setBackendOk(false));
   }, []);
 
   const PAGES: Record<Page, React.ReactNode> = {
     downloader: <DownloaderPage />,
     library:    <LibraryPage />,
-    converter:  <ConverterPage />,
-    browse:     <BrowsePage />,
+    storage:    <StoragePage />,
+    anime:      <AnimePage />,
+    manga:      <MangaPage />,
+    movies:     <MoviesPage />,
     settings:   <SettingsPage />,
   };
 

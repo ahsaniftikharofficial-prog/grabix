@@ -530,6 +530,310 @@ def _resolve_final_file(raw_path: str, download_dir: str) -> str:
     return download_dir
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 3 — ADDITIONS TO backend/main.py
+#
+# Paste these NEW routes and helpers into your existing main.py.
+# Add them BEFORE the final `_download_task` function at the bottom.
+# Do NOT remove or replace anything already in main.py.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import os
+from pathlib import Path
+
+# ── Phase 3: DB migration — add tags + category columns if missing ────────────
+def migrate_db():
+    """Add Phase 3 columns to the history table if they don't exist yet."""
+    try:
+        con = get_db_connection()
+        cols = [row[1] for row in con.execute("PRAGMA table_info(history)").fetchall()]
+        if "tags" not in cols:
+            con.execute("ALTER TABLE history ADD COLUMN tags TEXT DEFAULT ''")
+        if "category" not in cols:
+            con.execute("ALTER TABLE history ADD COLUMN category TEXT DEFAULT ''")
+        if "file_size" not in cols:
+            con.execute("ALTER TABLE history ADD COLUMN file_size INTEGER DEFAULT 0")
+        con.commit()
+        con.close()
+        print("[GRABIX] Phase 3 DB migration done.")
+    except Exception as e:
+        print(f"[GRABIX] migrate_db error: {e}")
+
+migrate_db()
+
+
+# ── Helper: get real file size from disk ─────────────────────────────────────
+def _get_file_size(file_path: str) -> int:
+    try:
+        p = Path(file_path)
+        if p.exists() and p.is_file():
+            return p.stat().st_size
+    except Exception:
+        pass
+    return 0
+
+
+def _format_bytes_int(num: int) -> str:
+    if not num:
+        return "0 B"
+    value = float(num)
+    units = ["B", "KB", "MB", "GB", "TB"]
+    idx = 0
+    while value >= 1024 and idx < len(units) - 1:
+        value /= 1024
+        idx += 1
+    if idx == 0:
+        return f"{int(value)} {units[idx]}"
+    return f"{value:.1f} {units[idx]}"
+
+
+# ── Phase 3: Enriched history endpoint ───────────────────────────────────────
+@app.get("/history/full")
+def get_history_full():
+    """
+    Returns history with real file sizes read from disk.
+    Also updates the DB file_size column if it hasn't been set yet.
+    """
+    try:
+        init_db()
+        migrate_db()
+        con = get_db_connection()
+        rows = con.execute("SELECT * FROM history ORDER BY created_at DESC LIMIT 500").fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            size_bytes = item.get("file_size") or 0
+            # If no size stored, read from disk
+            if not size_bytes and item.get("file_path"):
+                size_bytes = _get_file_size(item["file_path"])
+                if size_bytes:
+                    con.execute("UPDATE history SET file_size=? WHERE id=?", (size_bytes, item["id"]))
+            item["file_size"] = size_bytes
+            item["file_size_label"] = _format_bytes_int(size_bytes)
+            result.append(item)
+        con.commit()
+        con.close()
+        return result
+    except Exception as e:
+        print(f"[GRABIX] get_history_full error: {e}")
+        return []
+
+
+# ── Phase 3: Delete a file from disk and history DB ──────────────────────────
+@app.delete("/history/{item_id}")
+def delete_history_item(item_id: str, delete_file: bool = True):
+    """
+    Remove a history entry. If delete_file=true (default), also deletes the
+    actual file from disk.
+    """
+    try:
+        con = get_db_connection()
+        row = con.execute("SELECT file_path FROM history WHERE id=?", (item_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Item not found")
+        file_path = row["file_path"]
+        con.execute("DELETE FROM history WHERE id=?", (item_id,))
+        con.commit()
+        con.close()
+
+        deleted_file = False
+        if delete_file and file_path:
+            try:
+                p = Path(file_path)
+                if p.exists() and p.is_file():
+                    p.unlink()
+                    deleted_file = True
+            except Exception as fe:
+                print(f"[GRABIX] delete file error: {fe}")
+
+        return {"deleted": True, "file_deleted": deleted_file}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Phase 3: Update tags and category for a history item ─────────────────────
+@app.patch("/history/{item_id}")
+def update_history_item(item_id: str, tags: str = "", category: str = ""):
+    """Update the tags and category of a history entry."""
+    try:
+        con = get_db_connection()
+        con.execute(
+            "UPDATE history SET tags=?, category=? WHERE id=?",
+            (tags, category, item_id)
+        )
+        con.commit()
+        row = con.execute("SELECT * FROM history WHERE id=?", (item_id,)).fetchone()
+        con.close()
+        if not row:
+            raise HTTPException(status_code=404, detail="Item not found")
+        return dict(row)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Phase 3: Storage stats ────────────────────────────────────────────────────
+@app.get("/storage/stats")
+def get_storage_stats():
+    """
+    Returns total disk usage and per-type breakdown from the history DB.
+    Also scans DOWNLOAD_DIR for any files not in the DB.
+    """
+    try:
+        init_db()
+        migrate_db()
+        con = get_db_connection()
+        rows = con.execute("SELECT dl_type, file_path, file_size FROM history").fetchall()
+        con.close()
+
+        by_type: dict[str, int] = {"video": 0, "audio": 0, "thumbnail": 0, "subtitle": 0, "other": 0}
+        tracked_files: set[str] = set()
+        total_bytes = 0
+
+        for row in rows:
+            fp = row["file_path"] or ""
+            size = row["file_size"] or 0
+            if fp:
+                # Always read from disk for accuracy
+                disk_size = _get_file_size(fp)
+                size = disk_size if disk_size else size
+                tracked_files.add(fp)
+            t = row["dl_type"] or "other"
+            if t not in by_type:
+                t = "other"
+            by_type[t] += size
+            total_bytes += size
+
+        # Scan for untracked files in DOWNLOAD_DIR
+        untracked_bytes = 0
+        untracked_count = 0
+        try:
+            for f in Path(DOWNLOAD_DIR).iterdir():
+                if f.is_file() and str(f) not in tracked_files:
+                    sz = f.stat().st_size
+                    untracked_bytes += sz
+                    untracked_count += 1
+        except Exception:
+            pass
+
+        # Disk usage of the whole DOWNLOAD_DIR
+        folder_total = 0
+        try:
+            for f in Path(DOWNLOAD_DIR).rglob("*"):
+                if f.is_file():
+                    try:
+                        folder_total += f.stat().st_size
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        return {
+            "total_bytes": total_bytes,
+            "total_label": _format_bytes_int(total_bytes),
+            "folder_total_bytes": folder_total,
+            "folder_total_label": _format_bytes_int(folder_total),
+            "by_type": {k: {"bytes": v, "label": _format_bytes_int(v)} for k, v in by_type.items()},
+            "untracked_bytes": untracked_bytes,
+            "untracked_count": untracked_count,
+            "download_dir": DOWNLOAD_DIR,
+        }
+    except Exception as e:
+        print(f"[GRABIX] storage_stats error: {e}")
+        return {"total_bytes": 0, "total_label": "0 B", "folder_total_bytes": 0,
+                "folder_total_label": "0 B", "by_type": {}, "untracked_bytes": 0,
+                "untracked_count": 0, "download_dir": DOWNLOAD_DIR}
+
+
+# ── Phase 3: Clear all history (DB only, optionally delete files) ─────────────
+@app.delete("/history")
+def clear_history(delete_files: bool = False):
+    """Delete all history entries. Optionally delete the actual files too."""
+    try:
+        con = get_db_connection()
+        if delete_files:
+            rows = con.execute("SELECT file_path FROM history").fetchall()
+            for row in rows:
+                fp = row["file_path"]
+                if fp:
+                    try:
+                        p = Path(fp)
+                        if p.exists() and p.is_file():
+                            p.unlink()
+                    except Exception:
+                        pass
+        con.execute("DELETE FROM history")
+        con.commit()
+        con.close()
+        return {"cleared": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Phase 3: Organize files into subfolders by type ──────────────────────────
+@app.post("/library/organize")
+def organize_library():
+    """
+    Moves downloaded files into subfolders: Videos/, Audio/, Thumbnails/, Subtitles/
+    Updates file_path in the DB after moving.
+    """
+    type_folders = {
+        "video":     "Videos",
+        "audio":     "Audio",
+        "thumbnail": "Thumbnails",
+        "subtitle":  "Subtitles",
+    }
+    moved = 0
+    errors = []
+
+    try:
+        con = get_db_connection()
+        rows = con.execute("SELECT id, dl_type, file_path FROM history").fetchall()
+
+        for row in rows:
+            fp = row["file_path"]
+            dl_type = row["dl_type"] or "video"
+            if not fp:
+                continue
+            p = Path(fp)
+            if not p.exists() or not p.is_file():
+                continue
+
+            subfolder = type_folders.get(dl_type, "Other")
+            dest_dir = Path(DOWNLOAD_DIR) / subfolder
+            dest_dir.mkdir(exist_ok=True)
+            dest = dest_dir / p.name
+
+            # Don't move if already in the right folder
+            if p.parent == dest_dir:
+                continue
+
+            # Avoid overwrite collisions
+            if dest.exists():
+                stem = p.stem
+                suffix = p.suffix
+                counter = 1
+                while dest.exists():
+                    dest = dest_dir / f"{stem}_{counter}{suffix}"
+                    counter += 1
+
+            try:
+                shutil.move(str(p), str(dest))
+                con.execute("UPDATE history SET file_path=? WHERE id=?", (str(dest), row["id"]))
+                moved += 1
+            except Exception as e:
+                errors.append({"file": str(p), "error": str(e)})
+
+        con.commit()
+        con.close()
+        return {"moved": moved, "errors": errors}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
                    subtitle_lang, thumbnail_format, trim_start, trim_end, trim_enabled, use_cpu=True):
     downloads[dl_id]["status"] = "downloading"
