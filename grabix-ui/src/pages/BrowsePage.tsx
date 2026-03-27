@@ -62,11 +62,11 @@ function PlayerModal({ item, onClose }: { item: ContentItem; onClose: () => void
 
   const getSrc = () => {
     if (item.type === "movie") {
-      if (item.imdbId)  return `https://vidsrc.to/embed/movie/${item.imdbId}`;
-      if (item.tmdbId)  return `https://vidsrc.to/embed/movie/${item.tmdbId}`;
+      if (item.imdbId)  return `https://vidsrc.mov/embed/movie/${item.imdbId}`;
+      if (item.tmdbId)  return `https://vidsrc.mov/embed/movie/${item.tmdbId}`;
       return null;
     }
-    if (item.tmdbId) return `https://vidsrc.to/embed/tv/${item.tmdbId}/${season}/${episode}`;
+    if (item.tmdbId) return `https://vidsrc.mov/embed/tv/${item.tmdbId}/${season}/${episode}`;
     return null;
   };
 

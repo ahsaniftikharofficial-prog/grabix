@@ -118,8 +118,19 @@ export const BACKEND_API = "http://127.0.0.1:8000";
 
 const EMBED_PROVIDERS: ProviderDef[] = [
   {
-    id: "vidsrc-to",
+    id: "vidsrc-mov",
     label: "Server 1",
+    provider: "VidSrc.mov",
+    movie: "https://vidsrc.mov/embed/movie/{id}",
+    tv: "https://vidsrc.mov/embed/tv/{id}/1/1",
+    episode: "https://vidsrc.mov/embed/tv/{id}/{season}/{episode}",
+    movieIdType: "tmdb",
+    tvIdType: "tmdb",
+    canExtract: true,
+  },
+  {
+    id: "vidsrc-to",
+    label: "Server 2",
     provider: "VidSrc.to",
     movie: "https://vidsrc.to/embed/movie/{id}",
     tv: "https://vidsrc.to/embed/tv/{id}/1/1",
@@ -130,7 +141,7 @@ const EMBED_PROVIDERS: ProviderDef[] = [
   },
   {
     id: "vidsrc-me",
-    label: "Server 2",
+    label: "Server 3",
     provider: "VidSrc.me",
     movie: "https://vidsrc.me/embed/movie?imdb={id}",
     tv: "https://vidsrc.me/embed/tv?imdb={id}&season=1&episode=1",
@@ -141,7 +152,7 @@ const EMBED_PROVIDERS: ProviderDef[] = [
   },
   {
     id: "embed-su",
-    label: "Server 3",
+    label: "Server 4",
     provider: "embed.su",
     movie: "https://embed.su/embed/movie/{id}",
     tv: "https://embed.su/embed/tv/{id}/1/1",
@@ -152,7 +163,7 @@ const EMBED_PROVIDERS: ProviderDef[] = [
   },
   {
     id: "autoembed",
-    label: "Server 4",
+    label: "Server 5",
     provider: "Autoembed",
     movie: "https://autoembed.cc/movie/tmdb/{id}",
     tv: "https://autoembed.cc/tv/tmdb/{id}-1-1",
@@ -163,7 +174,7 @@ const EMBED_PROVIDERS: ProviderDef[] = [
   },
   {
     id: "vidlink",
-    label: "Server 5",
+    label: "Server 6",
     provider: "Vidlink.pro",
     movie: "https://vidlink.pro/movie/{id}",
     tv: "https://vidlink.pro/tv/{id}/1/1",
@@ -174,7 +185,7 @@ const EMBED_PROVIDERS: ProviderDef[] = [
   },
   {
     id: "2embed",
-    label: "Server 6",
+    label: "Server 7",
     provider: "2embed",
     movie: "https://www.2embed.cc/embed/{id}",
     tv: "https://www.2embed.cc/embedtv/{id}&s=1&e=1",
@@ -185,7 +196,7 @@ const EMBED_PROVIDERS: ProviderDef[] = [
   },
   {
     id: "multiembed",
-    label: "Server 7",
+    label: "Server 8",
     provider: "Multiembed",
     movie: "https://multiembed.mov/?video_id={id}&tmdb=1",
     tv: "https://multiembed.mov/?video_id={id}&tmdb=1&s=1&e=1",
