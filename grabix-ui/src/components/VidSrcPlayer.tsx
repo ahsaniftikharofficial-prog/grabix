@@ -28,9 +28,15 @@ interface Props {
   poster?: string;
   embedUrl?: string;
   sources?: StreamSource[];
+  sourceOptions?: Array<{ id: string; label: string }>;
   currentEpisode?: number;
   episodeOptions?: number[];
   episodeLabel?: string;
+  onSelectSourceOption?: (optionId: string, episode?: number) => Promise<{
+    sources: StreamSource[];
+    subtitle?: string;
+    subtitleSearchTitle?: string;
+  }>;
   onSelectEpisode?: (episode: number) => Promise<{
     sources: StreamSource[];
     subtitle?: string;
@@ -165,9 +171,11 @@ export default function VidSrcPlayer({
   subtitleSearchTitle,
   poster,
   sources,
+  sourceOptions,
   currentEpisode,
   episodeOptions,
   episodeLabel = "Episode",
+  onSelectSourceOption,
   onSelectEpisode,
   mediaType = "movie",
   onClose,
@@ -259,10 +267,12 @@ export default function VidSrcPlayer({
   const [duration, setDuration] = useState(0);
   const [subtitleUrl, setSubtitleUrl] = useState("");
   const [subtitleName, setSubtitleName] = useState("");
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
   const [showSubtitlePanel, setShowSubtitlePanel] = useState(false);
   const [subtitleCues, setSubtitleCues] = useState<SubtitleCue[]>([]);
   const [currentCue, setCurrentCue] = useState("");
   const [subtitleHint, setSubtitleHint] = useState("");
+  const [activeSourceOptionId, setActiveSourceOptionId] = useState(sourceOptions?.[0]?.id ?? "");
 
   // Stream extraction state
   const [extracting, setExtracting] = useState(false);
@@ -288,6 +298,10 @@ export default function VidSrcPlayer({
     setActiveSearchTitle(subtitleSearchTitle || subtitle || title);
     setActiveEpisode(currentEpisode ?? null);
   }, [sources, subtitle, subtitleSearchTitle, currentEpisode, title]);
+
+  useEffect(() => {
+    setActiveSourceOptionId(sourceOptions?.[0]?.id ?? "");
+  }, [sourceOptions]);
 
   // ---------------------------------------------------------------------------
   // Chrome visibility
@@ -413,7 +427,7 @@ export default function VidSrcPlayer({
         if (!embedLoadedRef.current) {
           goToNextSource("timeout");
         }
-      }, 25_000);
+      }, 8_000);
 
       return () => {
         window.clearTimeout(failoverTimeout);
@@ -471,13 +485,21 @@ export default function VidSrcPlayer({
     video.load();
     setCurrentTime(0);
     setDuration(0);
+    let sourceReady = false;
+    const startupTimeout = window.setTimeout(() => {
+      if (!sourceReady) {
+        goToNextSource("timeout");
+      }
+    }, 20000);
 
     const handleCanPlay = () => {
+      sourceReady = true;
       setIsLoading(false);
       setStatusText("Ready");
       setErrorText("");
     };
     const handleError = () => {
+      sourceReady = true;
       goToNextSource(
         activeSource.kind === "local" ? "open_failed" : "media_error"
       );
@@ -487,6 +509,7 @@ export default function VidSrcPlayer({
       setStatusText("Buffering");
     };
     const handlePlaying = () => {
+      sourceReady = true;
       setIsLoading(false);
       setStatusText("Playing");
       setIsPlaying(true);
@@ -505,13 +528,20 @@ export default function VidSrcPlayer({
 
     if (activeSource.kind === "hls") {
       if (Hls.isSupported()) {
-        const hls = new Hls();
+        const hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: false,
+          backBufferLength: 90,
+          startFragPrefetch: true,
+        });
         hlsRef.current = hls;
         hls.attachMedia(video);
         hls.on(Hls.Events.MEDIA_ATTACHED, () => {
           hls.loadSource(activeSource.url);
         });
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          sourceReady = true;
+          setStatusText("Buffering");
           void video.play().catch(() => {});
         });
         hls.on(Hls.Events.ERROR, (_, data) => {
@@ -529,6 +559,7 @@ export default function VidSrcPlayer({
     }
 
     return () => {
+      window.clearTimeout(startupTimeout);
       video.removeEventListener("canplay", handleCanPlay);
       video.removeEventListener("error", handleError);
       video.removeEventListener("waiting", handleWaiting);
@@ -602,12 +633,12 @@ export default function VidSrcPlayer({
 
   useEffect(() => {
     const trackList = videoRef.current?.textTracks;
-    if (!trackList || !subtitleUrl) return;
+    if (!trackList) return;
     for (let index = 0; index < trackList.length; index += 1) {
       trackList[index].mode =
-        index === trackList.length - 1 ? "showing" : "disabled";
+        subtitleUrl && subtitlesEnabled && index === trackList.length - 1 ? "showing" : "disabled";
     }
-  }, [subtitleUrl, activeSource]);
+  }, [subtitleUrl, subtitlesEnabled, activeSource]);
 
   useEffect(() => {
     if (subtitleUrl.startsWith("blob:")) {
@@ -618,15 +649,47 @@ export default function VidSrcPlayer({
     if (firstSubtitle?.url) {
       setSubtitleUrl(firstSubtitle.url);
       setSubtitleName(firstSubtitle.label);
+      setSubtitlesEnabled(true);
       return;
     }
 
     setSubtitleUrl("");
     setSubtitleName("");
+    setSubtitlesEnabled(false);
     setSubtitleCues([]);
     setCurrentCue("");
     setSubtitleHint("");
   }, [activeSource]);
+
+  useEffect(() => {
+    if (!subtitleUrl || subtitleUrl.startsWith("blob:")) return;
+    let cancelled = false;
+
+    fetch(subtitleUrl)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Subtitle load failed with ${response.status}`);
+        }
+        return response.text();
+      })
+      .then((content) => {
+        if (cancelled) return;
+        const cues = parseSubtitleText(content);
+        setSubtitleCues(cues);
+        if (cues.length > 0) {
+          setSubtitleHint(`Subtitles loaded. Next line at ${formatTime(cues[0].start)}.`);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSubtitleCues([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [subtitleUrl]);
 
   useEffect(() => {
     if (!subtitleCues.length) {
@@ -670,14 +733,19 @@ export default function VidSrcPlayer({
   };
 
   const handleEpisodeSwitch = async (episode: number) => {
-    if (!onSelectEpisode || episodeLoading || episode === activeEpisode) return;
+    if ((!onSelectEpisode && !onSelectSourceOption) || episodeLoading || episode === activeEpisode) return;
     setEpisodeLoading(true);
     setErrorText("");
     setFallbackNotice("");
     try {
       const preferredProvider = activeSource?.provider;
       const preferredLabel = activeSource?.label;
-      const next = await onSelectEpisode(episode);
+      const next = onSelectSourceOption && activeSourceOptionId
+        ? await onSelectSourceOption(activeSourceOptionId, episode)
+        : await onSelectEpisode?.(episode);
+      if (!next) {
+        throw new Error(`Could not load ${episodeLabel.toLowerCase()} ${episode}.`);
+      }
       const matchedIndex = next.sources.findIndex(
         (source) =>
           source.provider === preferredProvider && source.label === preferredLabel
@@ -693,6 +761,29 @@ export default function VidSrcPlayer({
       setEpisodeMenuOpen(false);
     } catch (error) {
       setFallbackNotice(error instanceof Error ? error.message : `Could not load ${episodeLabel.toLowerCase()} ${episode}.`);
+    } finally {
+      setEpisodeLoading(false);
+    }
+  };
+
+  const handleSourceOptionSwitch = async (optionId: string) => {
+    if (!onSelectSourceOption || optionId === activeSourceOptionId) return;
+    setEpisodeLoading(true);
+    setErrorText("");
+    setFallbackNotice("");
+    try {
+      const next = await onSelectSourceOption(optionId, activeEpisode ?? currentEpisode ?? undefined);
+      extractedSourcesRef.current = [];
+      setExtractedSources([]);
+      setRuntimeSources(next.sources);
+      setActiveSubtitleText(next.subtitle || "");
+      setActiveSearchTitle(next.subtitleSearchTitle || next.subtitle || title);
+      setActiveSourceOptionId(optionId);
+      setActiveIndex(0);
+      setReloadKey((key) => key + 1);
+      setServerMenuOpen(false);
+    } catch (error) {
+      setFallbackNotice(error instanceof Error ? error.message : "Could not switch server.");
     } finally {
       setEpisodeLoading(false);
     }
@@ -733,6 +824,7 @@ export default function VidSrcPlayer({
     const objectUrl = URL.createObjectURL(file);
     setSubtitleUrl(objectUrl);
     setSubtitleName(file.name);
+    setSubtitlesEnabled(true);
     setSubtitleCues([]);
     setCurrentCue("");
     setSubtitleHint("Subtitle track loaded.");
@@ -748,6 +840,7 @@ export default function VidSrcPlayer({
     }
     setSubtitleUrl(url);
     setSubtitleName(label);
+    setSubtitlesEnabled(true);
     setSubtitleCues([]);
     setCurrentCue("");
     setSubtitleHint("Subtitle track loaded.");
@@ -762,10 +855,26 @@ export default function VidSrcPlayer({
     }
     setSubtitleUrl("");
     setSubtitleName("");
+    setSubtitlesEnabled(false);
     setSubtitleCues([]);
     setCurrentCue("");
-    setSubtitleHint("");
+    setSubtitleHint("Subtitles off.");
     setSubtitleMenuOpen(false);
+  };
+
+  const toggleSubtitles = () => {
+    if (activeSubtitles.length > 0 || subtitleUrl) {
+      if (subtitlesEnabled) {
+        clearSubtitles();
+        return;
+      }
+      const firstSubtitle = activeSubtitles[0];
+      if (firstSubtitle?.url) {
+        handleSubtitleSelect(firstSubtitle.url, firstSubtitle.label);
+      }
+      return;
+    }
+    setShowSubtitlePanel((open) => !open);
   };
 
   const handleShellClick = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -1025,7 +1134,7 @@ export default function VidSrcPlayer({
                 ref={videoRef}
                 crossOrigin="anonymous"
                 playsInline
-                preload="metadata"
+                preload="auto"
                 poster={poster}
                 className="player-video"
                 onClick={(event) => {
@@ -1261,19 +1370,31 @@ export default function VidSrcPlayer({
 
                 {serverMenuOpen && (
                   <div className="player-popover">
-                    {/* Source list */}
-                    {allSources.map((source, index) => (
-                      <button
-                        key={source.id}
-                        className={`player-popover-item${
-                          index === activeIndex ? " active" : ""
-                        }`}
-                        onClick={() => handleSourceSwitch(index)}
-                      >
-                        <span>{source.label}</span>
-                        <small>{source.provider}</small>
-                      </button>
-                    ))}
+                    {sourceOptions && sourceOptions.length > 0
+                      ? sourceOptions.map((option) => (
+                          <button
+                            key={option.id}
+                            className={`player-popover-item${
+                              option.id === activeSourceOptionId ? " active" : ""
+                            }`}
+                            onClick={() => void handleSourceOptionSwitch(option.id)}
+                          >
+                            <span>{option.label}</span>
+                            <small>{episodeLoading ? "Loading" : "HiAnime"}</small>
+                          </button>
+                        ))
+                      : allSources.map((source, index) => (
+                          <button
+                            key={source.id}
+                            className={`player-popover-item${
+                              index === activeIndex ? " active" : ""
+                            }`}
+                            onClick={() => handleSourceSwitch(index)}
+                          >
+                            <span>{source.label}</span>
+                            <small>{source.provider}</small>
+                          </button>
+                        ))}
 
                     {/* Divider + Extract button — shown only for embed sources */}
                     {isEmbedEngine && activeSource?.canExtract && (
@@ -1367,13 +1488,13 @@ export default function VidSrcPlayer({
                 <button
                   className="player-control-icon"
                   onClick={() => {
-                    setShowSubtitlePanel((open) => !open);
+                    toggleSubtitles();
                     setServerMenuOpen(false);
                     setVolumeMenuOpen(false);
                     setSubtitleMenuOpen(false);
                   }}
-                  title="Subtitles"
-                  aria-label="Subtitles"
+                  title={subtitlesEnabled ? "CC On" : "CC Off"}
+                  aria-label={subtitlesEnabled ? "Disable subtitles" : "Enable subtitles"}
                 >
                   <IconSubtitle size={16} color="currentColor" />
                 </button>

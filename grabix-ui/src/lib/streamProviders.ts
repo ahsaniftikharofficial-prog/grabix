@@ -116,6 +116,11 @@ interface MovieBoxSourcesResponse {
   sources?: MovieBoxSourceResponse[];
 }
 
+export interface StreamVariant {
+  label: string;
+  url: string;
+}
+
 export const BACKEND_API = "http://127.0.0.1:8000";
 
 const EMBED_PROVIDERS: ProviderDef[] = [
@@ -153,41 +158,8 @@ const EMBED_PROVIDERS: ProviderDef[] = [
     canExtract: true,
   },
   {
-    id: "embed-su",
-    label: "Server 4",
-    provider: "embed.su",
-    movie: "https://embed.su/embed/movie/{id}",
-    tv: "https://embed.su/embed/tv/{id}/1/1",
-    episode: "https://embed.su/embed/tv/{id}/{season}/{episode}",
-    movieIdType: "tmdb",
-    tvIdType: "tmdb",
-    canExtract: true,
-  },
-  {
-    id: "autoembed",
-    label: "Server 5",
-    provider: "Autoembed",
-    movie: "https://autoembed.cc/movie/tmdb/{id}",
-    tv: "https://autoembed.cc/tv/tmdb/{id}-1-1",
-    episode: "https://autoembed.cc/tv/tmdb/{id}-{season}-{episode}",
-    movieIdType: "tmdb",
-    tvIdType: "tmdb",
-    canExtract: true,
-  },
-  {
-    id: "vidlink",
-    label: "Server 6",
-    provider: "Vidlink.pro",
-    movie: "https://vidlink.pro/movie/{id}",
-    tv: "https://vidlink.pro/tv/{id}/1/1",
-    episode: "https://vidlink.pro/tv/{id}/{season}/{episode}",
-    movieIdType: "tmdb",
-    tvIdType: "tmdb",
-    canExtract: true,
-  },
-  {
     id: "2embed",
-    label: "Server 7",
+    label: "Server 4",
     provider: "2embed",
     movie: "https://www.2embed.cc/embed/{id}",
     tv: "https://www.2embed.cc/embedtv/{id}&s=1&e=1",
@@ -198,7 +170,7 @@ const EMBED_PROVIDERS: ProviderDef[] = [
   },
   {
     id: "multiembed",
-    label: "Server 8",
+    label: "Server 5",
     provider: "Multiembed",
     movie: "https://multiembed.mov/?video_id={id}&tmdb=1",
     tv: "https://multiembed.mov/?video_id={id}&tmdb=1&s=1&e=1",
@@ -523,4 +495,17 @@ export async function fetchMovieBoxSources(options: {
 
   const data = (await response.json()) as MovieBoxSourcesResponse;
   return (data.sources ?? []).map((source, index) => mapMovieBoxSource(options.mediaType, source, index));
+}
+
+export async function fetchStreamVariants(url: string, headers?: Record<string, string>): Promise<StreamVariant[]> {
+  const params = new URLSearchParams({ url });
+  if (headers && Object.keys(headers).length > 0) {
+    params.set("headers_json", JSON.stringify(headers));
+  }
+  const response = await fetch(`${BACKEND_API}/stream/variants?${params.toString()}`);
+  if (!response.ok) {
+    throw new Error(`Stream variant detection failed with ${response.status}`);
+  }
+  const data = (await response.json()) as { variants?: StreamVariant[] };
+  return data.variants ?? [];
 }

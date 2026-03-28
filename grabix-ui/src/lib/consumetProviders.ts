@@ -102,6 +102,76 @@ function normalizeError(error: unknown): Error {
   return error instanceof Error ? error : new Error("Unknown request failure.");
 }
 
+const memoryCache = new Map<string, { expiresAt: number; value: unknown }>();
+const pendingRequests = new Map<string, Promise<unknown>>();
+
+function getMemoryCache<T>(key: string): T | null {
+  const cached = memoryCache.get(key);
+  if (!cached) return null;
+  if (Date.now() >= cached.expiresAt) {
+    memoryCache.delete(key);
+    return null;
+  }
+  return cached.value as T;
+}
+
+function setMemoryCache(key: string, value: unknown, ttlMs: number) {
+  memoryCache.set(key, { expiresAt: Date.now() + ttlMs, value });
+}
+
+function getStorageCache<T>(key: string): T | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { expiresAt?: number; value?: T };
+    if (!parsed?.expiresAt || Date.now() >= parsed.expiresAt) {
+      window.localStorage.removeItem(key);
+      return null;
+    }
+    return (parsed.value as T) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function setStorageCache(key: string, value: unknown, ttlMs: number) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify({ expiresAt: Date.now() + ttlMs, value }));
+  } catch {
+    // Ignore storage write failures.
+  }
+}
+
+async function getCachedJson<T>(
+  cacheKey: string,
+  path: string,
+  ttlMs: number,
+  useStorage = false
+): Promise<T> {
+  const cached = getMemoryCache<T>(cacheKey) ?? (useStorage ? getStorageCache<T>(cacheKey) : null);
+  if (cached) return cached;
+
+  const pending = pendingRequests.get(cacheKey);
+  if (pending) return pending as Promise<T>;
+
+  const request = getJson<T>(path)
+    .then((value) => {
+      setMemoryCache(cacheKey, value, ttlMs);
+      if (useStorage) {
+        setStorageCache(cacheKey, value, ttlMs);
+      }
+      return value;
+    })
+    .finally(() => {
+      pendingRequests.delete(cacheKey);
+    });
+
+  pendingRequests.set(cacheKey, request as Promise<unknown>);
+  return request;
+}
+
 async function getJson<T>(path: string): Promise<T> {
   let response: Response;
   try {
@@ -152,7 +222,7 @@ function sortSourcesByAudioPreference(sources: StreamSource[], audio: AudioPrefe
 }
 
 export async function fetchConsumetHealth(): Promise<ConsumetHealth> {
-  return await getJson<ConsumetHealth>("/consumet/health");
+  return await getCachedJson<ConsumetHealth>("consumet:health", "/consumet/health", 120_000, true);
 }
 
 export async function fetchConsumetAnimeDiscover(
@@ -160,8 +230,12 @@ export async function fetchConsumetAnimeDiscover(
   page = 1,
   period: "daily" | "weekly" | "monthly" = "daily"
 ): Promise<ConsumetMediaSummary[]> {
-  const data = await getJson<{ items: ConsumetMediaSummary[] }>(
-    `/consumet/discover/anime?section=${encodeURIComponent(section)}&page=${page}&period=${encodeURIComponent(period)}`
+  const cacheKey = `consumet:discover:anime:${section}:${page}:${period}`;
+  const data = await getCachedJson<{ items: ConsumetMediaSummary[] }>(
+    cacheKey,
+    `/consumet/discover/anime?section=${encodeURIComponent(section)}&page=${page}&period=${encodeURIComponent(period)}`,
+    300_000,
+    true
   );
   return data.items ?? [];
 }
@@ -179,14 +253,18 @@ export async function searchConsumetDomain(domain: ConsumetDomain, query: string
 }
 
 export async function fetchConsumetDomainInfo(domain: ConsumetDomain | "movie" | "tv", id: string, provider: string): Promise<ConsumetMediaDetail> {
-  return await getJson<ConsumetMediaDetail>(
-    `/consumet/info/${domain}?id=${encodeURIComponent(id)}&provider=${encodeURIComponent(provider)}`
+  return await getCachedJson<ConsumetMediaDetail>(
+    `consumet:info:${domain}:${provider}:${id}`,
+    `/consumet/info/${domain}?id=${encodeURIComponent(id)}&provider=${encodeURIComponent(provider)}`,
+    300_000
   );
 }
 
 export async function fetchConsumetAnimeEpisodes(id: string, provider: string): Promise<ConsumetEpisode[]> {
-  const data = await getJson<{ items: ConsumetEpisode[] }>(
-    `/consumet/episodes/anime?id=${encodeURIComponent(id)}&provider=${encodeURIComponent(provider)}`
+  const data = await getCachedJson<{ items: ConsumetEpisode[] }>(
+    `consumet:episodes:${provider}:${id}`,
+    `/consumet/episodes/anime?id=${encodeURIComponent(id)}&provider=${encodeURIComponent(provider)}`,
+    300_000
   );
   return data.items ?? [];
 }
@@ -211,7 +289,11 @@ export async function fetchConsumetAnimeWatch(
   });
   if (server) params.set("server", server);
 
-  const data = await getJson<ConsumetWatchResult>(`/consumet/watch/anime?${params.toString()}`);
+  const data = await getCachedJson<ConsumetWatchResult>(
+    `consumet:watch:${provider}:${episodeId}:${audio}:${server || "auto"}`,
+    `/consumet/watch/anime?${params.toString()}`,
+    90_000
+  );
   return {
     ...data,
     sources: sortSourcesByAudioPreference(data.sources ?? [], audio),

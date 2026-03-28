@@ -4,10 +4,12 @@
 import { useState, useEffect } from "react";
 import { IconSearch, IconStar, IconPlay, IconDownload, IconX, IconRefresh } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
+import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import { useFavorites } from "../context/FavoritesContext";
-import { fetchConsumetMetaSearch, normalizeAudioPreference, type AudioPreference } from "../lib/consumetProviders";
+import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
+import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
 import VidSrcPlayer from "../components/VidSrcPlayer";
-import { fetchMovieBoxSources, getArchiveMovieSources, getMovieSources, type StreamSource } from "../lib/streamProviders";
+import { fetchMovieBoxSources, getArchiveMovieSources, getMovieSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
 
 const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzdWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
 const TMDB     = "https://api.themoviedb.org/3";
@@ -170,7 +172,7 @@ function FreeCard({ movie, onClick }: { movie: ArchiveItem; onClick: () => void 
   );
 }
 
-function ActionButtons({ onPlay, onDownload, favId, favItem }: { onPlay: () => void; onDownload: () => void; favId: string; favItem: any }) {
+function ActionButtons({ onPlay, onDownload, onHindi, favId, favItem }: { onPlay: () => void; onDownload: () => void; onHindi?: () => void; favId: string; favItem: any }) {
   const { isFav, toggle } = useFavorites();
   const fav = isFav(favId);
   return (
@@ -178,6 +180,11 @@ function ActionButtons({ onPlay, onDownload, favId, favItem }: { onPlay: () => v
       <button className="btn btn-primary" style={{ gap: 7, flex: 1, justifyContent: "center" }} onClick={onPlay}>
         <IconPlay size={15} /> Play
       </button>
+      {onHindi && (
+        <button className="btn btn-ghost" style={{ gap: 7, justifyContent: "center", paddingInline: 14 }} onClick={onHindi}>
+          Hindi
+        </button>
+      )}
       <button className="btn btn-ghost" style={{ gap: 7, flex: 1, justifyContent: "center" }} onClick={onDownload}>
         <IconDownload size={15} /> Download
       </button>
@@ -191,8 +198,14 @@ function ActionButtons({ onPlay, onDownload, favId, favItem }: { onPlay: () => v
 
 function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: () => void; tf: (e: string) => Promise<any>; onPlay: (player: { title: string; subtitle?: string; poster?: string; sources: StreamSource[] }) => void }) {
   const [full, setFull]       = useState<Movie | null>(null);
-  const [audioPreference, setAudioPreference] = useState<AudioPreference>("hi");
   const [altTitles, setAltTitles] = useState<string[]>([]);
+  const [hindiNotice, setHindiNotice] = useState("");
+  const [downloadDialogOpen, setDownloadDialogOpen] = useState(false);
+  const [downloadLanguage, setDownloadLanguage] = useState<"english" | "hindi">("english");
+  const [downloadQuality, setDownloadQuality] = useState("");
+  const [downloadOptions, setDownloadOptions] = useState<DownloadQualityOption[]>([]);
+  const [downloadLoading, setDownloadLoading] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
 
   useEffect(() => { tf(`/movie/${movie.id}`).then(setFull).catch(() => {}); }, [movie.id]);
   useEffect(() => {
@@ -217,6 +230,8 @@ function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: ()
 
   const d = full ?? movie;
   const movieYear = d.release_date ? Number(d.release_date.slice(0, 4)) : undefined;
+  const poster = d.poster_path ? `${IMG_BASE}${d.poster_path}` : "";
+  const fallbackSources = getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id });
 
   const loadMovieBoxSources = async () => {
     const titles = [d.title, ...altTitles];
@@ -235,33 +250,154 @@ function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: ()
     return [];
   };
 
+  const isHindiMovieBoxItem = (item: MovieBoxItem) => {
+    const title = (item.title || "").toLowerCase();
+    return Boolean(item.is_hindi) || title.includes("hindi");
+  };
+
+  const loadHindiMovieBoxSources = async () => {
+    const titles = [d.title, ...altTitles];
+    for (const title of titles) {
+      try {
+        const result = await searchMovieBox({
+          query: title,
+          mediaType: "movie",
+          hindiOnly: true,
+          preferHindi: true,
+          sortBy: "search",
+          perPage: 10,
+        });
+        const hindiItem = (result.items ?? []).find((item) => {
+          const sameYear = !movieYear || !item.year || item.year === movieYear;
+          return sameYear && isHindiMovieBoxItem(item);
+        });
+        if (!hindiItem?.id) continue;
+        const sources = await fetchMovieBoxSources({
+          subjectId: hindiItem.id,
+          mediaType: "movie",
+          year: Number.isFinite(movieYear) ? movieYear : undefined,
+        });
+        if (sources.length > 0) {
+          return sources;
+        }
+      } catch {
+        continue;
+      }
+    }
+    return [] as StreamSource[];
+  };
+
+  const loadDownloadOptions = async (language = downloadLanguage) => {
+    setDownloadLoading(true);
+    setDownloadError("");
+    try {
+      const sources = language === "hindi" ? await loadHindiMovieBoxSources() : await loadMovieBoxSources();
+      if (sources.length > 0) {
+        const options = await resolveSourceDownloadOptions(sources);
+        setDownloadOptions(options);
+        setDownloadQuality(options[0]?.id || "");
+        return;
+      }
+      if (language === "hindi") {
+        setDownloadOptions([]);
+        setDownloadQuality("");
+        setDownloadError("No Hindi source available. Try downloading in English.");
+        return;
+      }
+
+      const fallbackOptions = await resolveSourceDownloadOptions(fallbackSources.slice(0, 1));
+      setDownloadOptions(fallbackOptions);
+      setDownloadQuality(fallbackOptions[0]?.id || "");
+      if (fallbackOptions.length === 0) {
+        setDownloadError("No downloadable source was found for this movie.");
+      }
+    } catch (error) {
+      setDownloadOptions([]);
+      setDownloadQuality("");
+      setDownloadError(error instanceof Error ? error.message : "Download options could not be loaded.");
+    } finally {
+      setDownloadLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!downloadDialogOpen) return;
+    void loadDownloadOptions(downloadLanguage);
+  }, [downloadDialogOpen, downloadLanguage, d.title, movieYear]);
+
   const handlePlay = async () => {
-    const movieBoxSources = await loadMovieBoxSources();
+    setHindiNotice("");
     onPlay({
       title: d.title,
-      subtitle: `Movie playback with ${normalizeAudioPreference(audioPreference) === "hi" ? "Hindi" : normalizeAudioPreference(audioPreference) === "en" ? "English" : "original"} preference plus GRABIX fallbacks`,
-      poster: d.poster_path ? `${IMG_BASE}${d.poster_path}` : undefined,
-      sources: [
-        ...movieBoxSources,
-        ...getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id }),
-      ],
+      subtitle: "Movie playback with GRABIX servers",
+      poster: poster || undefined,
+      sources: fallbackSources,
+    });
+  };
+
+  const handleHindi = async () => {
+    const hindi = await loadHindiMovieBoxSources();
+    if (!hindi.length) {
+      setHindiNotice("No Hindi source found. Watch it in OG language.");
+      return;
+    }
+    setHindiNotice("");
+    onPlay({
+      title: d.title,
+      subtitle: "Hindi playback from MovieBox",
+      poster: poster || undefined,
+      sources: hindi,
     });
   };
 
   const handleDownload = async () => {
     const movieBoxSources = await loadMovieBoxSources();
-    const directSource = movieBoxSources[0];
-
-    if (directSource) {
-      await fetch(`${GRABIX}/download?url=${encodeURIComponent(directSource.url)}&dl_type=video`);
+    const movieBoxDirectSource = movieBoxSources[0];
+    const thumbnail = d.poster_path ? `${IMG_BASE}${d.poster_path}` : "";
+    const englishTitle = `${d.title} — English — ${movieBoxDirectSource?.quality || "Auto"}`;
+    if (movieBoxDirectSource) {
+      await fetch(`${GRABIX}/download?url=${encodeURIComponent(movieBoxDirectSource.url)}&dl_type=video&title=${encodeURIComponent(englishTitle)}&thumbnail=${encodeURIComponent(thumbnail)}`);
       window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
       return;
     }
 
     const fallbackSource = getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id })[0];
     if (fallbackSource) {
-      await fetch(`${GRABIX}/download?url=${encodeURIComponent(fallbackSource.url)}&dl_type=video`);
+      await fetch(`${GRABIX}/download?url=${encodeURIComponent(fallbackSource.url)}&dl_type=video&title=${encodeURIComponent(`${d.title} — English — ${fallbackSource.quality || "Auto"}`)}&thumbnail=${encodeURIComponent(thumbnail)}`);
       window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
+    }
+  };
+  void handleDownload;
+
+  const handleDownloadDialog = async () => {
+    setDownloadLanguage("english");
+    setDownloadQuality("");
+    setDownloadOptions([]);
+    setDownloadError("");
+    setDownloadDialogOpen(true);
+  };
+
+  const confirmDownload = async () => {
+    const selectedOption = downloadOptions.find((option) => option.id === downloadQuality);
+    if (!selectedOption) {
+      setDownloadError("Choose a quality before downloading.");
+      return;
+    }
+
+    setDownloadLoading(true);
+    try {
+      await queueVideoDownload({
+        url: selectedOption.url,
+        title: `${d.title} — ${downloadLanguage === "hindi" ? "Hindi" : "English"} — ${selectedOption.label}`,
+        thumbnail: poster,
+        headers: selectedOption.headers,
+        forceHls: selectedOption.forceHls,
+      });
+      setDownloadDialogOpen(false);
+    } catch (error) {
+      setDownloadError(error instanceof Error ? error.message : "Could not queue this movie download.");
+    } finally {
+      setDownloadLoading(false);
     }
   };
 
@@ -290,23 +426,34 @@ function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: ()
             <button className="btn-icon" style={{ alignSelf: "flex-start", flexShrink: 0, marginTop: d.backdrop_path ? 55 : 0 }} onClick={onClose}><IconX size={16} /></button>
           </div>
           {d.overview && <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7, margin: "14px 0" }}>{d.overview}</div>}
-          <div style={{ marginBottom: 14 }}>
-            <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>Preferred Audio</div>
-            <select className="input-base" value={audioPreference} onChange={(event) => setAudioPreference(normalizeAudioPreference(event.target.value))}>
-              <option value="hi">Hindi first</option>
-              <option value="en">English first</option>
-              <option value="original">Original first</option>
-            </select>
-          </div>
-
           <ActionButtons
             onPlay={handlePlay}
-            onDownload={handleDownload}
+            onDownload={handleDownloadDialog}
+            onHindi={handleHindi}
             favId={`movie-${movie.id}`}
             favItem={{ id: `movie-${movie.id}`, title: d.title, poster: d.poster_path ? `${IMG_BASE}${d.poster_path}` : "", type: "movie", tmdbId: movie.id, imdbId: d.imdb_id }}
           />
+          {hindiNotice && <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: -4 }}>{hindiNotice}</div>}
         </div>
       </div>
+      <DownloadOptionsModal
+        visible={downloadDialogOpen}
+        title={d.title}
+        poster={poster || undefined}
+        languageOptions={[
+          { id: "english", label: "English" },
+          { id: "hindi", label: "Hindi" },
+        ]}
+        selectedLanguage={downloadLanguage}
+        onSelectLanguage={(value) => setDownloadLanguage(value as "english" | "hindi")}
+        qualityOptions={downloadOptions.map((option) => ({ id: option.id, label: option.label }))}
+        selectedQuality={downloadQuality}
+        onSelectQuality={setDownloadQuality}
+        loading={downloadLoading}
+        error={downloadError}
+        onClose={() => setDownloadDialogOpen(false)}
+        onConfirm={() => void confirmDownload()}
+      />
     </div>
   );
 }
@@ -315,7 +462,7 @@ function FreeDetail({ movie, onClose, onPlay }: { movie: ArchiveItem; onClose: (
   const archiveUrl = `https://archive.org/details/${movie.identifier}`;
 
   const sendDl = async () => {
-    try { await fetch(`${GRABIX}/download?url=${encodeURIComponent(archiveUrl)}&dl_type=video`); }
+    try { await fetch(`${GRABIX}/download?url=${encodeURIComponent(archiveUrl)}&dl_type=video&title=${encodeURIComponent(`${movie.title} — English — Source`)}&thumbnail=${encodeURIComponent(movie.thumb ?? "")}`); }
     catch { /* ignore */ }
   };
 

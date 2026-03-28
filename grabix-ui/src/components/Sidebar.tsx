@@ -49,12 +49,12 @@ const GROUPS = [
   {
     label: "Browse",
     items: [
+      { id: "movies" as Page, label: "Movies", Icon: IconFilm },
+      { id: "series" as Page, label: "TV Series", Icon: IconTv },
       { id: "anime" as Page, label: "Anime", Icon: IconTv },
       { id: "manga" as Page, label: "Manga", Icon: IconBook },
-      { id: "explore" as Page, label: "Explore", Icon: IconBrowse },
-      { id: "movies" as Page, label: "Movies", Icon: IconFilm },
       { id: "moviebox" as Page, label: "Movie Box", Icon: IconBrowse },
-      { id: "series" as Page, label: "TV Series", Icon: IconTv },
+      { id: "explore" as Page, label: "Explore", Icon: IconBrowse },
       { id: "favorites" as Page, label: "Favorites", Icon: IconHeart },
     ],
   },

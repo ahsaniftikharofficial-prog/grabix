@@ -10,7 +10,9 @@ import {
   type StreamSource,
 } from "../lib/streamProviders";
 import VidSrcPlayer from "../components/VidSrcPlayer";
+import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import { useFavorites } from "../context/FavoritesContext";
+import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
 import {
   IconCheck,
   IconDownload,
@@ -32,6 +34,10 @@ interface PlayerState {
   poster?: string;
   sources: StreamSource[];
   mediaType: "movie" | "tv";
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 export default function MovieBoxPage() {
@@ -313,6 +319,13 @@ function MovieBoxDetail({
   const [episode, setEpisode] = useState(1);
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
+  const [downloadDialogOpen, setDownloadDialogOpen] = useState(false);
+  const [downloadLanguage, setDownloadLanguage] = useState<"english" | "hindi">(
+    item.is_hindi ? "hindi" : "english"
+  );
+  const [downloadQuality, setDownloadQuality] = useState("");
+  const [downloadOptions, setDownloadOptions] = useState<DownloadQualityOption[]>([]);
+  const [downloadError, setDownloadError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -345,15 +358,135 @@ function MovieBoxDetail({
   const favoriteType = details.media_type === "anime" ? "anime" : details.moviebox_media_type === "movie" ? "movie" : "series";
   const favorite = isFav(favoriteId);
 
-  const loadSources = async () =>
+  const fetchSourcesForItem = async (target: MovieBoxItem) =>
     fetchMovieBoxSources({
-      subjectId: details.id,
-      title: details.title,
-      mediaType: details.media_type,
-      year: details.year,
+      subjectId: target.id,
+      title: target.title,
+      mediaType: target.media_type,
+      year: target.year,
       season,
       episode,
     });
+
+  const loadSources = async () => {
+    let lastError: unknown = null;
+    const targets: MovieBoxItem[] = [details];
+
+    if (!targets.some((target) => target.id === item.id)) {
+      targets.push(item);
+    }
+
+    try {
+      const refreshed = await fetchMovieBoxDetails({
+        subjectId: details.id || item.id,
+        title: details.title || item.title,
+        mediaType: details.media_type,
+        year: details.year || item.year,
+      });
+      if (!targets.some((target) => target.id === refreshed.id)) {
+        targets.unshift(refreshed);
+      }
+    } catch (error) {
+      lastError = error;
+    }
+
+    for (const target of targets) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const sources = await fetchSourcesForItem(target);
+          if (sources.length > 0) {
+            if (target.id !== details.id) {
+              setDetails(target);
+            }
+            return sources;
+          }
+        } catch (error) {
+          lastError = error;
+          if (attempt === 0) {
+            await wait(350);
+            continue;
+          }
+        }
+      }
+    }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new Error("Movie Box did not return any playable sources for this title.");
+  };
+
+  const loadSourcesForLanguage = async (language: "english" | "hindi") => {
+    const wantsHindi = language === "hindi";
+    const currentMatches = Boolean(details.is_hindi) === wantsHindi;
+    if (currentMatches) {
+      return await loadSources();
+    }
+
+    const result = await searchMovieBox({
+      query: details.title,
+      mediaType: details.media_type,
+      hindiOnly: wantsHindi,
+      animeOnly: details.media_type === "anime",
+      preferHindi: wantsHindi,
+      sortBy: "search",
+      perPage: 12,
+    });
+
+    const matchedItem = (result.items ?? []).find((candidate) => {
+      const sameYear = !details.year || !candidate.year || candidate.year === details.year;
+      if (!sameYear) return false;
+      return wantsHindi ? Boolean(candidate.is_hindi) : !candidate.is_hindi;
+    }) ?? (result.items ?? []).find((candidate) => {
+      const sameYear = !details.year || !candidate.year || candidate.year === details.year;
+      return sameYear;
+    });
+
+    if (!matchedItem?.id) {
+      return [] as StreamSource[];
+    }
+
+    return await fetchMovieBoxSources({
+      subjectId: matchedItem.id,
+      title: matchedItem.title || details.title,
+      mediaType: details.media_type,
+      year: matchedItem.year || details.year,
+      season,
+      episode,
+    });
+  };
+
+  const loadDownloadOptions = async (language = downloadLanguage) => {
+    setSending(true);
+    setDownloadError("");
+    try {
+      const sources = await loadSourcesForLanguage(language);
+      if (sources.length === 0) {
+        setDownloadOptions([]);
+        setDownloadQuality("");
+        setDownloadError(
+          language === "hindi"
+            ? "No Hindi source available. Try downloading in English."
+            : "Movie Box did not return a downloadable file."
+        );
+        return;
+      }
+
+      const options = await resolveSourceDownloadOptions(sources);
+      setDownloadOptions(options);
+      setDownloadQuality(options[0]?.id || "");
+    } catch (error) {
+      setDownloadOptions([]);
+      setDownloadQuality("");
+      setDownloadError(error instanceof Error ? error.message : "Could not load Movie Box download options.");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!downloadDialogOpen) return;
+    void loadDownloadOptions(downloadLanguage);
+  }, [downloadDialogOpen, downloadLanguage, details.id, season, episode]);
 
   const handlePlay = async () => {
     try {
@@ -388,7 +521,11 @@ function MovieBoxDetail({
         return;
       }
 
-      const response = await fetch(`${GRABIX}/download?url=${encodeURIComponent(source.url)}&dl_type=video`);
+      const quality = source.quality || "Auto";
+      const mediaLabel = details.moviebox_media_type === "movie"
+        ? `${details.title} — ${details.is_hindi ? "Hindi" : "English"} — ${quality}`
+        : `${details.title} — S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")} — ${details.is_hindi ? "Hindi" : "English"} — ${quality}`;
+      const response = await fetch(`${GRABIX}/download?url=${encodeURIComponent(source.url)}&dl_type=video&title=${encodeURIComponent(mediaLabel)}&thumbnail=${encodeURIComponent(details.poster_proxy || details.poster || "")}`);
       if (!response.ok) {
         throw new Error(`Downloader returned ${response.status}`);
       }
@@ -397,6 +534,45 @@ function MovieBoxDetail({
       window.setTimeout(() => setSent(false), 2500);
     } catch {
       alert("Could not queue this Movie Box download.");
+    } finally {
+      setSending(false);
+    }
+  };
+  void handleDownload;
+
+  const handleDownloadDialog = async () => {
+    setDownloadLanguage(details.is_hindi ? "hindi" : "english");
+    setDownloadQuality("");
+    setDownloadOptions([]);
+    setDownloadError("");
+    setDownloadDialogOpen(true);
+  };
+
+  const confirmDownload = async () => {
+    const selectedOption = downloadOptions.find((option) => option.id === downloadQuality);
+    if (!selectedOption) {
+      setDownloadError("Choose a quality before downloading.");
+      return;
+    }
+
+    setSending(true);
+    try {
+      const episodeLabel = `S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}`;
+      const mediaLabel = details.moviebox_media_type === "movie"
+        ? `${details.title} — ${downloadLanguage === "hindi" ? "Hindi" : "English"} — ${selectedOption.label}`
+        : `${details.title} — ${episodeLabel} — ${downloadLanguage === "hindi" ? "Hindi" : "English"} — ${selectedOption.label}`;
+      await queueVideoDownload({
+        url: selectedOption.url,
+        title: mediaLabel,
+        thumbnail: details.poster_proxy || details.poster || "",
+        headers: selectedOption.headers,
+        forceHls: selectedOption.forceHls,
+      });
+      setSent(true);
+      setDownloadDialogOpen(false);
+      window.setTimeout(() => setSent(false), 2500);
+    } catch (error) {
+      setDownloadError(error instanceof Error ? error.message : "Could not queue this Movie Box download.");
     } finally {
       setSending(false);
     }
@@ -473,11 +649,11 @@ function MovieBoxDetail({
             </div>
           )}
 
-          <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
-            <button className="btn btn-primary" style={{ gap: 7, flex: 1, justifyContent: "center" }} onClick={() => void handlePlay()}>
-              <IconPlay size={15} /> Play
-            </button>
-            <button className="btn btn-ghost" style={{ gap: 7, flex: 1, justifyContent: "center" }} onClick={() => void handleDownload()} disabled={sending}>
+            <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
+              <button className="btn btn-primary" style={{ gap: 7, flex: 1, justifyContent: "center" }} onClick={() => void handlePlay()} disabled={loading || sending}>
+                <IconPlay size={15} /> Play
+              </button>
+            <button className="btn btn-ghost" style={{ gap: 7, flex: 1, justifyContent: "center" }} onClick={() => void handleDownloadDialog()} disabled={sending}>
               {sent ? <><IconCheck size={15} /> Queued</> : <><IconDownload size={15} /> {sending ? "Queueing..." : "Download"}</>}
             </button>
             <button
@@ -503,6 +679,24 @@ function MovieBoxDetail({
           </div>
         </div>
       </div>
+      <DownloadOptionsModal
+        visible={downloadDialogOpen}
+        title={details.title}
+        poster={details.poster_proxy || details.poster || undefined}
+        languageOptions={[
+          { id: "english", label: "English" },
+          { id: "hindi", label: "Hindi" },
+        ]}
+        selectedLanguage={downloadLanguage}
+        onSelectLanguage={(value) => setDownloadLanguage(value as "english" | "hindi")}
+        qualityOptions={downloadOptions.map((option) => ({ id: option.id, label: option.label }))}
+        selectedQuality={downloadQuality}
+        onSelectQuality={setDownloadQuality}
+        loading={sending}
+        error={downloadError}
+        onClose={() => setDownloadDialogOpen(false)}
+        onConfirm={() => void confirmDownload()}
+      />
     </div>
   );
 }

@@ -55,32 +55,32 @@ if not exist "%FRONTEND%\node_modules" (
 )
 
 if not exist "%CONSUMET%\node_modules" (
-    echo  [SETUP] Installing local Hianime server packages ^(first time only, takes a minute^)...
+    echo  [SETUP] Installing local Consumet gateway packages ^(first time only, takes a minute^)...
     cd /d "%CONSUMET%"
     npm.cmd install --silent
     if errorlevel 1 (
-        echo  [ERROR] Local Hianime server package install failed.
+        echo  [ERROR] Local Consumet gateway package install failed.
         pause
         exit /b 1
     )
-    echo  [SETUP] Local Hianime server packages installed.
+    echo  [SETUP] Local Consumet gateway packages installed.
 )
 
 if not exist "%CONSUMET%\node_modules\aniwatch\dist\index.js" (
-    echo  [SETUP] Repairing local Hianime server packages...
+    echo  [SETUP] Repairing local Consumet gateway packages...
     cd /d "%CONSUMET%"
     if exist node_modules rmdir /s /q node_modules
     if exist package-lock.json del /f /q package-lock.json
     npm.cmd install --silent
     if errorlevel 1 (
-        echo  [ERROR] Local Hianime server repair failed.
+        echo  [ERROR] Local Consumet gateway repair failed.
         pause
         exit /b 1
     )
 )
 
-echo  [START] Launching local Hianime server on %CONSUMET_BASE%
-start "GRABIX Hianime" cmd /k "cd /d ""%CONSUMET%"" && set PORT=%CONSUMET_PORT% && npm.cmd start"
+echo  [START] Launching local Consumet gateway on %CONSUMET_BASE%
+start "GRABIX Consumet" cmd /k "cd /d ""%CONSUMET%"" && set PORT=%CONSUMET_PORT% && npm.cmd start"
 
 timeout /t 4 /nobreak >nul
 
@@ -96,7 +96,7 @@ echo.
 echo  ==========================================
 echo    All services are starting!
 echo.
-echo    Hianime:  %CONSUMET_BASE%
+echo    Consumet: %CONSUMET_BASE%
 echo    Backend:  http://127.0.0.1:8000
 echo    Frontend: http://localhost:5173
 echo  ==========================================

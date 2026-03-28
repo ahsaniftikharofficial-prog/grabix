@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { IconDownload, IconPlay, IconSearch, IconStar, IconX } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import VidSrcPlayer from "../components/VidSrcPlayer";
+import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import { useFavorites } from "../context/FavoritesContext";
+import { queueVideoDownload, resolveSourceDownloadOptions } from "../lib/downloads";
 import {
   fetchConsumetAnimeDiscover,
   fetchConsumetAnimeEpisodes,
@@ -23,61 +25,18 @@ const TMDB = "https://api.themoviedb.org/3";
 const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzYWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
 const GRABIX = "http://127.0.0.1:8000";
 
-async function queueVideoDownload(
-  input: string | { url: string; title?: string; headers?: Record<string, string>; forceHls?: boolean }
-) {
-  const payload = typeof input === "string" ? { url: input } : input;
-  const params = new URLSearchParams({
-    url: payload.url,
-    dl_type: "video",
-  });
-  if (payload.title?.trim()) {
-    params.set("title", payload.title.trim());
-  }
-  if (payload.headers && Object.keys(payload.headers).length > 0) {
-    params.set("headers_json", JSON.stringify(payload.headers));
-  }
-  if (payload.forceHls) {
-    params.set("force_hls", "true");
-  }
-
-  let response: Response;
-  try {
-    response = await fetch(`${GRABIX}/download?${params.toString()}`);
-  } catch (error) {
-    throw new Error(error instanceof Error ? error.message : "Downloader could not be reached.");
-  }
-
-  if (!response.ok) {
-    let detail = "";
-    try {
-      const payload = (await response.json()) as { detail?: string };
-      detail = payload.detail || "";
-    } catch {
-      detail = "";
-    }
-    throw new Error(detail || `Downloader returned ${response.status}`);
-  }
-
-  window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
-}
-
-async function resolveEmbedUrl(url: string): Promise<string> {
+function buildPlaybackProxyUrl(url: string, headers?: Record<string, string>): string {
   if (!url) return url;
-  try {
-    const response = await fetch(`${GRABIX}/resolve-embed?url=${encodeURIComponent(url)}`);
-    if (!response.ok) return url;
-    const payload = (await response.json()) as { url?: string };
-    return payload.url || url;
-  } catch {
-    return url;
-  }
+  if (!headers || Object.keys(headers).length === 0) return url;
+  const params = new URLSearchParams({ url });
+  params.set("headers_json", JSON.stringify(headers));
+  return `${GRABIX}/stream/proxy?${params.toString()}`;
 }
 
 type Tab = "trending" | "popular" | "toprated" | "seasonal" | "movie";
 type TmdbEpisodeRef = { season: number; episode: number };
 type AnimeAudioOption = "en" | "original" | "hi";
-type AnimeServerOption = "auto" | "vidstreaming" | "vidcloud" | "streamsb" | "streamtape";
+type AnimeServerOption = "auto" | "hd-1" | "hd-2";
 type TrendingPeriod = "daily" | "weekly" | "monthly";
 
 interface AnimeResolvedPayload {
@@ -101,10 +60,8 @@ const AUDIO_BUTTONS: Array<{ id: AnimeAudioOption; label: string; help: string }
 ];
 const SERVER_BUTTONS: Array<{ id: AnimeServerOption; label: string; help: string }> = [
   { id: "auto", label: "Auto", help: "Fastest available source" },
-  { id: "vidstreaming", label: "VidStreaming", help: "HiAnime stream" },
-  { id: "vidcloud", label: "VidCloud", help: "HiAnime stream" },
-  { id: "streamsb", label: "StreamSB", help: "Fallback server" },
-  { id: "streamtape", label: "Streamtape", help: "Fallback server" },
+  { id: "hd-1", label: "HD-1", help: "HiAnime primary" },
+  { id: "hd-2", label: "HD-2", help: "HiAnime backup" },
 ];
 
 interface LegacyAnime {
@@ -311,6 +268,12 @@ export default function AnimePage() {
     currentEpisode?: number;
     episodeOptions?: number[];
     episodeLabel?: string;
+    sourceOptions?: Array<{ id: string; label: string }>;
+    onSelectSourceOption?: (optionId: string, episode?: number) => Promise<{
+      sources: StreamSource[];
+      subtitle?: string;
+      subtitleSearchTitle?: string;
+    }>;
     onSelectEpisode?: (episode: number) => Promise<{
       sources: StreamSource[];
       subtitle?: string;
@@ -527,10 +490,12 @@ export default function AnimePage() {
           currentEpisode={player.currentEpisode}
           episodeOptions={player.episodeOptions}
           episodeLabel={player.episodeLabel}
+          sourceOptions={player.sourceOptions}
+          onSelectSourceOption={player.onSelectSourceOption}
           onSelectEpisode={player.onSelectEpisode}
           onClose={() => setPlayer(null)}
           onDownload={async (url) => {
-            await queueVideoDownload(url);
+            await queueVideoDownload({ url });
           }}
           onDownloadSource={async (source) => {
             await queueVideoDownload({
@@ -604,6 +569,12 @@ function AnimeDetail({
     currentEpisode?: number;
     episodeOptions?: number[];
     episodeLabel?: string;
+    sourceOptions?: Array<{ id: string; label: string }>;
+    onSelectSourceOption?: (optionId: string, episode?: number) => Promise<{
+      sources: StreamSource[];
+      subtitle?: string;
+      subtitleSearchTitle?: string;
+    }>;
     onSelectEpisode?: (episode: number) => Promise<{
       sources: StreamSource[];
       subtitle?: string;
@@ -628,6 +599,13 @@ function AnimeDetail({
   const [hasHindiFallback, setHasHindiFallback] = useState(false);
   const [trailerUrl, setTrailerUrl] = useState(anime.trailer_url || "");
   const [downloading, setDownloading] = useState(false);
+  const [downloadDialogOpen, setDownloadDialogOpen] = useState(false);
+  const [downloadLanguage, setDownloadLanguage] = useState<"sub" | "dub" | "hindi">("dub");
+  const [downloadServer, setDownloadServer] = useState<AnimeServerOption>("hd-1");
+  const [downloadQuality, setDownloadQuality] = useState("source");
+  const [downloadQualityOptions, setDownloadQualityOptions] = useState<Array<{ id: string; label: string; url: string; headers?: Record<string, string>; forceHls?: boolean }>>([]);
+  const [downloadDialogLoading, setDownloadDialogLoading] = useState(false);
+  const [downloadDialogError, setDownloadDialogError] = useState("");
   const resolvedSourceCacheRef = useRef<Record<string, StreamSource>>({});
   const episodeRequestCacheRef = useRef<Record<string, Promise<ConsumetEpisode[]>>>({});
   const resolvedSourcePromiseCacheRef = useRef<Record<string, Promise<StreamSource | null>>>({});
@@ -777,21 +755,66 @@ function AnimeDetail({
     };
   }, [anime.mal_id, anime.title, anime.trailer_url]);
 
-  const queueDownload = async (source: StreamSource) => {
-    let downloadUrl = source.url;
-    let downloadHeaders = source.requestHeaders;
-    let forceHls = source.kind === "hls";
-    if (source.kind === "embed") {
-      const targetUrl = await resolveEmbedUrl(source.externalUrl || source.url);
-      const response = await fetch(`${GRABIX}/extract-stream?url=${encodeURIComponent(targetUrl)}`);
-      if (!response.ok) throw new Error(`Extractor returned ${response.status}`);
-      const payload = (await response.json()) as { url?: string };
-      if (!payload.url) throw new Error("Could not extract a direct stream URL.");
-      downloadUrl = payload.url;
-      forceHls = payload.url.includes(".m3u8");
-    }
-    await queueVideoDownload({ url: downloadUrl, title, headers: downloadHeaders, forceHls });
+    const loadDownloadOptions = async (
+      requestedLanguage = downloadLanguage,
+      requestedServer = downloadServer
+    ) => {
+      setDownloadDialogLoading(true);
+      setDownloadDialogError("");
+      try {
+        if (requestedLanguage === "hindi") {
+          const sources = await resolveHindiMovieBoxSources(episode);
+          if (sources.length === 0) {
+            setDownloadQualityOptions([]);
+            setDownloadQuality("");
+            setDownloadDialogError("No Hindi source available. Try downloading in English.");
+            return;
+          }
+          const options = await resolveSourceDownloadOptions(sources);
+          setDownloadQualityOptions(options);
+          setDownloadQuality(options[0]?.id || "");
+          return;
+        }
+
+        const requestedAudio = requestedLanguage === "dub" ? "en" : "original";
+        let source = await resolveAnimeSourceViaBackend(episode, "download", {
+          audio: requestedAudio,
+          server: requestedServer,
+        });
+        if (!source && requestedServer !== "auto") {
+          source = await resolveAnimeSourceViaBackend(episode, "download", {
+            audio: requestedAudio,
+            server: "auto",
+          });
+        }
+        if (!source) {
+          setDownloadQualityOptions([]);
+          setDownloadQuality("");
+          setDownloadDialogError("No downloadable source was found for that selection.");
+          return;
+        }
+        const options = await resolveSourceDownloadOptions([source]);
+        if (options.length === 0) {
+          setDownloadQualityOptions([]);
+          setDownloadQuality("");
+          setDownloadDialogError("No downloadable quality was found for that selection.");
+          return;
+        }
+        setDownloadQualityOptions(options);
+        setDownloadQuality(options[0]?.id || "");
+      } catch (error) {
+        setDownloadQualityOptions([]);
+        setDownloadQuality("");
+        setDownloadDialogError(error instanceof Error ? error.message : "Download options could not be loaded.");
+      } finally {
+        setDownloadDialogLoading(false);
+      }
   };
+
+  useEffect(() => {
+    if (!downloadDialogOpen) return;
+    void loadDownloadOptions(downloadLanguage, downloadServer);
+  }, [downloadDialogOpen, downloadLanguage, downloadServer, episode]);
 
   const getWatchCandidates = () => (
     resolvedAnime
@@ -824,10 +847,15 @@ function AnimeDetail({
     }
   };
 
-  const resolveAnimeSourceViaBackend = async (targetEpisode = episode, purpose: "play" | "download" = "play"): Promise<StreamSource | null> => {
-    const normalizedAudio = normalizeAudioPreference(audio);
+  const resolveAnimeSourceViaBackend = async (
+    targetEpisode = episode,
+    purpose: "play" | "download" = "play",
+    overrides?: { audio?: AudioPreference; server?: AnimeServerOption }
+  ): Promise<StreamSource | null> => {
+    const normalizedAudio = normalizeAudioPreference(overrides?.audio ?? audio);
     if (normalizedAudio === "hi") return null;
-    const cacheKey = `${purpose}:${normalizedAudio}:${server}:${targetEpisode}`;
+    const requestedServer = overrides?.server ?? server;
+    const cacheKey = `${purpose}:${normalizedAudio}:${requestedServer}:${targetEpisode}`;
     const cached = resolvedSourceCacheRef.current[cacheKey];
     if (cached) return cached;
     const pending = resolvedSourcePromiseCacheRef.current[cacheKey];
@@ -851,7 +879,7 @@ function AnimeDetail({
               altTitle: anime.alt_title || "",
               episodeNumber: targetEpisode,
               audio: normalizedAudio,
-              server,
+              server: requestedServer,
               isMovie,
               tmdbId,
               purpose,
@@ -882,20 +910,20 @@ function AnimeDetail({
               url: track.url || "",
             }));
 
-          const resolvedSource = {
-            id: `anime-resolved-${candidate.provider}-${candidate.id}-${targetEpisode}-${purpose}`,
-            label: payload.selectedServer === "fallback"
-              ? `${payload.provider || "Fallback"} Auto`
-              : payload.selectedServer
+        const resolvedSource = {
+          id: `anime-resolved-${candidate.provider}-${candidate.id}-${targetEpisode}-${purpose}`,
+          label: payload.selectedServer === "fallback"
+            ? `${payload.provider || "Fallback"} Auto`
+            : payload.selectedServer
                 ? `${payload.provider || "HiAnime"} ${payload.selectedServer}`
                 : (payload.provider || "HiAnime"),
-            provider: payload.provider || "HiAnime",
-            kind: payload.source?.kind || "direct",
-            url: resolvedUrl,
-            requestHeaders: payload.source?.headers || undefined,
-            quality: payload.source?.kind === "hls" ? "HLS" : "Auto",
-            description: payload.strategy || "Resolved anime source",
-            externalUrl: resolvedUrl,
+          provider: payload.provider || "HiAnime",
+          kind: payload.source?.kind || "direct",
+          url: buildPlaybackProxyUrl(resolvedUrl, payload.source?.headers),
+          requestHeaders: payload.source?.headers || undefined,
+          quality: payload.source?.kind === "hls" ? "HLS" : "Auto",
+          description: payload.strategy || "Resolved anime source",
+          externalUrl: resolvedUrl,
             canExtract: false,
             subtitles,
           };
@@ -929,81 +957,85 @@ function AnimeDetail({
         : getAnimeSources(tmdbId);
   };
 
-  const resolvePlayableSources = async (targetEpisode = episode): Promise<StreamSource[]> => {
+  const resolveHindiMovieBoxSources = async (targetEpisode = episode): Promise<StreamSource[]> => {
     const titleCandidates = expandAnimeTitles(anime.title, anime.alt_title).slice(0, 6);
+    const movieBoxMatches = new Map<string, { id: string; title?: string; year?: number; moviebox_media_type?: "movie" | "series"; is_hindi?: boolean }>();
+
+    for (const candidateTitle of titleCandidates) {
+      try {
+        const result = await searchMovieBox({
+          query: candidateTitle,
+          page: 1,
+          perPage: 8,
+          mediaType: "anime",
+          animeOnly: true,
+          preferHindi: true,
+          sortBy: "search",
+        });
+        for (const item of result.items) {
+          movieBoxMatches.set(item.id, item);
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    const rankedMovieBoxMatches = [...movieBoxMatches.values()].sort((left, right) => {
+      if (Boolean(left.is_hindi) !== Boolean(right.is_hindi)) {
+        return left.is_hindi ? -1 : 1;
+      }
+      return 0;
+    });
+
+    for (const item of rankedMovieBoxMatches.slice(0, 6)) {
+      try {
+        const movieBoxSources = await fetchMovieBoxSources({
+          subjectId: item.id,
+          title: item.title || title,
+          mediaType: item.moviebox_media_type === "movie" ? "movie" : "series",
+          year: item.year,
+          season: 1,
+          episode: targetEpisode,
+        });
+        if (movieBoxSources.length > 0) return movieBoxSources;
+      } catch {
+        continue;
+      }
+    }
+
+    for (const candidateTitle of titleCandidates) {
+      try {
+        const movieBoxSources = await fetchMovieBoxSources({
+          title: candidateTitle,
+          mediaType: isMovie ? "movie" : "anime",
+          season: 1,
+          episode: targetEpisode,
+        });
+        if (movieBoxSources.length > 0) return movieBoxSources;
+      } catch {
+        if (isMovie) continue;
+        try {
+          const seriesSources = await fetchMovieBoxSources({
+            title: candidateTitle,
+            mediaType: "series",
+            season: 1,
+            episode: targetEpisode,
+          });
+          if (seriesSources.length > 0) return seriesSources;
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    return [];
+  };
+
+  const resolvePlayableSources = async (targetEpisode = episode): Promise<StreamSource[]> => {
     const normalizedAudio = normalizeAudioPreference(audio);
 
     if (normalizedAudio === "hi") {
-      const movieBoxMatches = new Map<string, { id: string; title?: string; year?: number; moviebox_media_type?: "movie" | "series"; is_hindi?: boolean }>();
-
-      for (const candidateTitle of titleCandidates) {
-        try {
-          const result = await searchMovieBox({
-            query: candidateTitle,
-            page: 1,
-            perPage: 8,
-            mediaType: "anime",
-            animeOnly: true,
-            preferHindi: true,
-            sortBy: "search",
-          });
-          for (const item of result.items) {
-            movieBoxMatches.set(item.id, item);
-          }
-        } catch {
-          continue;
-        }
-      }
-
-      const rankedMovieBoxMatches = [...movieBoxMatches.values()].sort((left, right) => {
-        if (Boolean(left.is_hindi) !== Boolean(right.is_hindi)) {
-          return left.is_hindi ? -1 : 1;
-        }
-        return 0;
-      });
-
-      for (const item of rankedMovieBoxMatches.slice(0, 6)) {
-        try {
-          const movieBoxSources = await fetchMovieBoxSources({
-            subjectId: item.id,
-            title: item.title || title,
-            mediaType: item.moviebox_media_type === "movie" ? "movie" : "series",
-            year: item.year,
-            season: 1,
-            episode: targetEpisode,
-          });
-          if (movieBoxSources.length > 0) return movieBoxSources;
-        } catch {
-          continue;
-        }
-      }
-
-      for (const candidateTitle of titleCandidates) {
-        try {
-          const movieBoxSources = await fetchMovieBoxSources({
-            title: candidateTitle,
-            mediaType: isMovie ? "movie" : "anime",
-            season: 1,
-            episode: targetEpisode,
-          });
-          if (movieBoxSources.length > 0) return movieBoxSources;
-        } catch {
-          if (isMovie) continue;
-          try {
-            const seriesSources = await fetchMovieBoxSources({
-              title: candidateTitle,
-              mediaType: "series",
-              season: 1,
-              episode: targetEpisode,
-            });
-            if (seriesSources.length > 0) return seriesSources;
-          } catch {
-            continue;
-          }
-        }
-      }
-
-      return [];
+      return await resolveHindiMovieBoxSources(targetEpisode);
     }
 
     const resolvedSource = await resolveAnimeSourceViaBackend(targetEpisode, "play");
@@ -1037,27 +1069,75 @@ function AnimeDetail({
     return fallbackSources;
   };
 
-  const resolveDownloadSource = async (targetEpisode = episode): Promise<StreamSource | null> => {
-    const resolvedSource = await resolveAnimeSourceViaBackend(targetEpisode, "download");
-    if (resolvedSource) return resolvedSource;
-
-    const primarySources = await resolvePlayableSources(targetEpisode);
-    const fallbackSources = normalizeAudioPreference(audio) === "hi"
-      ? []
-      : await buildFallbackSources(targetEpisode);
-    const candidates = [...primarySources, ...fallbackSources];
-
-    return candidates.find((source) =>
-      source.kind === "direct" ||
-      source.kind === "hls" ||
-      source.kind === "local" ||
-      Boolean(source.canExtract)
-    ) ?? candidates[0] ?? null;
+  const buildSubtitleText = (targetEpisode = episode) => {
+    const normalizedAudio = normalizeAudioPreference(audio);
+    return normalizedAudio === "hi"
+      ? `Hindi playback from Movie Box - ${selectionLabel} ${targetEpisode}`
+      : `Anime playback with ${normalizedAudio === "en" ? "English dub" : "sub"} preference - ${selectionLabel} ${targetEpisode}`;
   };
 
-  const buildPlayerPayload = async (targetEpisode = episode) => {
+  const buildSubtitleSearchTitle = (targetEpisode = episode) =>
+    `${title} ${selectionLabel} ${targetEpisode}`.trim();
+
+  const playerServerOptions = [
+    { id: "hd-1:original", label: "HD-1 SUB" },
+    { id: "hd-2:original", label: "HD-2 SUB" },
+    { id: "hd-1:en", label: "HD-1 DUB" },
+    { id: "hd-2:en", label: "HD-2 DUB" },
+  ] as const;
+
+  const resolvePlayerServerOption = async (optionId: string, targetEpisode = episode) => {
+    const [requestedServer, requestedAudio] = optionId.split(":") as [AnimeServerOption, AudioPreference];
+    const source = await resolveAnimeSourceViaBackend(targetEpisode, "play", {
+      audio: requestedAudio,
+      server: requestedServer,
+    });
+    if (!source) {
+      throw new Error(`No playable source was found for ${optionId.replace(":", " ").toUpperCase()}.`);
+    }
+    return {
+      sources: [source],
+      subtitle: requestedAudio === "en"
+        ? `Anime playback with English dub - ${selectionLabel} ${targetEpisode}`
+        : `Anime playback with subtitles - ${selectionLabel} ${targetEpisode}`,
+      subtitleSearchTitle: buildSubtitleSearchTitle(targetEpisode),
+    };
+  };
+
+  const buildInstantPlayableSources = (targetEpisode = episode): StreamSource[] => {
     const normalizedAudio = normalizeAudioPreference(audio);
+    const cachedResolved = resolvedSourceCacheRef.current[`play:${normalizedAudio}:${server}:${targetEpisode}`];
+    if (cachedResolved) {
+      return [cachedResolved];
+    }
+    return [];
+  };
+
+  useEffect(() => {
+    const normalizedAudio = normalizeAudioPreference(audio);
+    if (normalizedAudio === "hi") return;
+    let cancelled = false;
+
+    const warm = async () => {
+      try {
+        await resolveAnimeSourceViaBackend(episode, "play");
+        if (!cancelled && totalEpisodes > episode) {
+          await resolveAnimeSourceViaBackend(episode + 1, "play");
+        }
+      } catch {
+        // Warm the cache quietly; handle real errors on user action.
+      }
+    };
+
+    void warm();
+    return () => {
+      cancelled = true;
+    };
+  }, [audio, server, episode, totalEpisodes, resolvedAnime, candidateAnimes]);
+
+  const buildPlayerPayload = async (targetEpisode = episode) => {
     const sources = await resolvePlayableSources(targetEpisode);
+    const normalizedAudio = normalizeAudioPreference(audio);
     if (sources.length === 0) {
       throw new Error(
         normalizedAudio === "hi"
@@ -1066,19 +1146,48 @@ function AnimeDetail({
       );
     }
 
-    const subtitleText = normalizedAudio === "hi"
-      ? `Hindi playback from Movie Box - ${selectionLabel} ${targetEpisode}`
-      : `Anime playback with ${normalizedAudio === "en" ? "English dub" : "sub"} preference - ${selectionLabel} ${targetEpisode}`;
-
     return {
       sources,
-      subtitle: subtitleText,
-      subtitleSearchTitle: `${title} ${selectionLabel} ${targetEpisode}`.trim(),
+      subtitle: buildSubtitleText(targetEpisode),
+      subtitleSearchTitle: buildSubtitleSearchTitle(targetEpisode),
     };
   };
 
   const handlePlay = async () => {
     if (playing) return;
+    const normalizedAudio = normalizeAudioPreference(audio);
+    const instantSources = normalizedAudio === "hi" ? [] : buildInstantPlayableSources(episode);
+
+    if (instantSources.length > 0) {
+      onPlay({
+        title,
+        subtitle: buildSubtitleText(episode),
+        subtitleSearchTitle: buildSubtitleSearchTitle(episode),
+        poster: anime.image,
+        sources: instantSources,
+        mediaType: isMovie ? "movie" : "tv",
+        currentEpisode: episode,
+        episodeOptions: totalEpisodes > 1 ? Array.from({ length: totalEpisodes }, (_, index) => index + 1) : undefined,
+        episodeLabel: selectionLabel,
+        sourceOptions: normalizeAudioPreference(audio) === "hi" ? undefined : [...playerServerOptions],
+        onSelectSourceOption: normalizeAudioPreference(audio) === "hi"
+          ? undefined
+          : async (optionId: string, nextEpisode?: number) => resolvePlayerServerOption(optionId, nextEpisode ?? episode),
+        onSelectEpisode: async (nextEpisode: number) => {
+          const nextInstantSources = buildInstantPlayableSources(nextEpisode);
+          if (nextInstantSources.length > 0) {
+            return {
+              sources: nextInstantSources,
+              subtitle: buildSubtitleText(nextEpisode),
+              subtitleSearchTitle: buildSubtitleSearchTitle(nextEpisode),
+            };
+          }
+          return buildPlayerPayload(nextEpisode);
+        },
+      });
+      return;
+    }
+
     setPlaying(true);
 
     try {
@@ -1093,6 +1202,10 @@ function AnimeDetail({
         currentEpisode: episode,
         episodeOptions: totalEpisodes > 1 ? Array.from({ length: totalEpisodes }, (_, index) => index + 1) : undefined,
         episodeLabel: selectionLabel,
+        sourceOptions: normalizeAudioPreference(audio) === "hi" ? undefined : [...playerServerOptions],
+        onSelectSourceOption: normalizeAudioPreference(audio) === "hi"
+          ? undefined
+          : async (optionId: string, nextEpisode?: number) => resolvePlayerServerOption(optionId, nextEpisode ?? episode),
         onSelectEpisode: async (nextEpisode: number) => buildPlayerPayload(nextEpisode),
       });
       return;
@@ -1103,22 +1216,45 @@ function AnimeDetail({
     }
   };
 
-  const handleDownload = async () => {
+  const confirmDownloadSelection = async () => {
     if (downloading) return;
+    const selectedOption = downloadQualityOptions.find((option) => option.id === downloadQuality);
+    if (!selectedOption) {
+      setDownloadDialogError("Choose a quality before downloading.");
+      return;
+    }
+
+    const languageLabel = downloadLanguage === "hindi" ? "Hindi" : downloadLanguage === "dub" ? "Dub" : "Sub";
+    const formattedTitle = isMovie
+      ? `${title} — ${languageLabel} — ${selectedOption.label}`
+      : `${title} — ${selectionLabel} ${String(episode).padStart(2, "0")} — ${languageLabel} — ${selectedOption.label}`;
+
     setDownloading(true);
     try {
-      const source = await resolveDownloadSource();
-      if (!source) {
-        alert(normalizeAudioPreference(audio) === "hi" ? "No Hindi sources were found for this title." : "No downloadable sources were found for this title.");
-        return;
-      }
-      await queueDownload(source);
+      await queueVideoDownload({
+        url: selectedOption.url,
+        title: formattedTitle,
+        thumbnail: anime.image,
+        headers: selectedOption.headers,
+        forceHls: selectedOption.forceHls,
+      });
+      setDownloadDialogOpen(false);
     } catch (error) {
-      alert(error instanceof Error ? error.message : "Download could not be started.");
+      setDownloadDialogError(error instanceof Error ? error.message : "Download could not be started.");
     } finally {
       setDownloading(false);
     }
   };
+
+    const handleDownload = async () => {
+      if (downloading) return;
+      setDownloadLanguage(hasHindiFallback ? "dub" : "sub");
+      setDownloadServer("auto");
+      setDownloadQuality("");
+      setDownloadQualityOptions([]);
+      setDownloadDialogError("");
+      setDownloadDialogOpen(true);
+    };
 
   const handleTrailer = () => {
     if (!trailerUrl) {
@@ -1256,6 +1392,32 @@ function AnimeDetail({
           </div>
         </div>
       </div>
+      <DownloadOptionsModal
+        visible={downloadDialogOpen}
+        title={title}
+        poster={anime.image}
+        languageOptions={[
+          { id: "sub", label: "Sub" },
+          { id: "dub", label: "Dub" },
+          ...(hasHindiFallback ? [{ id: "hindi", label: "Hindi" }] : []),
+        ]}
+        selectedLanguage={downloadLanguage}
+        onSelectLanguage={(value) => setDownloadLanguage(value as "sub" | "dub" | "hindi")}
+        serverOptions={downloadLanguage === "hindi" ? [] : [
+          { id: "auto", label: "Auto" },
+          { id: "hd-1", label: "HD-1" },
+          { id: "hd-2", label: "HD-2" },
+        ]}
+        selectedServer={downloadServer}
+        onSelectServer={(value) => setDownloadServer(value as AnimeServerOption)}
+        qualityOptions={downloadQualityOptions.map((option) => ({ id: option.id, label: option.label }))}
+        selectedQuality={downloadQuality}
+        onSelectQuality={setDownloadQuality}
+        loading={downloadDialogLoading || downloading}
+        error={downloadDialogError}
+        onClose={() => setDownloadDialogOpen(false)}
+        onConfirm={() => void confirmDownloadSelection()}
+      />
     </div>
   );
 }

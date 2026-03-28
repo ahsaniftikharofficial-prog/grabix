@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { IconDownload, IconPlay, IconRefresh, IconSearch, IconStar, IconX } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
+import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import { useFavorites } from "../context/FavoritesContext";
-import { fetchConsumetMetaSearch, normalizeAudioPreference, type AudioPreference } from "../lib/consumetProviders";
-import { fetchMovieBoxSources, getTvSources, type StreamSource } from "../lib/streamProviders";
+import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
+import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
+import { fetchMovieBoxSources, getTvSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
 
 const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzdWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
 const TMDB = "https://api.themoviedb.org/3";
@@ -186,8 +188,13 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
   const [season, setSeason] = useState(1);
   const [episode, setEpisode] = useState(1);
   const [seasonEpisodes, setSeasonEpisodes] = useState<number>(12);
-  const [audioPreference, setAudioPreference] = useState<AudioPreference>("hi");
   const [altTitles, setAltTitles] = useState<string[]>([]);
+  const [downloadDialogOpen, setDownloadDialogOpen] = useState(false);
+  const [downloadLanguage, setDownloadLanguage] = useState<"english" | "hindi">("english");
+  const [downloadQuality, setDownloadQuality] = useState("");
+  const [downloadOptions, setDownloadOptions] = useState<DownloadQualityOption[]>([]);
+  const [downloadLoading, setDownloadLoading] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
 
   useEffect(() => {
     tf(`/tv/${show.id}?append_to_response=external_ids`).then(setFull).catch(() => {});
@@ -214,6 +221,7 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
 
   useEffect(() => {
     let cancelled = false;
+    const seasonOwner = full ?? show;
     tf(`/tv/${show.id}/season/${season}`)
       .then((seasonData) => {
         if (cancelled) return;
@@ -223,16 +231,18 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
       })
       .catch(() => {
         if (!cancelled) {
-          const fallback = data.seasons?.find((item) => item.season_number === season)?.episode_count ?? 12;
+          const fallback = seasonOwner.seasons?.find((item) => item.season_number === season)?.episode_count ?? 12;
           setSeasonEpisodes(Math.max(fallback, 1));
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [show.id, season, tf]);
+  }, [show, full, season, tf]);
 
   const data = full ?? show;
+  const poster = data.poster_path ? `${IMG_BASE}${data.poster_path}` : "";
+  const fallbackSources = getTvSources({ tmdbId: show.id, imdbId: data.external_ids?.imdb_id }, { season, episode });
   const seriesYear = data.first_air_date ? Number(data.first_air_date.slice(0, 4)) : undefined;
   const availableSeasons = (data.seasons ?? [])
     .map((item) => item.season_number)
@@ -288,33 +298,141 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
     return [];
   };
 
+  const isHindiMovieBoxItem = (item: MovieBoxItem) => {
+    const title = (item.title || "").toLowerCase();
+    return Boolean(item.is_hindi) || title.includes("hindi");
+  };
+
+  const loadHindiMovieBoxSources = async () => {
+    const titles = [data.name, ...altTitles];
+    for (const title of titles) {
+      try {
+        const result = await searchMovieBox({
+          query: title,
+          mediaType: "series",
+          hindiOnly: true,
+          preferHindi: true,
+          sortBy: "search",
+          perPage: 10,
+        });
+        const hindiItem = (result.items ?? []).find((item) => {
+          const sameYear = !seriesYear || !item.year || item.year === seriesYear;
+          return sameYear && isHindiMovieBoxItem(item);
+        });
+        if (!hindiItem?.id) continue;
+        const sources = await fetchMovieBoxSources({
+          subjectId: hindiItem.id,
+          mediaType: "series",
+          year: Number.isFinite(seriesYear) ? seriesYear : undefined,
+          season,
+          episode,
+        });
+        if (sources.length > 0) {
+          return sources;
+        }
+      } catch {
+        continue;
+      }
+    }
+    return [] as StreamSource[];
+  };
+
+  const loadDownloadOptions = async (language = downloadLanguage) => {
+    setDownloadLoading(true);
+    setDownloadError("");
+    try {
+      const sources = language === "hindi" ? await loadHindiMovieBoxSources() : await loadMovieBoxSources();
+      if (sources.length > 0) {
+        const options = await resolveSourceDownloadOptions(sources);
+        setDownloadOptions(options);
+        setDownloadQuality(options[0]?.id || "");
+        return;
+      }
+      if (language === "hindi") {
+        setDownloadOptions([]);
+        setDownloadQuality("");
+        setDownloadError("No Hindi source available. Try downloading in English.");
+        return;
+      }
+
+      const fallbackOptions = await resolveSourceDownloadOptions(fallbackSources.slice(0, 1));
+      setDownloadOptions(fallbackOptions);
+      setDownloadQuality(fallbackOptions[0]?.id || "");
+      if (fallbackOptions.length === 0) {
+        setDownloadError("No downloadable source was found for this episode.");
+      }
+    } catch (error) {
+      setDownloadOptions([]);
+      setDownloadQuality("");
+      setDownloadError(error instanceof Error ? error.message : "Download options could not be loaded.");
+    } finally {
+      setDownloadLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!downloadDialogOpen) return;
+    void loadDownloadOptions(downloadLanguage);
+  }, [downloadDialogOpen, downloadLanguage, data.name, season, episode, seriesYear]);
+
   const handlePlay = async () => {
-    const movieBoxSources = await loadMovieBoxSources();
     onPlay({
       title: data.name,
-      subtitle: `TV playback for S${season}E${episode} with ${normalizeAudioPreference(audioPreference) === "hi" ? "Hindi" : normalizeAudioPreference(audioPreference) === "en" ? "English" : "original"} preference plus GRABIX fallbacks`,
-      poster: data.poster_path ? `${IMG_BASE}${data.poster_path}` : undefined,
-      sources: [
-        ...movieBoxSources,
-        ...getTvSources({ tmdbId: show.id, imdbId: data.external_ids?.imdb_id }, { season, episode }),
-      ],
+      subtitle: `TV playback for S${season}E${episode} with GRABIX servers`,
+      poster: poster || undefined,
+      sources: fallbackSources,
     });
   };
 
   const handleDownload = async () => {
     const movieBoxSources = await loadMovieBoxSources();
-    const directSource = movieBoxSources[0];
-
-    if (directSource) {
-      await fetch(`${GRABIX}/download?url=${encodeURIComponent(directSource.url)}&dl_type=video`);
+    const movieBoxDirectSource = movieBoxSources[0];
+    const thumbnail = data.poster_path ? `${IMG_BASE}${data.poster_path}` : "";
+    const labelBase = `${data.name} — S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")} — English`;
+    if (movieBoxDirectSource) {
+      await fetch(`${GRABIX}/download?url=${encodeURIComponent(movieBoxDirectSource.url)}&dl_type=video&title=${encodeURIComponent(`${labelBase} — ${movieBoxDirectSource.quality || "Auto"}`)}&thumbnail=${encodeURIComponent(thumbnail)}`);
       window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
       return;
     }
 
     const fallbackSource = getTvSources({ tmdbId: show.id, imdbId: data.external_ids?.imdb_id }, { season, episode })[0];
     if (fallbackSource) {
-      await fetch(`${GRABIX}/download?url=${encodeURIComponent(fallbackSource.url)}&dl_type=video`);
+      await fetch(`${GRABIX}/download?url=${encodeURIComponent(fallbackSource.url)}&dl_type=video&title=${encodeURIComponent(`${labelBase} — ${fallbackSource.quality || "Auto"}`)}&thumbnail=${encodeURIComponent(thumbnail)}`);
       window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
+    }
+  };
+  void handleDownload;
+
+  const handleDownloadDialog = async () => {
+    setDownloadLanguage("english");
+    setDownloadQuality("");
+    setDownloadOptions([]);
+    setDownloadError("");
+    setDownloadDialogOpen(true);
+  };
+
+  const confirmDownload = async () => {
+    const selectedOption = downloadOptions.find((option) => option.id === downloadQuality);
+    if (!selectedOption) {
+      setDownloadError("Choose a quality before downloading.");
+      return;
+    }
+
+    const episodeLabel = `S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}`;
+    setDownloadLoading(true);
+    try {
+      await queueVideoDownload({
+        url: selectedOption.url,
+        title: `${data.name} — ${episodeLabel} — ${downloadLanguage === "hindi" ? "Hindi" : "English"} — ${selectedOption.label}`,
+        thumbnail: poster,
+        headers: selectedOption.headers,
+        forceHls: selectedOption.forceHls,
+      });
+      setDownloadDialogOpen(false);
+    } catch (error) {
+      setDownloadError(error instanceof Error ? error.message : "Could not queue this episode download.");
+    } finally {
+      setDownloadLoading(false);
     }
   };
 
@@ -366,15 +484,6 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
               <input className="input-base" type="number" min={1} value={episode} onChange={(e) => setEpisode(Math.max(1, Number(e.target.value) || 1))} />
             </div>
           </div>
-          <div style={{ marginBottom: 14 }}>
-            <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>Preferred Audio</div>
-            <select className="input-base" value={audioPreference} onChange={(event) => setAudioPreference(normalizeAudioPreference(event.target.value))}>
-              <option value="hi">Hindi first</option>
-              <option value="en">English first</option>
-              <option value="original">Original first</option>
-            </select>
-          </div>
-
           <div style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
               <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Episodes</div>
@@ -460,12 +569,30 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
 
           <SeriesActions
             onPlay={handlePlay}
-            onDownload={handleDownload}
+            onDownload={handleDownloadDialog}
             favId={`series-${show.id}`}
             favItem={{ id: `series-${show.id}`, title: data.name, poster: data.poster_path ? `${IMG_BASE}${data.poster_path}` : "", type: "series", tmdbId: show.id, imdbId: data.external_ids?.imdb_id }}
           />
         </div>
       </div>
+      <DownloadOptionsModal
+        visible={downloadDialogOpen}
+        title={data.name}
+        poster={poster || undefined}
+        languageOptions={[
+          { id: "english", label: "English" },
+          { id: "hindi", label: "Hindi" },
+        ]}
+        selectedLanguage={downloadLanguage}
+        onSelectLanguage={(value) => setDownloadLanguage(value as "english" | "hindi")}
+        qualityOptions={downloadOptions.map((option) => ({ id: option.id, label: option.label }))}
+        selectedQuality={downloadQuality}
+        onSelectQuality={setDownloadQuality}
+        loading={downloadLoading}
+        error={downloadError}
+        onClose={() => setDownloadDialogOpen(false)}
+        onConfirm={() => void confirmDownload()}
+      />
     </div>
   );
 }

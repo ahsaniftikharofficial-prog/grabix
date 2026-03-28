@@ -257,8 +257,9 @@ function sendJson(res, status, payload) {
 }
 
 function sendError(res, error) {
-  const detail = error instanceof Error ? error.message : "Unknown Hianime request failure.";
-  sendJson(res, 502, { detail });
+  const detail = error instanceof Error ? error.message : "Unknown Consumet gateway failure.";
+  const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 502;
+  sendJson(res, statusCode, { detail });
 }
 
 function normalizeSearchResult(item) {
@@ -451,7 +452,14 @@ async function fetchWatch(episodeId, server, category) {
 
 async function route(pathname, searchParams) {
   if (pathname === "/") {
-    return { status: 200, body: { status: "GRABIX Consumet Local Running", provider: "hianime", siteBase } };
+    return {
+      status: 200,
+      body: {
+        status: "GRABIX Consumet Gateway Running",
+        animeProvider: "hianime",
+        siteBase,
+      },
+    };
   }
 
   if (pathname.startsWith("/anime/hianime/watch/")) {
@@ -638,5 +646,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
-  console.log(`GRABIX Hianime local server listening on http://127.0.0.1:${port}`);
+  console.log(`GRABIX Consumet gateway listening on http://127.0.0.1:${port}`);
+  console.log(`Anime provider: HiAnime (${siteBase})`);
 });

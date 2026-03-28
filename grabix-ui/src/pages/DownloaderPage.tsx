@@ -48,7 +48,7 @@ function toQueueItem(serverItem: any, previous?: QueueItem): QueueItem {
     serverId: serverItem.id ?? previous?.serverId ?? "",
     url: previous?.url ?? "",
     title: serverItem.title || previous?.title || "Preparing download...",
-    thumbnail: previous?.thumbnail || "",
+    thumbnail: serverItem.thumbnail || previous?.thumbnail || "",
     format: previous?.format || fileType,
     fileType,
     status: serverItem.status ?? previous?.status ?? "queued",
@@ -79,6 +79,18 @@ function secs(s: number) {
 }
 
 function uid() { return Math.random().toString(36).slice(2); }
+
+function formatDisplaySpeed(speed: string): string {
+  const clean = speed.replace(/\x1b\[[0-9;]*m/g, "").replace(/\u001b\[[0-9;]*m/g, "").trim();
+  if (!clean) return "";
+  if (clean.endsWith("/s")) {
+    return clean.replace("MiB", "MB").replace("KiB", "KB").replace("GiB", "GB");
+  }
+  if (clean.endsWith("x")) {
+    return clean;
+  }
+  return clean;
+}
 
 export default function DownloaderPage() {
   const [url, setUrl] = useState("");
@@ -125,6 +137,8 @@ export default function DownloaderPage() {
     return () => {
       active = false;
       clearInterval(interval);
+      pollingRef.current.forEach((timer) => clearInterval(timer));
+      pollingRef.current.clear();
     };
   }, []);
 
@@ -311,19 +325,57 @@ export default function DownloaderPage() {
     setBatchMode(false);
   };
 
-  const removeFromQueue = (id: string) => {
-    const interval = pollingRef.current.get(id);
-    if (interval) { clearInterval(interval); pollingRef.current.delete(id); }
-    setQueue(prev => prev.filter(q => q.id !== id));
+  const removeFromQueue = async (item: QueueItem) => {
+    const key = item.serverId || item.id;
+    const interval = pollingRef.current.get(key);
+    if (interval) { clearInterval(interval); pollingRef.current.delete(key); }
+
+    if (item.serverId) {
+      try {
+        await fetch(`${API}/downloads/${item.serverId}`, { method: "DELETE" });
+      } catch {
+        // Ignore backend delete errors and still remove locally.
+      }
+    }
+
+    setQueue(prev => prev.filter(q => q.id !== item.id));
+  };
+
+  const clearAllQueue = async () => {
+    const items = [...queue];
+    pollingRef.current.forEach((interval) => clearInterval(interval));
+    pollingRef.current.clear();
+    await Promise.allSettled(
+      items
+        .filter((item) => item.serverId)
+        .map((item) => fetch(`${API}/downloads/${item.serverId}`, { method: "DELETE" }))
+    );
+    setQueue([]);
   };
 
   const activeCount = queue.filter(q => q.status === "downloading" || q.status === "queued" || q.status === "processing").length;
 
   const doAction = async (item: QueueItem, action: string) => {
     if (!item.serverId) return;
+    setQueue((prev) =>
+      prev.map((entry) =>
+        entry.id !== item.id
+          ? entry
+          : {
+              ...entry,
+              status:
+                action === "pause" ? "paused" :
+                action === "resume" ? "downloading" :
+                action === "cancel" ? "canceling" :
+                entry.status,
+            }
+      )
+    );
     try {
       await fetch(`${API}/downloads/${item.serverId}/action?action=${action}`, { method: "POST" });
-    } catch { /* backend offline */ }
+    } catch {
+      setQueue((prev) => prev.map((entry) => entry.id === item.id ? item : entry));
+    }
   };
 
   const doReveal = async (item: QueueItem) => {
@@ -370,11 +422,7 @@ export default function DownloaderPage() {
             <button
               className="btn btn-ghost"
               style={{ fontSize: 12 }}
-              onClick={() => {
-                pollingRef.current.forEach((interval) => clearInterval(interval));
-                pollingRef.current.clear();
-                setQueue([]);
-              }}
+              onClick={() => void clearAllQueue()}
             >
               Clear all
             </button>
@@ -728,7 +776,7 @@ function QueueCard({
   item, onRemove, onAction, onReveal,
 }: {
   item: QueueItem;
-  onRemove: (id: string) => void;
+  onRemove: (item: QueueItem) => void | Promise<void>;
   onAction: (item: QueueItem, action: string) => void;
   onReveal: (item: QueueItem) => void;
 }) {
@@ -751,14 +799,19 @@ function QueueCard({
   };
 
   // Clean up raw speed string: strip ANSI codes and extra whitespace
-  const cleanSpeed = item.speed.replace(/\x1b\[[0-9;]*m/g, "").replace(/\u001b\[[0-9;]*m/g, "").trim();
+  const cleanSpeed = formatDisplaySpeed(item.speed);
   const showIndeterminateProgress = item.status === "downloading" && item.percent <= 0 && Boolean(item.downloaded || item.size);
+  const statsSummary = [
+    showIndeterminateProgress ? "LIVE" : `${item.percent}%`,
+    cleanSpeed || "",
+    item.eta && item.eta !== "0s" ? `${item.eta} remaining` : "",
+  ].filter(Boolean).join(" — ");
 
   return (
     <div className="card fade-in" style={{ padding: "12px 14px" }}>
       {/* ── Row 1: thumbnail + title + action buttons ── */}
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <img src={item.thumbnail} alt="" style={{ width: 48, height: 32, objectFit: "cover", borderRadius: 5, flexShrink: 0, border: "1px solid var(--border)" }} />
+        <img src={item.thumbnail || "https://via.placeholder.com/96x64?text=DL"} alt="" style={{ width: 48, height: 32, objectFit: "cover", borderRadius: 5, flexShrink: 0, border: "1px solid var(--border)", background: "var(--bg-surface2)" }} />
 
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.title}</div>
@@ -768,6 +821,11 @@ function QueueCard({
             </span>
             <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{item.format.toUpperCase()}</span>
           </div>
+          {statsSummary && (isActive || isPaused) && (
+            <div style={{ marginTop: 3, fontSize: 11, color: "var(--text-secondary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {statsSummary}
+            </div>
+          )}
         </div>
 
         {/* ── Action buttons ── */}
@@ -828,7 +886,7 @@ function QueueCard({
           )}
           {/* Remove */}
           <div className="tooltip-wrap">
-            <button className="btn-icon" style={{ width: 28, height: 28 }} onClick={() => onRemove(item.id)}>
+            <button className="btn-icon" style={{ width: 28, height: 28 }} onClick={() => void onRemove(item)}>
               <IconX size={13} />
             </button>
             <span className="tooltip-box">Remove</span>
