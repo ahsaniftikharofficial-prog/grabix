@@ -14,6 +14,7 @@ export interface StreamSource {
   provider: string;
   kind: StreamKind;
   url: string;
+  language?: string;
   description?: string;
   quality?: string;
   mimeType?: string;

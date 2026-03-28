@@ -7,6 +7,7 @@ import DownloaderPage from "./pages/DownloaderPage";
 import LibraryPage from "./pages/LibraryPage";
 import AnimePage from "./pages/AnimePage";
 import MangaPage from "./pages/MangaPage";
+import ExplorePage from "./pages/ExplorePage";
 import MoviesPage from "./pages/MoviesPage";
 import MovieBoxPage from "./pages/MovieBoxPage";
 import TVSeriesPage from "./pages/TVSeriesPage";
@@ -72,6 +73,7 @@ function Inner() {
     library: <LibraryPage />,
     anime: <AnimePage />,
     manga: <MangaPage />,
+    explore: <ExplorePage />,
     movies: <MoviesPage />,
     moviebox: <MovieBoxPage />,
     series: <TVSeriesPage />,

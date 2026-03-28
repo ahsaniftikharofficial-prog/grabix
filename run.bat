@@ -1,4 +1,5 @@
 @echo off
+setlocal
 title GRABIX Launcher
 color 0B
 
@@ -8,12 +9,13 @@ echo    GRABIX - Starting Up
 echo  ==========================================
 echo.
 
-:: Step 1: Find the script's own folder so it works from anywhere
 set "ROOT=%~dp0"
 set "BACKEND=%ROOT%backend"
 set "FRONTEND=%ROOT%grabix-ui"
+set "CONSUMET=%ROOT%consumet-local"
+set "CONSUMET_PORT=3000"
+set "CONSUMET_BASE=http://127.0.0.1:%CONSUMET_PORT%"
 
-:: Step 2: Check Python is installed
 python --version >nul 2>&1
 if errorlevel 1 (
     echo  [ERROR] Python not found. Install Python 3.10+ and add it to PATH.
@@ -21,7 +23,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: Step 3: Check Node is installed
 node --version >nul 2>&1
 if errorlevel 1 (
     echo  [ERROR] Node.js not found. Install Node.js from https://nodejs.org
@@ -29,52 +30,78 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: Step 4: Create venv if it doesn't exist
 if not exist "%BACKEND%\venv\Scripts\activate.bat" (
     echo  [SETUP] Creating Python virtual environment...
     python -m venv "%BACKEND%\venv"
 )
 
-:: Step 5: Install Python deps if needed
-if not exist "%BACKEND%\venv\Lib\site-packages\fastapi" (
+if not exist "%BACKEND%\venv\Lib\site-packages\httpx" (
     echo  [SETUP] Installing Python packages ^(first time only^)...
     call "%BACKEND%\venv\Scripts\activate.bat"
-    pip install fastapi uvicorn yt-dlp python-multipart --quiet
+    pip install -r "%BACKEND%\requirements.txt" python-multipart --quiet
     echo  [SETUP] Python packages installed.
 )
 
-:: Step 6: Install Node deps if needed
 if not exist "%FRONTEND%\node_modules" (
-    echo  [SETUP] Installing Node packages ^(first time only, takes a minute^)...
+    echo  [SETUP] Installing frontend packages ^(first time only, takes a minute^)...
     cd /d "%FRONTEND%"
-    npm install --silent
-    echo  [SETUP] Node packages installed.
+    npm.cmd install --silent
+    if errorlevel 1 (
+        echo  [ERROR] Frontend package install failed.
+        pause
+        exit /b 1
+    )
+    echo  [SETUP] Frontend packages installed.
 )
 
-:: Step 7: Start Backend in a new window
+if not exist "%CONSUMET%\node_modules" (
+    echo  [SETUP] Installing local Hianime server packages ^(first time only, takes a minute^)...
+    cd /d "%CONSUMET%"
+    npm.cmd install --silent
+    if errorlevel 1 (
+        echo  [ERROR] Local Hianime server package install failed.
+        pause
+        exit /b 1
+    )
+    echo  [SETUP] Local Hianime server packages installed.
+)
+
+if not exist "%CONSUMET%\node_modules\aniwatch\dist\index.js" (
+    echo  [SETUP] Repairing local Hianime server packages...
+    cd /d "%CONSUMET%"
+    if exist node_modules rmdir /s /q node_modules
+    if exist package-lock.json del /f /q package-lock.json
+    npm.cmd install --silent
+    if errorlevel 1 (
+        echo  [ERROR] Local Hianime server repair failed.
+        pause
+        exit /b 1
+    )
+)
+
+echo  [START] Launching local Hianime server on %CONSUMET_BASE%
+start "GRABIX Hianime" cmd /k "cd /d ""%CONSUMET%"" && set PORT=%CONSUMET_PORT% && npm.cmd start"
+
+timeout /t 4 /nobreak >nul
+
 echo  [START] Launching backend on http://127.0.0.1:8000
-start "GRABIX Backend" cmd /k "cd /d ""%BACKEND%"" && call venv\Scripts\activate.bat && uvicorn main:app --reload --port 8000"
+start "GRABIX Backend" cmd /k "cd /d ""%BACKEND%"" && call venv\Scripts\activate.bat && set CONSUMET_API_BASE=%CONSUMET_BASE% && uvicorn main:app --reload --port 8000"
 
-:: Step 8: Wait 2 seconds for backend to start
-timeout /t 2 /nobreak >nul
+timeout /t 3 /nobreak >nul
 
-:: Step 9: Start Frontend in a new window
 echo  [START] Launching frontend on http://localhost:5173
-start "GRABIX Frontend" cmd /k "cd /d ""%FRONTEND%"" && npm run dev"
+start "GRABIX Frontend" cmd /k "cd /d ""%FRONTEND%"" && npm.cmd run dev"
 
 echo.
 echo  ==========================================
-echo    Both servers are starting!
+echo    All services are starting!
 echo.
+echo    Hianime:  %CONSUMET_BASE%
 echo    Backend:  http://127.0.0.1:8000
 echo    Frontend: http://localhost:5173
-echo.
-echo    Open your browser and go to:
-echo    http://localhost:5173
 echo  ==========================================
 echo.
 
-:: Open the browser after 3 seconds
 timeout /t 3 /nobreak >nul
 start http://localhost:5173
 

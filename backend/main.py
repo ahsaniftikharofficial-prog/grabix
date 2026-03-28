@@ -7,6 +7,7 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from urllib.parse import quote, urljoin, urlparse
 from urllib.request import Request as URLRequest, urlopen
+from app.routes.consumet import router as consumet_router
 from app.routes.manga import router as manga_router
 from app.routes.subtitles import router as subtitles_router
 
@@ -34,6 +35,7 @@ except Exception as exc:
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.include_router(consumet_router, prefix="/consumet")
 app.include_router(manga_router, prefix="/manga")
 app.include_router(subtitles_router, prefix="/subtitles")
 

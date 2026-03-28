@@ -704,6 +704,21 @@ export default function VidSrcPlayer({
     setSubtitleMenuOpen(false);
   };
 
+  const handleShellClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    if (target.closest("button, input, select, textarea, a")) {
+      showControls();
+      return;
+    }
+
+    if (isDirectEngine && (target.tagName === "VIDEO" || target === rootRef.current)) {
+      togglePlayback();
+      return;
+    }
+
+    showControls();
+  };
+
   const handleSubtitleLoaded = (content: string, label: string) => {
     if (subtitleUrl.startsWith("blob:")) {
       URL.revokeObjectURL(subtitleUrl);
@@ -785,6 +800,46 @@ export default function VidSrcPlayer({
     }
   };
 
+  useEffect(() => {
+    if (!activeSource || activeSource.kind !== "embed" || !activeSource.canExtract) return;
+    const alreadyPrepared = extractedSourcesRef.current.some((source) => source.externalUrl === activeSource.url);
+    if (alreadyPrepared) return;
+
+    let cancelled = false;
+    const prepare = async () => {
+      try {
+        const res = await fetch(`${API}/extract-stream?url=${encodeURIComponent(activeSource.url)}`);
+        if (!res.ok) return;
+        const data = (await res.json()) as { url?: string; quality?: string };
+        if (!data.url || cancelled) return;
+
+        const extracted: StreamSource = {
+          id: `auto-extracted-${Date.now()}`,
+          label: `${activeSource.label} Direct`,
+          provider: activeSource.provider,
+          kind: inferStreamKind(data.url),
+          url: data.url,
+          quality: data.quality ?? "Auto",
+          description: "Auto-prepared direct stream for quieter servers and downloads",
+          externalUrl: activeSource.url,
+          canExtract: false,
+          subtitles: activeSource.subtitles,
+          language: activeSource.language,
+        };
+
+        extractedSourcesRef.current = [...extractedSourcesRef.current, extracted];
+        setExtractedSources([...extractedSourcesRef.current]);
+      } catch {
+        // Silent background preparation.
+      }
+    };
+
+    void prepare();
+    return () => {
+      cancelled = true;
+    };
+  }, [API, activeSource]);
+
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
@@ -794,7 +849,7 @@ export default function VidSrcPlayer({
       ref={rootRef}
       className="player-shell"
       onMouseMove={showControls}
-      onClick={showControls}
+      onClick={handleShellClick}
     >
       <input
         ref={subtitleInputRef}
@@ -851,6 +906,10 @@ export default function VidSrcPlayer({
                 preload="metadata"
                 poster={poster}
                 className="player-video"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  togglePlayback();
+                }}
               >
                 {subtitleUrl && (
                   <track
@@ -972,7 +1031,7 @@ export default function VidSrcPlayer({
           onClick={onClose}
           title="Back"
           aria-label="Back"
-          style={{ position: "absolute", top: 16, left: 16, zIndex: 12 }}
+          style={{ position: "absolute", top: 16, left: 16, zIndex: 12, pointerEvents: "auto" }}
         >
           <IconArrowLeft size={16} color="currentColor" />
         </button>

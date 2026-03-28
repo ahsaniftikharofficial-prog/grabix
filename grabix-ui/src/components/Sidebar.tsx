@@ -28,7 +28,7 @@ const IconTv = ({ size = 16, color = "currentColor" }: { size?: number; color?: 
   </svg>
 );
 
-export type Page = "downloader" | "converter" | "library" | "anime" | "manga" | "movies" | "moviebox" | "series" | "favorites" | "settings";
+export type Page = "downloader" | "converter" | "library" | "anime" | "manga" | "explore" | "movies" | "moviebox" | "series" | "favorites" | "settings";
 
 interface Props {
   page: Page;
@@ -51,6 +51,7 @@ const GROUPS = [
     items: [
       { id: "anime" as Page, label: "Anime", Icon: IconTv },
       { id: "manga" as Page, label: "Manga", Icon: IconBook },
+      { id: "explore" as Page, label: "Explore", Icon: IconBrowse },
       { id: "movies" as Page, label: "Movies", Icon: IconFilm },
       { id: "moviebox" as Page, label: "Movie Box", Icon: IconBrowse },
       { id: "series" as Page, label: "TV Series", Icon: IconTv },

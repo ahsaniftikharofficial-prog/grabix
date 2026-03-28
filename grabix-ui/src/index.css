@@ -552,8 +552,8 @@ html, body, #root {
   padding: 0;
 }
 .player-control-icon {
-  width: 34px;
-  height: 34px;
+  width: 42px;
+  height: 42px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -569,8 +569,8 @@ html, body, #root {
   transform: scale(1.06);
 }
 .player-control-icon.primary {
-  width: 38px;
-  height: 38px;
+  width: 48px;
+  height: 48px;
 }
 .player-menu-wrap {
   position: relative;

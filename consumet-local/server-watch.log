@@ -1,0 +1,19 @@
+
+> grabix-consumet-local@1.0.0 start
+> node server.cjs
+
+GRABIX Hianime local server listening on http://127.0.0.1:3000
+[2026-03-27 17:03:34.854 -0700] [32mINFO[39m (13732): [36mEPISODE_ID: https://aniwatchtv.to/watch/naruto-677?ep=12352[39m
+    [35mcontext[39m: "aniwatch-pkg"
+[2026-03-27 17:03:35.472 -0700] [32mINFO[39m (13732): [36mTHE SERVER: "hd-1"[39m
+    [35mcontext[39m: "aniwatch-pkg"
+[2026-03-27 17:03:35.476 -0700] [32mINFO[39m (13732): [36mSERVER_ID: 662001[39m
+    [35mcontext[39m: "aniwatch-pkg"
+[2026-03-27 17:03:35.940 -0700] [32mINFO[39m (13732): [36mTHE LINK: https://megacloud.blog/embed-2/v3/e-1/gS5W6GOJKoNB?k=1[39m
+    [35mcontext[39m: "aniwatch-pkg"
+[2026-03-27 17:03:36.042 -0700] [31mERROR[39m (13732): [36m[31m{
+  "status": 404,
+  "scraper": "getAnimeEpisodeSources",
+  "message": "getAnimeEpisodeSources: fetchError: Not Found"
+}[0m[39m
+    [35mcontext[39m: "aniwatch-pkg"

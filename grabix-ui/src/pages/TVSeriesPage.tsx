@@ -3,6 +3,7 @@ import { IconDownload, IconPlay, IconRefresh, IconSearch, IconStar, IconX } from
 import { IconHeart } from "../components/Icons";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import { useFavorites } from "../context/FavoritesContext";
+import { fetchConsumetMetaSearch, normalizeAudioPreference, type AudioPreference } from "../lib/consumetProviders";
 import { fetchMovieBoxSources, getTvSources, type StreamSource } from "../lib/streamProviders";
 
 const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzdWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
@@ -185,10 +186,31 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
   const [season, setSeason] = useState(1);
   const [episode, setEpisode] = useState(1);
   const [seasonEpisodes, setSeasonEpisodes] = useState<number>(12);
+  const [audioPreference, setAudioPreference] = useState<AudioPreference>("hi");
+  const [altTitles, setAltTitles] = useState<string[]>([]);
 
   useEffect(() => {
     tf(`/tv/${show.id}?append_to_response=external_ids`).then(setFull).catch(() => {});
   }, [show.id, tf]);
+  useEffect(() => {
+    let cancelled = false;
+    fetchConsumetMetaSearch(show.name, "tv")
+      .then((items) => {
+        if (cancelled) return;
+        const titles = items
+          .flatMap((item) => [item.title, item.alt_title])
+          .filter((value): value is string => Boolean(value))
+          .filter((value, index, array) => array.indexOf(value) === index && value.toLowerCase() !== show.name.toLowerCase())
+          .slice(0, 3);
+        setAltTitles(titles);
+      })
+      .catch(() => {
+        if (!cancelled) setAltTitles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [show.name]);
 
   useEffect(() => {
     let cancelled = false;
@@ -248,24 +270,29 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
   const visibleGlobalEpisodes = Array.from({ length: Math.max(0, globalEnd - globalStart + 1) }, (_, index) => globalStart + index);
 
   const loadMovieBoxSources = async () => {
-    try {
-      return await fetchMovieBoxSources({
-        title: data.name,
-        mediaType: "series",
-        year: Number.isFinite(seriesYear) ? seriesYear : undefined,
-        season,
-        episode,
-      });
-    } catch {
-      return [];
+    const titles = [data.name, ...altTitles];
+    for (const title of titles) {
+      try {
+        const sources = await fetchMovieBoxSources({
+          title,
+          mediaType: "series",
+          year: Number.isFinite(seriesYear) ? seriesYear : undefined,
+          season,
+          episode,
+        });
+        if (sources.length > 0) return sources;
+      } catch {
+        continue;
+      }
     }
+    return [];
   };
 
   const handlePlay = async () => {
     const movieBoxSources = await loadMovieBoxSources();
     onPlay({
       title: data.name,
-      subtitle: `TV playback for S${season}E${episode} powered by Movie Box direct sources plus GRABIX fallback providers`,
+      subtitle: `TV playback for S${season}E${episode} with ${normalizeAudioPreference(audioPreference) === "hi" ? "Hindi" : normalizeAudioPreference(audioPreference) === "en" ? "English" : "original"} preference plus GRABIX fallbacks`,
       poster: data.poster_path ? `${IMG_BASE}${data.poster_path}` : undefined,
       sources: [
         ...movieBoxSources,
@@ -338,6 +365,14 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
               <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>Episode</div>
               <input className="input-base" type="number" min={1} value={episode} onChange={(e) => setEpisode(Math.max(1, Number(e.target.value) || 1))} />
             </div>
+          </div>
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>Preferred Audio</div>
+            <select className="input-base" value={audioPreference} onChange={(event) => setAudioPreference(normalizeAudioPreference(event.target.value))}>
+              <option value="hi">Hindi first</option>
+              <option value="en">English first</option>
+              <option value="original">Original first</option>
+            </select>
           </div>
 
           <div style={{ marginBottom: 16 }}>

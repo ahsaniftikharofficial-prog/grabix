@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  fetchConsumetMangaChapters,
+  fetchConsumetMangaDiscover,
+  fetchConsumetMangaRead,
+  searchConsumetManga,
+  type ConsumetChapter,
+  type ConsumetMediaSummary,
+} from "../lib/consumetProviders";
+import {
   fetchComickChapters,
   fetchComickFrontpage,
   fetchComickPages,
@@ -17,7 +25,7 @@ import {
 import { IconSearch, IconStar, IconX } from "../components/Icons";
 
 type ReaderState = { chapterIndex: number; chapter: MangaChapter };
-type ChapterSource = "auto" | "mangadex" | "comick";
+type ChapterSource = "auto" | "mangadex" | "consumet" | "comick";
 
 const LANGUAGE_OPTIONS = [
   { label: "English", value: "en" },
@@ -43,6 +51,70 @@ function coverFallback(title: string): string {
 function chapterNumber(value: string): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : -1;
+}
+
+function sortPageUrls(pages: string[]): string[] {
+  const extractKey = (url: string, index: number): number => {
+    const match = url.match(/(?:page|p|image|img|\/)(\d+)(?:\D|$)/i) || url.match(/(\d+)(?=\.[a-z]{2,4}(?:\?|$))/i);
+    return match ? Number(match[1]) : index + 1;
+  };
+  return [...pages]
+    .map((url, index) => ({ url, index, key: extractKey(url, index) }))
+    .sort((left, right) => left.key - right.key || left.index - right.index)
+    .map((item) => item.url);
+}
+
+function mergeChapterSets(...sets: MangaChapter[][]): MangaChapter[] {
+  const byNumber = new Map<string, MangaChapter>();
+  for (const set of sets) {
+    for (const chapter of set) {
+      const number = String(chapter.chapter_number || "").trim();
+      const key = number || chapter.chapter_id;
+      if (!key || byNumber.has(key)) continue;
+      byNumber.set(key, chapter);
+    }
+  }
+  return [...byNumber.values()].sort((left, right) => chapterNumber(left.chapter_number) - chapterNumber(right.chapter_number));
+}
+
+function mapConsumetMangaToDiscovery(item: ConsumetMediaSummary): MangaDiscoveryItem {
+  return {
+    anilist_id: item.anilist_id,
+    mal_id: item.mal_id,
+    mangadex_id: item.mangadex_id || item.id,
+    title: item.title,
+    cover_image: item.image || coverFallback(item.title),
+    score: item.rating ?? 0,
+    genres: item.genres ?? [],
+    status: item.status || "Unknown",
+    description: item.description || "",
+    year: item.year ?? undefined,
+  };
+}
+
+function mapConsumetChapter(chapter: ConsumetChapter): MangaChapter {
+  return {
+    chapter_id: chapter.id,
+    chapter_number: chapter.number,
+    title: chapter.title,
+    language: chapter.language || "en",
+    pages: 0,
+    published_at: chapter.released_at || "",
+    provider: "mangadex",
+    source_name: "consumet",
+  };
+}
+
+function dedupeMangaItems(items: MangaDiscoveryItem[]): MangaDiscoveryItem[] {
+  const seen = new Set<string>();
+  const result: MangaDiscoveryItem[] = [];
+  for (const item of items) {
+    const key = `${item.anilist_id ?? ""}-${item.mangadex_id ?? ""}-${item.title.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
 }
 
 function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
@@ -130,6 +202,7 @@ export default function MangaPage() {
   const [trending, setTrending] = useState<MangaDiscoveryItem[]>([]);
   const [seasonal, setSeasonal] = useState<MangaDiscoveryItem[]>([]);
   const [comickHot, setComickHot] = useState<MangaDiscoveryItem[]>([]);
+  const [consumetHot, setConsumetHot] = useState<MangaDiscoveryItem[]>([]);
   const [searchResults, setSearchResults] = useState<MangaDiscoveryItem[]>([]);
   const [homeLoading, setHomeLoading] = useState(true);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -160,22 +233,27 @@ export default function MangaPage() {
     setHomeLoading(true);
     setHomeError(null);
     try {
-      const [trendingResult, seasonalResult, comickResult] = await Promise.allSettled([
+      const [trendingResult, seasonalResult, comickResult, consumetResult] = await Promise.allSettled([
         fetchTrendingManga(1),
         fetchSeasonalManga(seasonYear, season),
         fetchComickFrontpage("trending", 1, 12, 7),
+        fetchConsumetMangaDiscover("trending", 1),
       ]);
 
       const nextTrending = trendingResult.status === "fulfilled" ? trendingResult.value : [];
       const nextSeasonal = seasonalResult.status === "fulfilled" ? seasonalResult.value : [];
       const nextComickHot = comickResult.status === "fulfilled" ? comickResult.value : [];
+      const nextConsumetHot = consumetResult.status === "fulfilled"
+        ? consumetResult.value.map(mapConsumetMangaToDiscovery)
+        : [];
 
       setTrending(nextTrending);
       setSeasonal(nextSeasonal);
       setComickHot(nextComickHot);
+      setConsumetHot(nextConsumetHot);
 
-      if (!nextTrending.length && !nextSeasonal.length && !nextComickHot.length) {
-        const reasons = [trendingResult, seasonalResult, comickResult]
+      if (!nextTrending.length && !nextSeasonal.length && !nextComickHot.length && !nextConsumetHot.length) {
+        const reasons = [trendingResult, seasonalResult, comickResult, consumetResult]
           .filter((result): result is PromiseRejectedResult => result.status === "rejected")
           .map((result) => (result.reason instanceof Error ? result.reason.message : "Could not load manga discovery."));
         setHomeError(reasons[0] || "Could not load manga discovery.");
@@ -198,8 +276,19 @@ export default function MangaPage() {
       setSearchLoading(true);
       setSearchError(null);
       try {
-        const items = await searchManga(query);
-        if (!cancelled) setSearchResults(items);
+        const [nativeResult, consumetResult] = await Promise.allSettled([
+          searchManga(query),
+          searchConsumetManga(query),
+        ]);
+        if (cancelled) return;
+        const merged = dedupeMangaItems([
+          ...(nativeResult.status === "fulfilled" ? nativeResult.value : []),
+          ...(consumetResult.status === "fulfilled" ? consumetResult.value.map(mapConsumetMangaToDiscovery) : []),
+        ]);
+        setSearchResults(merged);
+        if (!merged.length && nativeResult.status === "rejected" && consumetResult.status === "rejected") {
+          throw nativeResult.reason instanceof Error ? nativeResult.reason : consumetResult.reason;
+        }
       } catch (error) {
         if (!cancelled) {
           setSearchError(error instanceof Error ? error.message : "Search failed.");
@@ -214,7 +303,7 @@ export default function MangaPage() {
   }, [query]);
 
   useEffect(() => {
-    if (!selectedItem?.anilist_id) {
+    if (!selectedItem?.anilist_id && !selectedItem?.mangadex_id) {
       setDetailData(null);
       setChapters([]);
       return;
@@ -225,7 +314,9 @@ export default function MangaPage() {
       setDetailError(null);
       setReader(null);
       try {
-        const details = await fetchMangaDetails(selectedItem.anilist_id!, "anilist_id");
+        const details = selectedItem.anilist_id
+          ? await fetchMangaDetails(selectedItem.anilist_id, "anilist_id")
+          : await fetchMangaDetails(selectedItem.mangadex_id!, "mangadex_id");
         if (!cancelled) setDetailData(details);
       } catch (error) {
         if (!cancelled) {
@@ -257,16 +348,22 @@ export default function MangaPage() {
       setChaptersLoading(true);
       setChaptersError(null);
       try {
-        const wantsMangadex = chapterSource !== "comick" && !!detailData?.mangadex?.mangadex_id;
+        const mangadexId = detailData?.mangadex?.mangadex_id || selectedItem?.mangadex_id;
+        const wantsMangadex = chapterSource !== "comick" && chapterSource !== "consumet" && !!mangadexId;
+        const wantsConsumet = chapterSource !== "comick" && !!mangadexId;
         const wantsComick = chapterSource !== "mangadex";
-        const [mdxResult, comickResult] = await Promise.allSettled([
-          wantsMangadex ? fetchMangaChapters(detailData!.mangadex!.mangadex_id, chapterLanguage) : Promise.resolve([] as MangaChapter[]),
+        const [mdxResult, consumetResult, comickResult] = await Promise.allSettled([
+          wantsMangadex ? fetchMangaChapters(mangadexId!, chapterLanguage) : Promise.resolve([] as MangaChapter[]),
+          wantsConsumet ? fetchConsumetMangaChapters(mangadexId!, "mangadex") : Promise.resolve([] as ConsumetChapter[]),
           wantsComick ? fetchComickChapters(selectedItem.title) : Promise.resolve({ match: null, items: [] as MangaChapter[], total: 0 }),
         ]);
         if (cancelled) return;
 
         const mdxItems = mdxResult.status === "fulfilled"
           ? [...mdxResult.value].map((item) => ({ ...item, provider: "mangadex" as const })).sort((a, b) => chapterNumber(a.chapter_number) - chapterNumber(b.chapter_number))
+          : [];
+        const consumetItems = consumetResult.status === "fulfilled"
+          ? [...consumetResult.value].map(mapConsumetChapter).sort((a, b) => chapterNumber(a.chapter_number) - chapterNumber(b.chapter_number))
           : [];
         const comickItems = comickResult.status === "fulfilled"
           ? [...(comickResult.value.items ?? [])].map((item) => ({ ...item, provider: "comick" as const })).sort((a, b) => chapterNumber(a.chapter_number) - chapterNumber(b.chapter_number))
@@ -277,24 +374,27 @@ export default function MangaPage() {
         if (chapterSource === "mangadex") {
           chosen = mdxItems;
           source = chosen.length ? "mangadex" : null;
+        } else if (chapterSource === "consumet") {
+          chosen = consumetItems;
+          source = chosen.length ? "mangadex" : null;
         } else if (chapterSource === "comick") {
           chosen = comickItems;
           source = chosen.length ? "comick" : null;
         } else {
-          const preferComick = comickItems.length > 0 && (mdxItems.length === 0 || mdxItems.length < Math.min(10, Math.floor(comickItems.length * 0.2)));
-          if (preferComick) {
-            chosen = comickItems;
-            source = "comick";
-          } else if (mdxItems.length) {
-            chosen = mdxItems;
-            source = "mangadex";
-          } else {
-            chosen = comickItems;
-            source = comickItems.length ? "comick" : null;
-          }
+          chosen = mergeChapterSets(consumetItems, mdxItems, comickItems);
+          source = consumetItems.length || mdxItems.length ? "mangadex" : (comickItems.length ? "comick" : null);
         }
 
-        if (!chosen.length) throw new Error("No chapters available from MangaDex or Comick for this title.");
+        if (!chosen.length && mdxItems.length) {
+          chosen = mdxItems;
+          source = "mangadex";
+        }
+        if (!chosen.length && comickItems.length) {
+          chosen = comickItems;
+          source = "comick";
+        }
+
+        if (!chosen.length) throw new Error("No chapters available from Consumet, MangaDex, or Comick for this title.");
         setResolvedChapterSource(source);
         setChapters(chosen);
       } catch (error) {
@@ -321,11 +421,13 @@ export default function MangaPage() {
       setReaderLoading(true);
       setReaderError(null);
       try {
-        const pages = reader.chapter.provider === "comick"
+        const pages = reader.chapter.source_name === "consumet"
+          ? await fetchConsumetMangaRead(reader.chapter.chapter_id, "mangadex")
+          : reader.chapter.provider === "comick"
           ? await fetchComickPages(reader.chapter.chapter_url ?? reader.chapter.chapter_id)
           : await fetchMangaPages(reader.chapter.chapter_id);
         if (!cancelled) {
-          setReaderPages(pages);
+          setReaderPages(sortPageUrls(pages));
           if (!pages.length) setReaderError("Chapter pages were empty for this source.");
         }
       } catch (error) {
@@ -381,7 +483,7 @@ export default function MangaPage() {
       <div style={{ padding: "14px 24px", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <div>
           <div style={{ fontSize: 16, fontWeight: 600 }}>Manga</div>
-          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 1 }}>AniList discovery, Jikan metadata, MangaDex plus Comick fallback</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 1 }}>AniList discovery, Jikan metadata, plus switchable Consumet, MangaDex, and Comick readers</div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <div style={{ position: "relative" }}>
@@ -398,6 +500,7 @@ export default function MangaPage() {
             <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
               <HorizontalRail title="Trending Now" subtitle="Powered by AniList discovery" items={trending} onOpen={openDetails} />
               <HorizontalRail title={`${season.charAt(0)}${season.slice(1).toLowerCase()} Picks`} subtitle={`Seasonal manga for ${seasonYear}`} items={seasonal} onOpen={openDetails} />
+              {consumetHot.length > 0 && <HorizontalRail title="Consumet MangaDex" subtitle="Primary manga reader matches from Consumet" items={consumetHot} onOpen={openDetails} />}
               {comickHot.length > 0 && <HorizontalRail title="Comick Hot" subtitle="Backup reader picks for long series" items={comickHot} onOpen={openDetails} />}
             </div>
           )
@@ -432,16 +535,17 @@ export default function MangaPage() {
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
                     <div>
                       <div style={{ fontSize: 16, fontWeight: 700 }}>Chapter List</div>
-                      <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>{resolvedChapterSource === "comick" ? "Comick backup reader" : "MangaDex reader"}</div>
+                      <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>{resolvedChapterSource === "comick" ? "Comick backup reader" : chapterSource === "consumet" ? "Consumet MangaDex reader" : "MangaDex reader"}</div>
                     </div>
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                       <select className="input-base" style={{ width: 140, fontSize: 13 }} value={chapterLanguage} onChange={(event) => setChapterLanguage(event.target.value)}>
                         {LANGUAGE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                       </select>
-                      <select className="input-base" style={{ width: 150, fontSize: 13 }} value={chapterSource} onChange={(event) => setChapterSource(event.target.value as ChapterSource)}>
+                      <select className="input-base" style={{ width: 180, fontSize: 13 }} value={chapterSource} onChange={(event) => setChapterSource(event.target.value as ChapterSource)} title="Reader source">
                         <option value="auto">Auto</option>
-                        <option value="mangadex">MangaDex</option>
-                        <option value="comick">Comick</option>
+                        <option value="consumet">Consumet Reader</option>
+                        <option value="mangadex">MangaDex Reader</option>
+                        <option value="comick">Comick Reader</option>
                       </select>
                     </div>
                   </div>

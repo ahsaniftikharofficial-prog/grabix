@@ -5,6 +5,7 @@ import { useState, useEffect } from "react";
 import { IconSearch, IconStar, IconPlay, IconDownload, IconX, IconRefresh } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import { useFavorites } from "../context/FavoritesContext";
+import { fetchConsumetMetaSearch, normalizeAudioPreference, type AudioPreference } from "../lib/consumetProviders";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import { fetchMovieBoxSources, getArchiveMovieSources, getMovieSources, type StreamSource } from "../lib/streamProviders";
 
@@ -190,29 +191,55 @@ function ActionButtons({ onPlay, onDownload, favId, favItem }: { onPlay: () => v
 
 function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: () => void; tf: (e: string) => Promise<any>; onPlay: (player: { title: string; subtitle?: string; poster?: string; sources: StreamSource[] }) => void }) {
   const [full, setFull]       = useState<Movie | null>(null);
+  const [audioPreference, setAudioPreference] = useState<AudioPreference>("hi");
+  const [altTitles, setAltTitles] = useState<string[]>([]);
 
   useEffect(() => { tf(`/movie/${movie.id}`).then(setFull).catch(() => {}); }, [movie.id]);
+  useEffect(() => {
+    let cancelled = false;
+    fetchConsumetMetaSearch(movie.title, "movie")
+      .then((items) => {
+        if (cancelled) return;
+        const titles = items
+          .flatMap((item) => [item.title, item.alt_title])
+          .filter((value): value is string => Boolean(value))
+          .filter((value, index, array) => array.indexOf(value) === index && value.toLowerCase() !== movie.title.toLowerCase())
+          .slice(0, 3);
+        setAltTitles(titles);
+      })
+      .catch(() => {
+        if (!cancelled) setAltTitles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [movie.title]);
 
   const d = full ?? movie;
   const movieYear = d.release_date ? Number(d.release_date.slice(0, 4)) : undefined;
 
   const loadMovieBoxSources = async () => {
-    try {
-      return await fetchMovieBoxSources({
-        title: d.title,
-        mediaType: "movie",
-        year: Number.isFinite(movieYear) ? movieYear : undefined,
-      });
-    } catch {
-      return [];
+    const titles = [d.title, ...altTitles];
+    for (const title of titles) {
+      try {
+        const sources = await fetchMovieBoxSources({
+          title,
+          mediaType: "movie",
+          year: Number.isFinite(movieYear) ? movieYear : undefined,
+        });
+        if (sources.length > 0) return sources;
+      } catch {
+        continue;
+      }
     }
+    return [];
   };
 
   const handlePlay = async () => {
     const movieBoxSources = await loadMovieBoxSources();
     onPlay({
       title: d.title,
-      subtitle: "Movie playback powered by Movie Box direct sources plus GRABIX fallback providers",
+      subtitle: `Movie playback with ${normalizeAudioPreference(audioPreference) === "hi" ? "Hindi" : normalizeAudioPreference(audioPreference) === "en" ? "English" : "original"} preference plus GRABIX fallbacks`,
       poster: d.poster_path ? `${IMG_BASE}${d.poster_path}` : undefined,
       sources: [
         ...movieBoxSources,
@@ -263,6 +290,14 @@ function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: ()
             <button className="btn-icon" style={{ alignSelf: "flex-start", flexShrink: 0, marginTop: d.backdrop_path ? 55 : 0 }} onClick={onClose}><IconX size={16} /></button>
           </div>
           {d.overview && <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7, margin: "14px 0" }}>{d.overview}</div>}
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>Preferred Audio</div>
+            <select className="input-base" value={audioPreference} onChange={(event) => setAudioPreference(normalizeAudioPreference(event.target.value))}>
+              <option value="hi">Hindi first</option>
+              <option value="en">English first</option>
+              <option value="original">Original first</option>
+            </select>
+          </div>
 
           <ActionButtons
             onPlay={handlePlay}
