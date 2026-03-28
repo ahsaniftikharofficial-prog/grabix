@@ -35,8 +35,10 @@ interface QueueItem {
   eta: string;
   downloaded: string;
   total: string;
+  size: string;
   filePath: string;
   error: string;
+  canPause: boolean;
 }
 
 function toQueueItem(serverItem: any, previous?: QueueItem): QueueItem {
@@ -55,8 +57,10 @@ function toQueueItem(serverItem: any, previous?: QueueItem): QueueItem {
     eta: serverItem.eta ?? previous?.eta ?? "",
     downloaded: serverItem.downloaded ?? previous?.downloaded ?? "",
     total: serverItem.total ?? previous?.total ?? "",
+    size: serverItem.size ?? previous?.size ?? "",
     filePath: serverItem.file_path ?? previous?.filePath ?? "",
     error: serverItem.error ?? previous?.error ?? "",
+    canPause: serverItem.can_pause ?? previous?.canPause ?? false,
   };
 }
 
@@ -189,8 +193,10 @@ export default function DownloaderPage() {
       eta: "",
       downloaded: "",
       total: "",
+      size: "",
       filePath: "",
       error: "",
+      canPause: false,
     };
     setQueue(prev => [newItem, ...prev]);
 
@@ -215,8 +221,10 @@ export default function DownloaderPage() {
                 eta: pd.eta ?? "",
                 downloaded: pd.downloaded ?? "",
                 total: pd.total ?? "",
+                size: pd.size ?? "",
                 filePath: pd.file_path ?? "",
                 error: pd.error ?? "",
+                canPause: pd.can_pause ?? q.canPause,
               }
             : q
           ));
@@ -252,7 +260,7 @@ export default function DownloaderPage() {
         title: bUrl.length > 60 ? bUrl.slice(0, 57) + "…" : bUrl,
         thumbnail: "", format: fileType === "video" ? quality : fileType,
         fileType, status: "queued", percent: 0, speed: "", eta: "",
-        downloaded: "", total: "", filePath: "", error: "",
+        downloaded: "", total: "", size: "", filePath: "", error: "", canPause: false,
       };
       setQueue(prev => [newItem, ...prev]);
       try {
@@ -266,7 +274,19 @@ export default function DownloaderPage() {
             const pr = await fetch(`${API}/download-status/${serverTaskId}`);
             const pd = await pr.json();
             setQueue(prev => prev.map(q => (q.serverId || q.id) === serverTaskId
-              ? { ...q, status: pd.status, percent: pd.percent ?? 0, speed: pd.speed ?? "", eta: pd.eta ?? "", downloaded: pd.downloaded ?? "", total: pd.total ?? "", filePath: pd.file_path ?? "", error: pd.error ?? "" }
+              ? {
+                  ...q,
+                  status: pd.status,
+                  percent: pd.percent ?? 0,
+                  speed: pd.speed ?? "",
+                  eta: pd.eta ?? "",
+                  downloaded: pd.downloaded ?? "",
+                  total: pd.total ?? "",
+                  size: pd.size ?? "",
+                  filePath: pd.file_path ?? "",
+                  error: pd.error ?? "",
+                  canPause: pd.can_pause ?? q.canPause,
+                }
               : q
             ));
             if (["done", "failed", "canceled", "error"].includes(pd.status)) {
@@ -347,7 +367,15 @@ export default function DownloaderPage() {
             </span>
           )}
           {queue.length > 0 && (
-            <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => setQueue([])}>
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: 12 }}
+              onClick={() => {
+                pollingRef.current.forEach((interval) => clearInterval(interval));
+                pollingRef.current.clear();
+                setQueue([]);
+              }}
+            >
               Clear all
             </button>
           )}
@@ -724,6 +752,7 @@ function QueueCard({
 
   // Clean up raw speed string: strip ANSI codes and extra whitespace
   const cleanSpeed = item.speed.replace(/\x1b\[[0-9;]*m/g, "").replace(/\u001b\[[0-9;]*m/g, "").trim();
+  const showIndeterminateProgress = item.status === "downloading" && item.percent <= 0 && Boolean(item.downloaded || item.size);
 
   return (
     <div className="card fade-in" style={{ padding: "12px 14px" }}>
@@ -744,7 +773,7 @@ function QueueCard({
         {/* ── Action buttons ── */}
         <div style={{ display: "flex", gap: 4, alignItems: "center", flexShrink: 0 }}>
           {/* Pause — only while downloading */}
-          {isActive && item.status === "downloading" && (
+          {isActive && item.status === "downloading" && item.canPause && (
             <div className="tooltip-wrap">
               <button className="btn-icon" style={{ width: 28, height: 28 }} onClick={() => onAction(item, "pause")}>
                 <IconPause size={13} />
@@ -812,7 +841,10 @@ function QueueCard({
         <div style={{ marginTop: 10 }}>
           {/* Progress bar */}
           <div className="progress-bar-bg">
-            <div className="progress-bar-fill" style={{ width: `${item.percent}%`, opacity: isPaused ? 0.5 : 1 }} />
+            <div
+              className={`progress-bar-fill${showIndeterminateProgress ? " indeterminate" : ""}`}
+              style={{ width: showIndeterminateProgress ? "28%" : `${item.percent}%`, opacity: isPaused ? 0.5 : 1 }}
+            />
           </div>
           {/* Stats row */}
           <div style={{ display: "flex", alignItems: "center", gap: 0, marginTop: 6 }}>
@@ -821,7 +853,7 @@ function QueueCard({
               fontSize: 11, fontWeight: 700, color: "var(--text-accent)",
               background: "var(--accent-light)", padding: "2px 7px", borderRadius: 99, marginRight: 8,
             }}>
-              {item.percent}%
+              {showIndeterminateProgress ? "LIVE" : `${item.percent}%`}
             </span>
             {/* Downloaded / Total */}
             {item.downloaded && (
@@ -882,7 +914,7 @@ function QueueCard({
             ["Type",   item.fileType.charAt(0).toUpperCase() + item.fileType.slice(1)],
             ["Format", item.format.toUpperCase()],
             ["Status", statusLabels[item.status] ?? item.status],
-            ["Size",   item.total || "—"],
+            ["Size",   item.total || item.size || "—"],
             ["Path",   item.filePath || "—"],
             ["URL",    item.url || "—"],
           ].map(([label, value]) => (

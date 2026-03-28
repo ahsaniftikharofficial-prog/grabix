@@ -155,8 +155,14 @@ export async function fetchConsumetHealth(): Promise<ConsumetHealth> {
   return await getJson<ConsumetHealth>("/consumet/health");
 }
 
-export async function fetchConsumetAnimeDiscover(section: "trending" | "toprated" | "seasonal", page = 1): Promise<ConsumetMediaSummary[]> {
-  const data = await getJson<{ items: ConsumetMediaSummary[] }>(`/consumet/discover/anime?section=${encodeURIComponent(section)}&page=${page}`);
+export async function fetchConsumetAnimeDiscover(
+  section: "trending" | "popular" | "toprated" | "seasonal" | "movie",
+  page = 1,
+  period: "daily" | "weekly" | "monthly" = "daily"
+): Promise<ConsumetMediaSummary[]> {
+  const data = await getJson<{ items: ConsumetMediaSummary[] }>(
+    `/consumet/discover/anime?section=${encodeURIComponent(section)}&page=${page}&period=${encodeURIComponent(period)}`
+  );
   return data.items ?? [];
 }
 

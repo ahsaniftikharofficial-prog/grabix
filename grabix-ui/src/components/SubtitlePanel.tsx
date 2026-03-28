@@ -13,6 +13,7 @@ export interface SubtitleResult {
 
 interface Props {
   mediaTitle: string;
+  searchTitle?: string;
   mediaType?: "movie" | "tv";
   visible: boolean;
   onClose: () => void;
@@ -47,6 +48,7 @@ function normalizeSourceLabel(value: string): string {
 
 export default function SubtitlePanel({
   mediaTitle,
+  searchTitle,
   mediaType = "movie",
   visible,
   onClose,
@@ -57,7 +59,7 @@ export default function SubtitlePanel({
   activeSubtitleName,
   onClearSubtitles,
 }: Props) {
-  const [query, setQuery] = useState(mediaTitle);
+  const [query, setQuery] = useState(searchTitle || mediaTitle);
   const [language, setLanguage] = useState("en");
   const [results, setResults] = useState<SubtitleResult[]>([]);
   const [loading, setLoading] = useState(false);
@@ -66,10 +68,10 @@ export default function SubtitlePanel({
 
   useEffect(() => {
     if (visible) {
-      setQuery(mediaTitle);
+      setQuery(searchTitle || mediaTitle);
       setError("");
     }
-  }, [mediaTitle, visible]);
+  }, [mediaTitle, searchTitle, visible]);
 
   const handleSearch = async () => {
     const title = query.trim();

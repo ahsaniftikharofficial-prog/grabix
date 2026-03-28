@@ -742,7 +742,7 @@ async def get_health_status() -> dict[str, Any]:
 
     base = get_consumet_api_base()
     try:
-        discover_payload = await _fetch_consumet_json("/anime/hianime/most-popular", params={"page": 1}, ttl_seconds=120)
+        discover_payload = await _fetch_consumet_json("/anime/hianime/top10", params={"period": "daily"}, ttl_seconds=120)
         search_payload = await _fetch_consumet_json("/anime/hianime/naruto", params={"page": 1}, ttl_seconds=120)
         discover_items = [item for item in _payload_items(discover_payload) if isinstance(item, dict)]
         search_items = [item for item in _payload_items(search_payload) if isinstance(item, dict)]
@@ -767,16 +767,27 @@ async def get_health_status() -> dict[str, Any]:
     }
 
 
-async def discover_anime(section: str = "trending", page: int = 1) -> dict[str, Any]:
+async def discover_anime(section: str = "trending", page: int = 1, period: str = "daily") -> dict[str, Any]:
     section_key = (section or "trending").strip().lower()
+    period_key = (period or "daily").strip().lower()
     try:
+        if section_key == "trending":
+            payload = await _fetch_consumet_json("/anime/hianime/top10", params={"period": period_key}, ttl_seconds=300)
+            items = [
+                _normalize_media_item(item, "anime", "hianime")
+                for item in _payload_items(payload)
+                if isinstance(item, dict)
+            ]
+            return {"section": section_key, "period": period_key, "page": page, "items": items if page == 1 else []}
+
         route_map = {
-            "trending": "/anime/hianime/most-popular",
+            "popular": "/anime/hianime/most-popular",
             "toprated": "/anime/hianime/most-favorite",
             "seasonal": "/anime/hianime/top-airing",
+            "movie": "/anime/hianime/movie",
         }
         payload = await _fetch_consumet_json(
-            route_map.get(section_key, route_map["trending"]),
+            route_map.get(section_key, route_map["popular"]),
             params={"page": page},
             ttl_seconds=600,
         )
@@ -786,16 +797,18 @@ async def discover_anime(section: str = "trending", page: int = 1) -> dict[str, 
             if isinstance(item, dict)
         ]
         if items:
-            return {"section": section_key, "page": page, "items": items}
+            return {"section": section_key, "period": period_key, "page": page, "items": items}
     except (HTTPException, ConsumetConfigError):
         pass
 
     urls = {
-        "trending": f"https://api.jikan.moe/v4/top/anime?filter=airing&page={page}&limit=20",
+        "trending": "https://api.jikan.moe/v4/top/anime?filter=airing&page=1&limit=10",
+        "popular": f"https://api.jikan.moe/v4/top/anime?filter=bypopularity&page={page}&limit=20",
         "toprated": f"https://api.jikan.moe/v4/top/anime?page={page}&limit=20",
         "seasonal": f"https://api.jikan.moe/v4/seasons/now?page={page}&limit=20",
+        "movie": f"https://api.jikan.moe/v4/top/anime?type=movie&page={page}&limit=20",
     }
-    url = urls.get(section_key, urls["trending"])
+    url = urls.get(section_key, urls["popular"])
     payload = await _fetch_json_url(url, ttl_seconds=900)
     items = []
     for raw in payload.get("data") or []:
@@ -828,7 +841,7 @@ async def discover_anime(section: str = "trending", page: int = 1) -> dict[str, 
             }
         )
 
-    return {"section": section_key, "page": page, "items": items}
+    return {"section": section_key, "period": period_key, "page": page, "items": items}
 
 
 async def discover_manga(section: str = "trending", page: int = 1) -> dict[str, Any]:

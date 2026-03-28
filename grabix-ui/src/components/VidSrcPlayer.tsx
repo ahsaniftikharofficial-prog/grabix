@@ -4,8 +4,10 @@ import {
   IconAlert,
   IconArrowLeft,
   IconAudio,
+  IconDownload,
   IconExpand,
   IconInfo,
+  IconList,
   IconPause,
   IconPlay,
   IconServers,
@@ -22,16 +24,22 @@ import type { StreamSource } from "../lib/streamProviders";
 interface Props {
   title: string;
   subtitle?: string;
+  subtitleSearchTitle?: string;
   poster?: string;
   embedUrl?: string;
   sources?: StreamSource[];
+  currentEpisode?: number;
+  episodeOptions?: number[];
+  episodeLabel?: string;
+  onSelectEpisode?: (episode: number) => Promise<{
+    sources: StreamSource[];
+    subtitle?: string;
+    subtitleSearchTitle?: string;
+  }>;
   mediaType?: "movie" | "tv";
   onClose: () => void;
-  /**
-   * Called when the user successfully extracts a direct stream URL.
-   * Lets the parent page route it to the downloader.
-   */
-  onExtractedUrl?: (url: string, title: string) => void;
+  onDownload?: (url: string, title: string) => Promise<void> | void;
+  onDownloadSource?: (source: StreamSource, title: string) => Promise<void> | void;
 }
 
 type FailureKind =
@@ -134,6 +142,18 @@ function parseSubtitleText(content: string): SubtitleCue[] {
   return cues;
 }
 
+async function resolveEmbedUrl(api: string, url: string): Promise<string> {
+  if (!url) return url;
+  try {
+    const response = await fetch(`${api}/resolve-embed?url=${encodeURIComponent(url)}`);
+    if (!response.ok) return url;
+    const payload = (await response.json()) as { url?: string };
+    return payload.url || url;
+  } catch {
+    return url;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -142,11 +162,17 @@ export default function VidSrcPlayer({
   embedUrl,
   title,
   subtitle,
+  subtitleSearchTitle,
   poster,
   sources,
+  currentEpisode,
+  episodeOptions,
+  episodeLabel = "Episode",
+  onSelectEpisode,
   mediaType = "movie",
   onClose,
-  onExtractedUrl,
+  onDownload,
+  onDownloadSource,
 }: Props) {
   const API = "http://127.0.0.1:8000";
 
@@ -165,11 +191,19 @@ export default function VidSrcPlayer({
    */
   const embedLoadedRef = useRef(false);
 
+  const [activeSubtitleText, setActiveSubtitleText] = useState(subtitle || "");
+  const [activeSearchTitle, setActiveSearchTitle] = useState(subtitleSearchTitle || subtitle || title);
+  const [activeEpisode, setActiveEpisode] = useState<number | null>(currentEpisode ?? null);
+  const [runtimeSources, setRuntimeSources] = useState<StreamSource[]>(sources ?? []);
+  const [episodeLoading, setEpisodeLoading] = useState(false);
+
   // Sources from props (stable)
+  const effectiveSources = runtimeSources.length > 0 ? runtimeSources : sources;
+
   const baseSources = useMemo<StreamSource[]>(
     () =>
-      sources && sources.length > 0
-        ? sources
+      effectiveSources && effectiveSources.length > 0
+        ? effectiveSources
         : embedUrl
           ? [
               {
@@ -184,7 +218,7 @@ export default function VidSrcPlayer({
               },
             ]
           : [],
-    [embedUrl, sources]
+    [effectiveSources, embedUrl]
   );
 
   // Sources extracted at runtime via backend (direct/HLS links)
@@ -212,10 +246,10 @@ export default function VidSrcPlayer({
   const [isLoading, setIsLoading] = useState(true);
   const [statusText, setStatusText] = useState("Connecting");
   const [errorText, setErrorText] = useState("");
-  const [lastFailure, setLastFailure] = useState("");
   const [fallbackNotice, setFallbackNotice] = useState("");
   const [resolvedEmbedUrl, setResolvedEmbedUrl] = useState("");
   const [showChrome, setShowChrome] = useState(true);
+  const [episodeMenuOpen, setEpisodeMenuOpen] = useState(false);
   const [serverMenuOpen, setServerMenuOpen] = useState(false);
   const [volumeMenuOpen, setVolumeMenuOpen] = useState(false);
   const [subtitleMenuOpen, setSubtitleMenuOpen] = useState(false);
@@ -248,6 +282,13 @@ export default function VidSrcPlayer({
   const isEmbedEngine = activeSource?.kind === "embed";
   const compactControls = isEmbedEngine;
 
+  useEffect(() => {
+    setRuntimeSources(sources ?? []);
+    setActiveSubtitleText(subtitle || "");
+    setActiveSearchTitle(subtitleSearchTitle || subtitle || title);
+    setActiveEpisode(currentEpisode ?? null);
+  }, [sources, subtitle, subtitleSearchTitle, currentEpisode, title]);
+
   // ---------------------------------------------------------------------------
   // Chrome visibility
   // ---------------------------------------------------------------------------
@@ -273,7 +314,7 @@ export default function VidSrcPlayer({
       if (hideChromeTimeoutRef.current)
         window.clearTimeout(hideChromeTimeoutRef.current);
     };
-  }, [serverMenuOpen, volumeMenuOpen, subtitleMenuOpen, showSubtitlePanel]);
+  }, [episodeMenuOpen, serverMenuOpen, volumeMenuOpen, subtitleMenuOpen, showSubtitlePanel]);
 
   // ---------------------------------------------------------------------------
   // Keyboard shortcuts
@@ -330,7 +371,6 @@ export default function VidSrcPlayer({
 
   const goToNextSource = (reason: FailureKind) => {
     const message = failureLabel(reason);
-    setLastFailure(message);
 
     if (hasFallback) {
       const nextSource = allSources[activeIndex + 1];
@@ -355,9 +395,9 @@ export default function VidSrcPlayer({
     setIsLoading(true);
     setErrorText("");
     setFallbackNotice("");
-    setLastFailure("");
     setStatusText(activeSource ? `Loading ${activeSource.provider}` : "No source");
     setResolvedEmbedUrl("");
+    setEpisodeMenuOpen(false);
     setServerMenuOpen(false);
     setVolumeMenuOpen(false);
     setSubtitleMenuOpen(false);
@@ -368,15 +408,6 @@ export default function VidSrcPlayer({
     if (!activeSource) return;
 
     if (activeSource.kind === "embed") {
-      // Slow-source warning after 14 s
-      const slowTimeout = window.setTimeout(() => {
-        setIsLoading(false);
-        setStatusText("Slow source");
-        setLastFailure(
-          "This source is taking longer than usual. If it stays blank, open the server picker and try another one."
-        );
-      }, 14_000);
-
       // Auto-failover after 25 s if the iframe never fired onLoad
       const failoverTimeout = window.setTimeout(() => {
         if (!embedLoadedRef.current) {
@@ -385,7 +416,6 @@ export default function VidSrcPlayer({
       }, 25_000);
 
       return () => {
-        window.clearTimeout(slowTimeout);
         window.clearTimeout(failoverTimeout);
       };
     }
@@ -523,6 +553,9 @@ export default function VidSrcPlayer({
     if (!video) return;
 
     if (volumeBoost === 100) {
+      if (gainNodeRef.current) {
+        gainNodeRef.current.gain.value = 1;
+      }
       video.volume = 1;
       return;
     }
@@ -558,6 +591,7 @@ export default function VidSrcPlayer({
     if (gainNodeRef.current) {
       gainNodeRef.current.gain.value = volumeBoost / 100;
       video.volume = 1;
+      video.muted = false;
       void audioContextRef.current?.resume().catch(() => {});
     }
   }, [activeSource, isDirectEngine, volumeBoost]);
@@ -630,8 +664,38 @@ export default function VidSrcPlayer({
     setFallbackNotice("");
     setExtractError("");
     setReloadKey((key) => key + 1);
+    setEpisodeMenuOpen(false);
     setServerMenuOpen(false);
     showControls();
+  };
+
+  const handleEpisodeSwitch = async (episode: number) => {
+    if (!onSelectEpisode || episodeLoading || episode === activeEpisode) return;
+    setEpisodeLoading(true);
+    setErrorText("");
+    setFallbackNotice("");
+    try {
+      const preferredProvider = activeSource?.provider;
+      const preferredLabel = activeSource?.label;
+      const next = await onSelectEpisode(episode);
+      const matchedIndex = next.sources.findIndex(
+        (source) =>
+          source.provider === preferredProvider && source.label === preferredLabel
+      );
+      extractedSourcesRef.current = [];
+      setExtractedSources([]);
+      setRuntimeSources(next.sources);
+      setActiveSubtitleText(next.subtitle || "");
+      setActiveSearchTitle(next.subtitleSearchTitle || next.subtitle || `${title} ${episodeLabel} ${episode}`);
+      setActiveEpisode(episode);
+      setActiveIndex(matchedIndex >= 0 ? matchedIndex : 0);
+      setReloadKey((key) => key + 1);
+      setEpisodeMenuOpen(false);
+    } catch (error) {
+      setFallbackNotice(error instanceof Error ? error.message : `Could not load ${episodeLabel.toLowerCase()} ${episode}.`);
+    } finally {
+      setEpisodeLoading(false);
+    }
   };
 
   const togglePlayback = () => {
@@ -739,10 +803,37 @@ export default function VidSrcPlayer({
     setFallbackNotice(`Loaded subtitles: ${label}`);
   };
 
+  const extractDirectStreamUrl = async (
+    targetUrl: string
+  ): Promise<{ url: string; quality?: string; format?: string }> => {
+    const resolvedUrl = await resolveEmbedUrl(API, targetUrl);
+    const res = await fetch(
+      `${API}/extract-stream?url=${encodeURIComponent(resolvedUrl)}`
+    );
+    if (!res.ok) {
+      throw new Error(`Server returned ${res.status}`);
+    }
+
+    const data = (await res.json()) as {
+      url?: string;
+      quality?: string;
+      format?: string;
+    };
+
+    if (!data.url) {
+      throw new Error("No URL in response");
+    }
+
+    return {
+      url: data.url,
+      quality: data.quality,
+      format: data.format,
+    };
+  };
+
   /**
    * Ask the backend to extract a direct stream URL from the current embed.
    * On success: adds a Direct source to the list and switches to it.
-   * If onExtractedUrl is provided, also notifies the parent (for downloader).
    */
   const handleExtractStream = async () => {
     if (!activeSource || extracting) return;
@@ -750,18 +841,9 @@ export default function VidSrcPlayer({
     setExtractError("");
 
     try {
-      const res = await fetch(
-        `${API}/extract-stream?url=${encodeURIComponent(activeSource.url)}`
+      const data = await extractDirectStreamUrl(
+        activeSource.externalUrl || activeSource.url
       );
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
-
-      const data = (await res.json()) as {
-        url?: string;
-        quality?: string;
-        format?: string;
-      };
-
-      if (!data.url) throw new Error("No URL in response");
 
       const extracted: StreamSource = {
         id: `extracted-${Date.now()}`,
@@ -789,14 +871,58 @@ export default function VidSrcPlayer({
       setFallbackNotice(
         `Extracted a direct stream from ${activeSource.provider}. Switched to it.`
       );
-
-      onExtractedUrl?.(data.url, title);
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Unknown extraction error";
       setExtractError(`Could not extract a direct stream: ${message}`);
     } finally {
       setExtracting(false);
+    }
+  };
+
+  const handleDownloadCurrent = async () => {
+    if (!activeSource || (!onDownload && !onDownloadSource)) return;
+    const downloadSource =
+      allSources.find(
+        (source) =>
+          source.kind === "direct" ||
+          source.kind === "hls" ||
+          source.kind === "local" ||
+          Boolean(source.canExtract)
+      ) || activeSource;
+    try {
+      if (downloadSource !== activeSource) {
+        setFallbackNotice(`Using ${downloadSource.provider} ${downloadSource.label} for download.`);
+      }
+      if (downloadSource.kind === "direct" || downloadSource.kind === "hls" || downloadSource.kind === "local") {
+        if (onDownloadSource) {
+          await onDownloadSource(downloadSource, title);
+        } else if (onDownload) {
+          await onDownload(downloadSource.url, title);
+        }
+        return;
+      }
+      if (downloadSource.kind === "embed") {
+        const data = await extractDirectStreamUrl(
+          downloadSource.externalUrl || downloadSource.url
+        );
+        const extractedSource: StreamSource = {
+          ...downloadSource,
+          kind: inferStreamKind(data.url),
+          url: data.url,
+          externalUrl: downloadSource.externalUrl || downloadSource.url,
+          canExtract: false,
+        };
+        if (onDownloadSource) {
+          await onDownloadSource(extractedSource, title);
+        } else if (onDownload) {
+          await onDownload(data.url, title);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Download could not be started.";
+      setFallbackNotice(message);
+      setExtractError(message);
     }
   };
 
@@ -808,9 +934,9 @@ export default function VidSrcPlayer({
     let cancelled = false;
     const prepare = async () => {
       try {
-        const res = await fetch(`${API}/extract-stream?url=${encodeURIComponent(activeSource.url)}`);
-        if (!res.ok) return;
-        const data = (await res.json()) as { url?: string; quality?: string };
+        const data = await extractDirectStreamUrl(
+          activeSource.externalUrl || activeSource.url
+        );
         if (!data.url || cancelled) return;
 
         const extracted: StreamSource = {
@@ -861,6 +987,7 @@ export default function VidSrcPlayer({
 
       <SubtitlePanel
         mediaTitle={title}
+        searchTitle={activeSearchTitle}
         mediaType={mediaType}
         visible={showSubtitlePanel}
         onClose={() => setShowSubtitlePanel(false)}
@@ -887,11 +1014,6 @@ export default function VidSrcPlayer({
                 embedLoadedRef.current = true;
                 setIsLoading(false);
                 setStatusText("Embed loaded");
-                window.setTimeout(() => {
-                  setLastFailure(
-                    "If the screen stays blank, open the server picker and try another source."
-                  );
-                }, 1200);
               }}
             />
           )}
@@ -995,24 +1117,24 @@ export default function VidSrcPlayer({
           <IconInfo size={18} color="rgba(255,255,255,0.8)" />
           <div className="player-overlay-title">No source available</div>
           <div className="player-overlay-subtitle">
-            {subtitle ?? "Add a stream provider to play this title."}
+            {activeSubtitleText || subtitle || "Add a stream provider to play this title."}
           </div>
         </div>
       )}
 
-      {(fallbackNotice || errorText || lastFailure) && (
+      {(fallbackNotice || errorText) && (
         <div className="player-floating-status">
           {errorText ? (
             <IconAlert size={14} color="#ffd0cb" />
           ) : (
             <IconInfo size={14} color="#d7e9ff" />
           )}
-          <span>{errorText || fallbackNotice || lastFailure}</span>
+          <span>{errorText || fallbackNotice}</span>
         </div>
       )}
 
       {!errorText && subtitleHint && (
-        <div className="player-floating-status" style={{ top: 72, bottom: "auto" }}>
+        <div className="player-floating-status player-floating-status-right">
           <IconSubtitle size={14} color="#d7e9ff" />
           <span>{subtitleHint}</span>
         </div>
@@ -1027,13 +1149,13 @@ export default function VidSrcPlayer({
         {!compactControls && <div className="player-bottom-fade" />}
 
         <button
-          className="player-control-icon"
+          className="player-control-icon player-back-button"
           onClick={onClose}
           title="Back"
           aria-label="Back"
           style={{ position: "absolute", top: 16, left: 16, zIndex: 12, pointerEvents: "auto" }}
         >
-          <IconArrowLeft size={16} color="currentColor" />
+          <IconArrowLeft size={20} color="currentColor" />
         </button>
 
         <div
@@ -1071,6 +1193,54 @@ export default function VidSrcPlayer({
                   ) : (
                     <IconPlay size={16} color="currentColor" />
                   )}
+                </button>
+              )}
+
+              {episodeOptions && episodeOptions.length > 0 && (
+                <div className="player-menu-wrap">
+                  <button
+                    className="player-control-btn"
+                    onClick={() => {
+                      setEpisodeMenuOpen((open) => !open);
+                      setServerMenuOpen(false);
+                      setVolumeMenuOpen(false);
+                      setSubtitleMenuOpen(false);
+                    }}
+                    title={episodeLabel}
+                    aria-label={episodeLabel}
+                  >
+                    <IconList size={16} color="currentColor" />
+                    {activeEpisode ? `${episodeLabel} ${activeEpisode}` : episodeLabel}
+                  </button>
+                  {episodeMenuOpen && (
+                    <div className="player-popover narrow" style={{ maxHeight: 280, overflowY: "auto" }}>
+                      <div className="player-popover-label">{episodeLabel}s</div>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        {episodeOptions.map((episode) => (
+                          <button
+                            key={episode}
+                            className={`quality-chip${activeEpisode === episode ? " active" : ""}`}
+                            onClick={() => void handleEpisodeSwitch(episode)}
+                            disabled={episodeLoading}
+                          >
+                            {episode}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeEpisode && episodeOptions && episodeOptions.includes(activeEpisode + 1) && (
+                <button
+                  className="player-control-btn"
+                  onClick={() => void handleEpisodeSwitch(activeEpisode + 1)}
+                  title={`Next ${episodeLabel.toLowerCase()}`}
+                  aria-label={`Next ${episodeLabel.toLowerCase()}`}
+                  disabled={episodeLoading}
+                >
+                  Next {episodeLabel}
                 </button>
               )}
 
@@ -1147,6 +1317,16 @@ export default function VidSrcPlayer({
                   </div>
                 )}
               </div>
+
+              <button
+                className="player-control-icon"
+                onClick={() => void handleDownloadCurrent()}
+                title="Download"
+                aria-label="Download"
+                disabled={!activeSource}
+              >
+                <IconDownload size={16} color="currentColor" />
+              </button>
 
               {/* Volume boost */}
               <div className="player-menu-wrap">

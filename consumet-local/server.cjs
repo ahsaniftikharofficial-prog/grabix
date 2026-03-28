@@ -8,6 +8,239 @@ const siteBase = process.env.HIANIME_SITE_BASE || "https://aniwatchtv.to";
 const ajaxBase = `${siteBase}/ajax/v2`;
 const scraper = new HiAnime.Scraper();
 
+function decodeBase64(value) {
+  return Buffer.from(String(value || ""), "base64").toString("utf8");
+}
+
+function columnarCipher(text, key) {
+  const cols = key.length;
+  const rows = Math.ceil(text.length / cols);
+  const order = key
+    .split("")
+    .map((char, index) => ({ char, index }))
+    .sort((a, b) => (a.char === b.char ? a.index - b.index : a.char.localeCompare(b.char)));
+
+  const colLengths = new Array(cols).fill(Math.floor(text.length / cols));
+  for (let index = 0; index < text.length % cols; index += 1) {
+    colLengths[order[index].index] += 1;
+  }
+
+  const grid = new Array(rows).fill(null).map(() => new Array(cols).fill(""));
+  let cursor = 0;
+  for (const { index } of order) {
+    const length = colLengths[index];
+    for (let row = 0; row < length; row += 1) {
+      grid[row][index] = text[cursor++] || "";
+    }
+  }
+
+  let result = "";
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      if (grid[row][col]) result += grid[row][col];
+    }
+  }
+  return result;
+}
+
+function seedShuffle(characterArray, inputKey) {
+  let hashVal = 0n;
+  for (let index = 0; index < inputKey.length; index += 1) {
+    hashVal = (hashVal * 31n + BigInt(inputKey.charCodeAt(index))) & 0xffffffffn;
+  }
+
+  let shuffleNum = hashVal;
+  const pseudoRand = (arg) => {
+    shuffleNum = (shuffleNum * 1103515245n + 12345n) & 0x7fffffffn;
+    return Number(shuffleNum % BigInt(arg));
+  };
+
+  const shuffled = [...characterArray];
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const rand = pseudoRand(index + 1);
+    [shuffled[index], shuffled[rand]] = [shuffled[rand], shuffled[index]];
+  }
+  return shuffled;
+}
+
+function keygen2(megacloudKey, clientKey) {
+  const keygenHashMultVal = 31n;
+  const keygenXorVal = 247;
+  const keygenShiftVal = 5;
+  let tempKey = `${megacloudKey}${clientKey}`;
+  let hashVal = 0n;
+
+  for (let index = 0; index < tempKey.length; index += 1) {
+    hashVal = BigInt(tempKey.charCodeAt(index)) + hashVal * keygenHashMultVal + (hashVal << 7n) - hashVal;
+  }
+
+  hashVal = hashVal < 0n ? -hashVal : hashVal;
+  const limitedHash = Number(hashVal % 0x7fffffffffffffffn);
+  tempKey = tempKey
+    .split("")
+    .map((char) => String.fromCharCode(char.charCodeAt(0) ^ keygenXorVal))
+    .join("");
+
+  const pivot = (limitedHash % tempKey.length) + keygenShiftVal;
+  tempKey = tempKey.slice(pivot) + tempKey.slice(0, pivot);
+  const reversedClient = clientKey.split("").reverse().join("");
+
+  let output = "";
+  for (let index = 0; index < Math.max(tempKey.length, reversedClient.length); index += 1) {
+    output += `${tempKey[index] || ""}${reversedClient[index] || ""}`;
+  }
+
+  output = output.substring(0, 96 + (limitedHash % 33));
+  return [...output]
+    .map((char) => String.fromCharCode((char.charCodeAt(0) % 95) + 32))
+    .join("");
+}
+
+function decryptMegaCloudSources(src, clientKey, megacloudKey) {
+  let decrypted = decodeBase64(src);
+  const charArray = [...Array(95)].map((_, index) => String.fromCharCode(32 + index));
+  const generatedKey = keygen2(megacloudKey, clientKey);
+
+  const reverseLayer = (iteration) => {
+    const layerKey = `${generatedKey}${iteration}`;
+    let hashVal = 0n;
+
+    for (let index = 0; index < layerKey.length; index += 1) {
+      hashVal = (hashVal * 31n + BigInt(layerKey.charCodeAt(index))) & 0xffffffffn;
+    }
+
+    let seed = hashVal;
+    const seedRand = (arg) => {
+      seed = (seed * 1103515245n + 12345n) & 0x7fffffffn;
+      return Number(seed % BigInt(arg));
+    };
+
+    decrypted = decrypted
+      .split("")
+      .map((char) => {
+        const charIndex = charArray.indexOf(char);
+        if (charIndex === -1) return char;
+        const randNum = seedRand(95);
+        return charArray[(charIndex - randNum + 95) % 95];
+      })
+      .join("");
+
+    decrypted = columnarCipher(decrypted, layerKey);
+    const shuffled = seedShuffle(charArray, layerKey);
+    const charMap = {};
+    shuffled.forEach((char, index) => {
+      charMap[char] = charArray[index];
+    });
+    decrypted = decrypted
+      .split("")
+      .map((char) => charMap[char] || char)
+      .join("");
+  };
+
+  for (let layer = 3; layer > 0; layer -= 1) {
+    reverseLayer(layer);
+  }
+
+  const dataLength = Number.parseInt(decrypted.substring(0, 4), 10);
+  return decrypted.substring(4, 4 + dataLength);
+}
+
+async function getMegaCloudClientKey(sourceId) {
+  const response = await axios.get(`https://megacloud.blog/embed-2/v3/e-1/${sourceId}`, {
+    headers: {
+      Referer: `${siteBase}/`,
+      "User-Agent": "Mozilla/5.0",
+    },
+    timeout: 20000,
+  });
+  const text = String(response.data || "");
+  const directMatch = text.match(/window\._xy_ws\s*=\s*["'`]([^"'`]+)["'`];/);
+  if (directMatch?.[1]) {
+    return directMatch[1];
+  }
+  const regexes = [
+    /<meta name="_gg_fb" content="[a-zA-Z0-9]+">/,
+    /<!--\s+_is_th:[0-9a-zA-Z]+\s+-->/,
+    /<script>window._lk_db\s+=\s+\{[xyz]:\s+["'`][a-zA-Z0-9]+["'`],\s+[xyz]:\s+["'`][a-zA-Z0-9]+["'`],\s+[xyz]:\s+["'`][a-zA-Z0-9]+["'`]\};<\/script>/,
+    /<div\s+data-dpi="[0-9a-zA-Z]+"\s+.*><\/div>/,
+    /<script nonce="[0-9a-zA-Z]+">/,
+    /<script>window._xy_ws = ['"`][0-9a-zA-Z]+['"`];<\/script>/,
+  ];
+
+  const keyMatch = /"[a-zA-Z0-9]+"/;
+  for (let index = 0; index < regexes.length; index += 1) {
+    const match = text.match(regexes[index]);
+    if (!match) continue;
+
+    if (index === 2) {
+      const parts = [...match[0].matchAll(/[xyz]:\s+"([a-zA-Z0-9]+)"/g)].map((item) => item[1]);
+      if (parts.length === 3) return parts.join("");
+    }
+
+    if (index === 4) {
+      const nonceMatch = match[0].match(/:[a-zA-Z0-9]+ /);
+      if (nonceMatch) return nonceMatch[0].replaceAll(":", "").replaceAll(" ", "");
+    }
+
+    const directMatch = match[0].match(keyMatch);
+    if (directMatch) return directMatch[0].replaceAll('"', "");
+  }
+
+  throw new Error("Failed extracting MegaCloud client key");
+}
+
+async function extractMegaCloud(link) {
+  const embedUrl = new URL(link);
+  const sourceIdMatch = /\/([^/?]+)\?/.exec(embedUrl.href);
+  const sourceId = sourceIdMatch?.[1];
+  if (!sourceId) {
+    throw new Error("Unable to extract MegaCloud source id");
+  }
+
+  const clientKey = await getMegaCloudClientKey(sourceId);
+  const { data } = await axios.get(
+    `https://megacloud.blog/embed-2/v3/e-1/getSources?id=${sourceId}&_k=${encodeURIComponent(clientKey)}`,
+    {
+      timeout: 20000,
+      headers: {
+        Referer: `${embedUrl.origin}/`,
+        "User-Agent": "Mozilla/5.0",
+        "X-Requested-With": "XMLHttpRequest",
+      },
+    }
+  );
+
+  let decryptedSources = data?.sources;
+  if (data?.encrypted) {
+    throw new Error("Encrypted MegaCloud source payload is not supported by the current v3 extractor");
+  }
+
+  const sources = Array.isArray(decryptedSources)
+    ? decryptedSources.map((item) => ({
+        url: item?.file,
+        isM3U8: item?.type === "hls",
+        type: item?.type || "auto",
+      })).filter((item) => Boolean(item.url))
+    : [];
+
+  const subtitles = Array.isArray(data?.tracks)
+    ? data.tracks
+        .filter((track) => track?.kind === "captions")
+        .map((track) => ({
+          url: track.file,
+          lang: track.label || track.kind,
+          default: Boolean(track.default),
+        }))
+    : [];
+
+  return {
+    headers: { Referer: `${embedUrl.origin}/` },
+    sources,
+    subtitles,
+    download: "",
+  };
+}
+
 function parsePage(value, fallback = 1) {
   const page = Number.parseInt(String(value || fallback), 10);
   return Number.isFinite(page) && page > 0 ? page : fallback;
@@ -41,6 +274,7 @@ function normalizeSearchResult(item) {
     type: String(item?.type || ""),
     otherName: String(item?.jname || ""),
     totalEpisodes: Math.max(sub || 0, dub || 0) || undefined,
+    rank: Number(item?.rank || 0) || undefined,
   };
 }
 
@@ -190,6 +424,15 @@ async function fetchWatch(episodeId, server, category) {
     throw new Error("Hianime did not return a playable link.");
   }
 
+  try {
+    if (link.includes("megacloud.blog")) {
+      const extracted = await extractMegaCloud(link);
+      if (Array.isArray(extracted.sources) && extracted.sources.length > 0) {
+        return extracted;
+      }
+    }
+  } catch {}
+
   return {
     headers: {},
     sources: [
@@ -257,6 +500,15 @@ async function route(pathname, searchParams) {
   if (pathname === "/anime/hianime/spotlight") {
     const home = await scraper.getHomePage();
     return { status: 200, body: { spotlightAnimes: Array.isArray(home?.spotlightAnimes) ? home.spotlightAnimes.map(normalizeSearchResult) : [] } };
+  }
+
+  if (pathname === "/anime/hianime/top10") {
+    const home = await scraper.getHomePage();
+    const rawPeriod = String(searchParams.get("period") || "today").toLowerCase();
+    const period = rawPeriod === "daily" ? "today" : rawPeriod === "weekly" ? "week" : rawPeriod === "monthly" ? "month" : rawPeriod;
+    const top10 = home?.top10Animes || {};
+    const items = Array.isArray(top10?.[period]) ? top10[period].map(normalizeSearchResult) : [];
+    return { status: 200, body: { period, items } };
   }
 
   if (pathname === "/anime/hianime/schedule") {

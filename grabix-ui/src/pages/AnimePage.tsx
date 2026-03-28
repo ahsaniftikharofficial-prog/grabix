@@ -21,11 +21,91 @@ import { fetchMovieBoxSources, getAnimeEpisodeSources, getAnimeSources, searchMo
 const JIKAN = "https://api.jikan.moe/v4";
 const TMDB = "https://api.themoviedb.org/3";
 const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzYWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
+const GRABIX = "http://127.0.0.1:8000";
 
-type Tab = "trending" | "toprated" | "seasonal";
+async function queueVideoDownload(
+  input: string | { url: string; title?: string; headers?: Record<string, string>; forceHls?: boolean }
+) {
+  const payload = typeof input === "string" ? { url: input } : input;
+  const params = new URLSearchParams({
+    url: payload.url,
+    dl_type: "video",
+  });
+  if (payload.title?.trim()) {
+    params.set("title", payload.title.trim());
+  }
+  if (payload.headers && Object.keys(payload.headers).length > 0) {
+    params.set("headers_json", JSON.stringify(payload.headers));
+  }
+  if (payload.forceHls) {
+    params.set("force_hls", "true");
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${GRABIX}/download?${params.toString()}`);
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message : "Downloader could not be reached.");
+  }
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const payload = (await response.json()) as { detail?: string };
+      detail = payload.detail || "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail || `Downloader returned ${response.status}`);
+  }
+
+  window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
+}
+
+async function resolveEmbedUrl(url: string): Promise<string> {
+  if (!url) return url;
+  try {
+    const response = await fetch(`${GRABIX}/resolve-embed?url=${encodeURIComponent(url)}`);
+    if (!response.ok) return url;
+    const payload = (await response.json()) as { url?: string };
+    return payload.url || url;
+  } catch {
+    return url;
+  }
+}
+
+type Tab = "trending" | "popular" | "toprated" | "seasonal" | "movie";
 type TmdbEpisodeRef = { season: number; episode: number };
+type AnimeAudioOption = "en" | "original" | "hi";
+type AnimeServerOption = "auto" | "vidstreaming" | "vidcloud" | "streamsb" | "streamtape";
+type TrendingPeriod = "daily" | "weekly" | "monthly";
+
+interface AnimeResolvedPayload {
+  source?: {
+    url?: string;
+    kind?: "embed" | "direct" | "hls" | "local";
+    headers?: Record<string, string>;
+  };
+  subtitles?: Array<{ url?: string; lang?: string; label?: string }>;
+  provider?: string;
+  selectedServer?: string;
+  strategy?: string;
+  tried?: Array<{ server?: string; stage?: string; detail?: string }>;
+}
 
 const tmdbSeasonCache = new Map<number, Array<{ season: number; count: number }>>();
+const AUDIO_BUTTONS: Array<{ id: AnimeAudioOption; label: string; help: string }> = [
+  { id: "en", label: "Dub", help: "English audio first" },
+  { id: "original", label: "Sub", help: "Original audio first" },
+  { id: "hi", label: "Hindi", help: "Movie Box only when available" },
+];
+const SERVER_BUTTONS: Array<{ id: AnimeServerOption; label: string; help: string }> = [
+  { id: "auto", label: "Auto", help: "Fastest available source" },
+  { id: "vidstreaming", label: "VidStreaming", help: "HiAnime stream" },
+  { id: "vidcloud", label: "VidCloud", help: "HiAnime stream" },
+  { id: "streamsb", label: "StreamSB", help: "Fallback server" },
+  { id: "streamtape", label: "Streamtape", help: "Fallback server" },
+];
 
 interface LegacyAnime {
   mal_id: number;
@@ -103,6 +183,31 @@ async function fetchJikanEpisodeCount(malId?: number): Promise<number | null> {
   } catch {
     return null;
   }
+}
+
+async function fetchJikanTrailerUrl(malId?: number, fallbackTitle?: string): Promise<string | null> {
+  const tryMal = async (id: number) => {
+    const response = await fetch(`${JIKAN}/anime/${id}/full`);
+    const data = (await response.json()) as { data?: { trailer?: { embed_url?: string | null } } };
+    return data.data?.trailer?.embed_url ?? null;
+  };
+
+  try {
+    if (malId) {
+      const direct = await tryMal(malId);
+      if (direct) return direct;
+    }
+    if (fallbackTitle?.trim()) {
+      const results = await searchJikanAnime(fallbackTitle, 1);
+      const match = results.find((item) => item.mal_id);
+      if (match?.mal_id) {
+        return await tryMal(match.mal_id);
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 function expandAnimeTitles(...titles: Array<string | undefined>): string[] {
@@ -190,12 +295,28 @@ async function resolveTmdbEpisodeNumber(tmdbId: number | null, episodeNumber: nu
 
 export default function AnimePage() {
   const [tab, setTab] = useState<Tab>("trending");
+  const [trendingPeriod, setTrendingPeriod] = useState<TrendingPeriod>("daily");
   const [items, setItems] = useState<AnimeCardItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   const [detail, setDetail] = useState<AnimeCardItem | null>(null);
-  const [player, setPlayer] = useState<{ title: string; subtitle?: string; poster?: string; sources: StreamSource[] } | null>(null);
+  const [player, setPlayer] = useState<{
+    title: string;
+    subtitle?: string;
+    subtitleSearchTitle?: string;
+    poster?: string;
+    sources: StreamSource[];
+    mediaType?: "movie" | "tv";
+    currentEpisode?: number;
+    episodeOptions?: number[];
+    episodeLabel?: string;
+    onSelectEpisode?: (episode: number) => Promise<{
+      sources: StreamSource[];
+      subtitle?: string;
+      subtitleSearchTitle?: string;
+    }>;
+  } | null>(null);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [health, setHealth] = useState<ConsumetHealth | null>(null);
@@ -203,15 +324,17 @@ export default function AnimePage() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const tabs: { id: Tab; label: string }[] = [
-    { id: "trending", label: "Most Popular" },
+    { id: "trending", label: "Trending" },
+    { id: "popular", label: "Most Popular" },
     { id: "toprated", label: "Most Favorite" },
     { id: "seasonal", label: "Top Airing" },
+    { id: "movie", label: "Movies" },
   ];
 
-  const loadDiscover = async (nextTab: Tab, nextPage = 1) => {
+  const loadDiscover = async (nextTab: Tab, nextPage = 1, nextPeriod: TrendingPeriod = trendingPeriod) => {
     setLoading(true);
     try {
-      const nextItems = (await fetchConsumetAnimeDiscover(nextTab, nextPage)).map(toCardItem);
+      const nextItems = (await fetchConsumetAnimeDiscover(nextTab, nextPage, nextPeriod)).map(toCardItem);
       setHasMore(nextItems.length > 0);
       setItems((prev) => (nextPage === 1 ? nextItems : dedupeItems([...prev, ...nextItems])));
     } catch {
@@ -247,7 +370,7 @@ export default function AnimePage() {
     const nextPage = page + 1;
     setPage(nextPage);
     if (query) void loadSearch(query, nextPage);
-    else void loadDiscover(tab, nextPage);
+    else void loadDiscover(tab, nextPage, trendingPeriod);
   };
 
   useEffect(() => {
@@ -285,8 +408,8 @@ export default function AnimePage() {
       void loadSearch(query, 1);
       return;
     }
-    void loadDiscover(tab, 1);
-  }, [tab, query]);
+    void loadDiscover(tab, 1, trendingPeriod);
+  }, [tab, query, trendingPeriod]);
 
   useEffect(() => {
     const node = bottomRef.current;
@@ -297,7 +420,7 @@ export default function AnimePage() {
     }, { root, rootMargin: "260px 0px" });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [items.length, loading, page, query, tab]);
+  }, [items.length, loading, page, query, tab, trendingPeriod]);
 
   const helperText = health?.healthy
     ? "Hianime-first anime with dub-first playback, anime-provider backups, and Hindi via Movie Box when available"
@@ -350,13 +473,31 @@ export default function AnimePage() {
         </div>
       )}
 
+      {!query && tab === "trending" && (
+        <div style={{ display: "flex", gap: 8, padding: "12px 24px", background: "var(--bg-surface)", borderBottom: "1px solid var(--border)" }}>
+          {([
+            { id: "daily", label: "Daily" },
+            { id: "weekly", label: "Weekly" },
+            { id: "monthly", label: "Monthly" },
+          ] as const).map((period) => (
+            <button
+              key={period.id}
+              className={`quality-chip${trendingPeriod === period.id ? " active" : ""}`}
+              onClick={() => setTrendingPeriod(period.id)}
+            >
+              {period.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div ref={scrollRef} onScroll={handleScroll} style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
         {loading && items.length === 0 ? <LoadingGrid /> : items.length === 0 ? (
           <div className="empty-state"><IconSearch size={36} /><p>No results</p></div>
         ) : (
           <>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 }}>
-              {items.map((anime) => <AnimeCard key={`${anime.provider}-${anime.id}`} anime={anime} onClick={() => setDetail(anime)} />)}
+            <div style={{ display: "grid", gridTemplateColumns: tab === "trending" ? "repeat(auto-fit, minmax(190px, 1fr))" : "repeat(auto-fill, minmax(150px, 1fr))", gap: tab === "trending" ? 16 : 14 }}>
+              {items.map((anime, index) => <AnimeCard key={`${anime.provider}-${anime.id}`} anime={anime} activeTab={tab} featured={tab === "trending"} rank={index + 1} onClick={() => setDetail(anime)} />)}
             </div>
             <div ref={bottomRef} style={{ height: 24 }} />
           </>
@@ -372,22 +513,58 @@ export default function AnimePage() {
             setPlayer(nextPlayer);
           }}
           consumetHealthy={Boolean(health?.healthy)}
+          activeTab={tab}
         />
       )}
-      {player && <VidSrcPlayer title={player.title} subtitle={player.subtitle} poster={player.poster} sources={player.sources} mediaType="tv" onClose={() => setPlayer(null)} />}
+      {player && (
+        <VidSrcPlayer
+          title={player.title}
+          subtitle={player.subtitle}
+          subtitleSearchTitle={player.subtitleSearchTitle}
+          poster={player.poster}
+          sources={player.sources}
+          mediaType={player.mediaType ?? "tv"}
+          currentEpisode={player.currentEpisode}
+          episodeOptions={player.episodeOptions}
+          episodeLabel={player.episodeLabel}
+          onSelectEpisode={player.onSelectEpisode}
+          onClose={() => setPlayer(null)}
+          onDownload={async (url) => {
+            await queueVideoDownload(url);
+          }}
+          onDownloadSource={async (source) => {
+            await queueVideoDownload({
+              url: source.url,
+              title: player.title,
+              headers: source.requestHeaders,
+              forceHls: source.kind === "hls",
+            });
+          }}
+        />
+      )}
     </div>
   );
 }
 
-function AnimeCard({ anime, onClick }: { anime: AnimeCardItem; onClick: () => void }) {
+function AnimeCard({ anime, activeTab, featured, rank, onClick }: { anime: AnimeCardItem; activeTab: Tab; featured?: boolean; rank?: number; onClick: () => void }) {
   const { isFav, toggle } = useFavorites();
   const favoriteId = `anime-${anime.mal_id ?? `${anime.provider}-${anime.id}`}`;
   const favorite = isFav(favoriteId);
+  const rawType = String((anime.raw as { type?: string } | undefined)?.type || "").toLowerCase();
+  const isMovie = activeTab === "movie" || rawType === "movie";
+  const countLabel = isMovie
+    ? anime.episodes_count && anime.episodes_count > 1
+      ? `${anime.episodes_count} parts`
+      : "Movie"
+    : anime.episodes_count
+      ? `${anime.episodes_count} eps`
+      : anime.status || "-";
 
   return (
-    <div className="card" style={{ overflow: "hidden", cursor: "pointer", transition: "transform 0.15s" }} onClick={onClick} onMouseEnter={(e) => (e.currentTarget.style.transform = "translateY(-3px)")} onMouseLeave={(e) => (e.currentTarget.style.transform = "translateY(0)")}>
+    <div className="card" style={{ overflow: "hidden", cursor: "pointer", transition: "transform 0.15s", minHeight: featured ? 360 : undefined }} onClick={onClick} onMouseEnter={(e) => (e.currentTarget.style.transform = "translateY(-3px)")} onMouseLeave={(e) => (e.currentTarget.style.transform = "translateY(0)")}>
       <div style={{ position: "relative" }}>
-        <img src={anime.image || "https://via.placeholder.com/150x210?text=No+Image"} alt={anime.title} style={{ width: "100%", height: 210, objectFit: "cover" }} onError={(e) => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/150x210?text=No+Image"; }} />
+        <img src={anime.image || "https://via.placeholder.com/150x210?text=No+Image"} alt={anime.title} style={{ width: "100%", height: featured ? 265 : 210, objectFit: "cover" }} onError={(e) => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/150x210?text=No+Image"; }} />
+        {featured && rank ? <div style={{ position: "absolute", bottom: 8, left: 8, background: "rgba(0,0,0,0.78)", color: "white", fontSize: 12, padding: "4px 10px", borderRadius: 999, fontWeight: 700 }}>#{rank}</div> : null}
         {anime.rating ? <div style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.75)", color: "#fdd663", fontSize: 11, padding: "2px 7px", borderRadius: 6, display: "flex", alignItems: "center", gap: 3, fontWeight: 600 }}><IconStar size={10} color="#fdd663" /> {anime.rating.toFixed(1)}</div> : null}
         <button
           className="btn-icon"
@@ -400,9 +577,9 @@ function AnimeCard({ anime, onClick }: { anime: AnimeCardItem; onClick: () => vo
           <IconHeart size={14} color={favorite ? "var(--text-danger)" : "white"} filled={favorite} />
         </button>
       </div>
-      <div style={{ padding: "8px 10px" }}>
-        <div style={{ fontSize: 12, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{anime.title}</div>
-        <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{anime.episodes_count ? `${anime.episodes_count} eps` : anime.status || "-"}</div>
+      <div style={{ padding: featured ? "12px 12px 14px" : "8px 10px" }}>
+        <div style={{ fontSize: featured ? 14 : 12, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: featured ? "normal" : "nowrap", lineHeight: 1.35 }}>{anime.title}</div>
+        <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{countLabel}</div>
       </div>
     </div>
   );
@@ -413,11 +590,28 @@ function AnimeDetail({
   onClose,
   onPlay,
   consumetHealthy,
+  activeTab,
 }: {
   anime: AnimeCardItem;
   onClose: () => void;
-  onPlay: (player: { title: string; subtitle?: string; poster?: string; sources: StreamSource[] }) => void;
+  onPlay: (player: {
+    title: string;
+    subtitle?: string;
+    subtitleSearchTitle?: string;
+    poster?: string;
+    sources: StreamSource[];
+    mediaType?: "movie" | "tv";
+    currentEpisode?: number;
+    episodeOptions?: number[];
+    episodeLabel?: string;
+    onSelectEpisode?: (episode: number) => Promise<{
+      sources: StreamSource[];
+      subtitle?: string;
+      subtitleSearchTitle?: string;
+    }>;
+  }) => void;
   consumetHealthy: boolean;
+  activeTab: Tab;
 }) {
   const [finding, setFinding] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -427,12 +621,22 @@ function AnimeDetail({
   const [episodes, setEpisodes] = useState<ConsumetEpisode[]>([]);
   const [episode, setEpisode] = useState(1);
   const [audio, setAudio] = useState<AudioPreference>("en");
-  const [server, setServer] = useState("auto");
+  const [server, setServer] = useState<AnimeServerOption>("auto");
   const [detailHint, setDetailHint] = useState("");
   const [knownEpisodeCount, setKnownEpisodeCount] = useState<number | null>(anime.episodes_count ?? null);
+  const [episodeCache, setEpisodeCache] = useState<Record<string, ConsumetEpisode[]>>({});
+  const [hasHindiFallback, setHasHindiFallback] = useState(false);
+  const [trailerUrl, setTrailerUrl] = useState(anime.trailer_url || "");
+  const [downloading, setDownloading] = useState(false);
+  const resolvedSourceCacheRef = useRef<Record<string, StreamSource>>({});
+  const episodeRequestCacheRef = useRef<Record<string, Promise<ConsumetEpisode[]>>>({});
+  const resolvedSourcePromiseCacheRef = useRef<Record<string, Promise<StreamSource | null>>>({});
   const { isFav, toggle } = useFavorites();
   const title = anime.title;
   const fav = isFav(`anime-${anime.mal_id ?? `${anime.provider}-${anime.id}`}`);
+  const rawType = String((anime.raw as { type?: string } | undefined)?.type || "").toLowerCase();
+  const isMovie = activeTab === "movie" || rawType === "movie";
+  const selectionLabel = isMovie ? "Part" : "Episode";
 
   const fallbackEpisodeCount = Math.max(knownEpisodeCount ?? anime.episodes_count ?? 12, 1);
   const totalEpisodes = Math.max(episodes.length || fallbackEpisodeCount, 1);
@@ -444,14 +648,24 @@ function AnimeDetail({
     () => Array.from({ length: Math.max(0, episodeEnd - episodeStart + 1) }, (_, index) => episodeStart + index),
     [episodeStart, episodeEnd]
   );
-  const hasTrailer = Boolean(anime.trailer_url);
+  const hasTrailer = Boolean(trailerUrl);
 
   useEffect(() => {
     let cancelled = false;
     setFinding(true);
     setEpisodes([]);
+    setEpisode(1);
+    setAudio("en");
+    setServer("auto");
+    setDetailHint("");
     setResolvedAnime(anime.provider === "jikan" ? null : anime);
     setKnownEpisodeCount(anime.episodes_count ?? null);
+    setEpisodeCache({});
+    setHasHindiFallback(false);
+    setTrailerUrl(anime.trailer_url || "");
+    resolvedSourceCacheRef.current = {};
+    episodeRequestCacheRef.current = {};
+    resolvedSourcePromiseCacheRef.current = {};
 
     Promise.allSettled([
       findTmdbId(anime.title, anime.alt_title),
@@ -470,6 +684,29 @@ function AnimeDetail({
         : [anime];
       setCandidateAnimes(nextCandidates);
 
+      const titleCandidates = expandAnimeTitles(anime.title, anime.alt_title).slice(0, 4);
+      void Promise.allSettled(
+        titleCandidates.map((candidateTitle) =>
+          searchMovieBox({
+            query: candidateTitle,
+            page: 1,
+            perPage: 6,
+            mediaType: "anime",
+            animeOnly: true,
+            preferHindi: true,
+            sortBy: "search",
+          })
+        )
+      ).then((movieBoxResults) => {
+        if (cancelled) return;
+        const available = movieBoxResults.some(
+          (result) =>
+            result.status === "fulfilled" &&
+            result.value.items.some((item) => Boolean(item.is_hindi))
+        );
+        setHasHindiFallback(available);
+      });
+
       if (!consumetHealthy) {
         setResolvedAnime(null);
         setEpisodes([]);
@@ -478,36 +715,36 @@ function AnimeDetail({
         return;
       }
 
-      let chosenAnime: AnimeCardItem | null = null;
-      let chosenEpisodes: ConsumetEpisode[] = [];
-
-      for (const candidate of nextCandidates) {
-        try {
-          const detail = await fetchConsumetDomainInfo("anime", candidate.id, candidate.provider);
-          const nextEpisodes = detail.item.episodes ?? await fetchConsumetAnimeEpisodes(candidate.id, candidate.provider);
-          if (nextEpisodes.length > 0) {
-            chosenAnime = candidate;
-            chosenEpisodes = nextEpisodes;
-            break;
-          }
-        } catch {
-          continue;
-        }
-      }
-
-      if (cancelled) return;
-
-      setResolvedAnime(chosenAnime);
-      setEpisodes(chosenEpisodes);
-      if (chosenAnime && chosenEpisodes.length > 0) {
-        setKnownEpisodeCount((current) => Math.max(current ?? 0, chosenEpisodes.length));
-        setDetailHint(`Episode sources available via ${chosenAnime.provider.toUpperCase()}`);
-      } else if (nextCandidates.length > 0) {
-        setDetailHint("Hianime found title matches, but no playable episode list was returned. Fallback providers are ready.");
+      setResolvedAnime(nextCandidates[0] ?? null);
+      setFinding(false);
+      if (nextCandidates.length > 0) {
+        setDetailHint(`Ready to play. Using ${nextCandidates[0].provider.toUpperCase()} first.`);
       } else {
         setDetailHint("Hianime could not match this title, so playback will use the fallback providers.");
       }
-      setFinding(false);
+
+      void (async () => {
+        for (const candidate of nextCandidates) {
+          try {
+            const detail = await fetchConsumetDomainInfo("anime", candidate.id, candidate.provider);
+            const nextEpisodes = detail.item.episodes ?? await fetchConsumetAnimeEpisodes(candidate.id, candidate.provider);
+            if (cancelled) return;
+            setEpisodeCache((current) => ({
+              ...current,
+              [`${candidate.provider}-${candidate.id}`]: nextEpisodes,
+            }));
+            if (nextEpisodes.length > 0) {
+              setResolvedAnime(candidate);
+              setEpisodes(nextEpisodes);
+              setKnownEpisodeCount((current) => Math.max(current ?? 0, nextEpisodes.length));
+              setDetailHint(`Episode sources available via ${candidate.provider.toUpperCase()}`);
+              return;
+            }
+          } catch {
+            continue;
+          }
+        }
+      })();
     }).catch(() => {
       if (!cancelled) {
         setFinding(false);
@@ -520,167 +757,389 @@ function AnimeDetail({
     };
   }, [anime.id, anime.provider, anime.title, anime.alt_title, consumetHealthy]);
 
-  const handlePlay = async () => {
-    if (playing) return;
-    setPlaying(true);
+  useEffect(() => {
+    let cancelled = false;
+    if (anime.trailer_url) {
+      setTrailerUrl(anime.trailer_url);
+      return () => {
+        cancelled = true;
+      };
+    }
 
+    void fetchJikanTrailerUrl(anime.mal_id, anime.title).then((url) => {
+      if (!cancelled && url) {
+        setTrailerUrl(url);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [anime.mal_id, anime.title, anime.trailer_url]);
+
+  const queueDownload = async (source: StreamSource) => {
+    let downloadUrl = source.url;
+    let downloadHeaders = source.requestHeaders;
+    let forceHls = source.kind === "hls";
+    if (source.kind === "embed") {
+      const targetUrl = await resolveEmbedUrl(source.externalUrl || source.url);
+      const response = await fetch(`${GRABIX}/extract-stream?url=${encodeURIComponent(targetUrl)}`);
+      if (!response.ok) throw new Error(`Extractor returned ${response.status}`);
+      const payload = (await response.json()) as { url?: string };
+      if (!payload.url) throw new Error("Could not extract a direct stream URL.");
+      downloadUrl = payload.url;
+      forceHls = payload.url.includes(".m3u8");
+    }
+    await queueVideoDownload({ url: downloadUrl, title, headers: downloadHeaders, forceHls });
+  };
+
+  const getWatchCandidates = () => (
+    resolvedAnime
+      ? [resolvedAnime, ...candidateAnimes.filter((item) => `${item.provider}-${item.id}` !== `${resolvedAnime.provider}-${resolvedAnime.id}`)]
+      : candidateAnimes
+  );
+
+  const getEpisodeListForCandidate = async (candidate: AnimeCardItem): Promise<ConsumetEpisode[]> => {
+    const cacheKey = `${candidate.provider}-${candidate.id}`;
+    const cached = episodeCache[cacheKey];
+    if (cached && cached.length > 0) return cached;
+    const pending = episodeRequestCacheRef.current[cacheKey];
+    if (pending) return pending;
+
+    const request = (async () => {
+      const detail = await fetchConsumetDomainInfo("anime", candidate.id, candidate.provider);
+      const nextEpisodes = detail.item.episodes ?? await fetchConsumetAnimeEpisodes(candidate.id, candidate.provider);
+      setEpisodeCache((current) => ({
+        ...current,
+        [cacheKey]: nextEpisodes,
+      }));
+      return nextEpisodes;
+    })();
+
+    episodeRequestCacheRef.current[cacheKey] = request;
     try {
-      const normalizedAudio = normalizeAudioPreference(audio);
-      const tmdbEpisode = await resolveTmdbEpisodeNumber(tmdbId, episode);
-      let fallbackSources = tmdbEpisode
-        ? getAnimeEpisodeSources(tmdbId, tmdbEpisode.season, tmdbEpisode.episode)
-        : episode > 1
-          ? getAnimeEpisodeSources(tmdbId, 1, episode)
-          : getAnimeSources(tmdbId);
-      const watchCandidates = resolvedAnime
-        ? [resolvedAnime, ...candidateAnimes.filter((item) => `${item.provider}-${item.id}` !== `${resolvedAnime.provider}-${resolvedAnime.id}`)]
-        : candidateAnimes;
+      return await request;
+    } finally {
+      delete episodeRequestCacheRef.current[cacheKey];
+    }
+  };
 
-      for (const candidate of watchCandidates) {
+  const resolveAnimeSourceViaBackend = async (targetEpisode = episode, purpose: "play" | "download" = "play"): Promise<StreamSource | null> => {
+    const normalizedAudio = normalizeAudioPreference(audio);
+    if (normalizedAudio === "hi") return null;
+    const cacheKey = `${purpose}:${normalizedAudio}:${server}:${targetEpisode}`;
+    const cached = resolvedSourceCacheRef.current[cacheKey];
+    if (cached) return cached;
+    const pending = resolvedSourcePromiseCacheRef.current[cacheKey];
+    if (pending) return pending;
+
+    const request = (async () => {
+      let lastMessage = "";
+      for (const candidate of getWatchCandidates()) {
         try {
-          const detail = await fetchConsumetDomainInfo("anime", candidate.id, candidate.provider);
-          const episodeList = detail.item.episodes ?? await fetchConsumetAnimeEpisodes(candidate.id, candidate.provider);
-          const match = episodeList.find((item) => item.number === episode) || episodeList[0];
+          const episodeList = await getEpisodeListForCandidate(candidate);
+          const match = episodeList.find((item) => item.number === targetEpisode) || episodeList[0];
           if (!match) continue;
 
-          const playback = await fetchConsumetAnimeWatch(
-            match.id,
-            candidate.provider,
-            normalizedAudio,
-            server === "auto" ? undefined : server
-          );
+          const response = await fetch(`${GRABIX}/anime/resolve-source`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              episodeId: match.id,
+              animeId: candidate.id,
+              title: anime.title,
+              altTitle: anime.alt_title || "",
+              episodeNumber: targetEpisode,
+              audio: normalizedAudio,
+              server,
+              isMovie,
+              tmdbId,
+              purpose,
+            }),
+          });
 
-          const sources = [...playback.sources, ...fallbackSources];
-          if (sources.length > 0) {
-            onPlay({
-              title,
-              subtitle: `Anime playback with ${normalizedAudio === "hi" ? "Hindi" : normalizedAudio === "en" ? "English dub" : "sub"} preference - Episode ${episode}`,
-              poster: anime.image,
-              sources,
-            });
-            return;
+          if (!response.ok) {
+            try {
+              const payload = (await response.json()) as { detail?: { message?: string } | string };
+              lastMessage = typeof payload.detail === "string"
+                ? payload.detail
+                : payload.detail?.message || "";
+            } catch {
+              lastMessage = "";
+            }
+            continue;
+          }
+
+          const payload = (await response.json()) as AnimeResolvedPayload;
+          const resolvedUrl = payload.source?.url || "";
+          if (!resolvedUrl) continue;
+          const subtitles = (payload.subtitles ?? [])
+            .filter((track) => Boolean(track.url))
+            .map((track, index) => ({
+              id: `anime-resolved-sub-${targetEpisode}-${index}`,
+              label: track.label || track.lang || `Subtitle ${index + 1}`,
+              language: track.lang,
+              url: track.url || "",
+            }));
+
+          const resolvedSource = {
+            id: `anime-resolved-${candidate.provider}-${candidate.id}-${targetEpisode}-${purpose}`,
+            label: payload.selectedServer === "fallback"
+              ? `${payload.provider || "Fallback"} Auto`
+              : payload.selectedServer
+                ? `${payload.provider || "HiAnime"} ${payload.selectedServer}`
+                : (payload.provider || "HiAnime"),
+            provider: payload.provider || "HiAnime",
+            kind: payload.source?.kind || "direct",
+            url: resolvedUrl,
+            requestHeaders: payload.source?.headers || undefined,
+            quality: payload.source?.kind === "hls" ? "HLS" : "Auto",
+            description: payload.strategy || "Resolved anime source",
+            externalUrl: resolvedUrl,
+            canExtract: false,
+            subtitles,
+          };
+          resolvedSourceCacheRef.current[cacheKey] = resolvedSource;
+          return resolvedSource;
+        } catch (error) {
+          lastMessage = error instanceof Error ? error.message : "";
+        }
+      }
+
+      if (lastMessage) {
+        throw new Error(lastMessage);
+      }
+      return null;
+    })();
+
+    resolvedSourcePromiseCacheRef.current[cacheKey] = request;
+    try {
+      return await request;
+    } finally {
+      delete resolvedSourcePromiseCacheRef.current[cacheKey];
+    }
+  };
+
+  const buildFallbackSources = async (targetEpisode = episode): Promise<StreamSource[]> => {
+    const tmdbEpisode = await resolveTmdbEpisodeNumber(tmdbId, targetEpisode);
+    return tmdbEpisode
+      ? getAnimeEpisodeSources(tmdbId, tmdbEpisode.season, tmdbEpisode.episode)
+      : targetEpisode > 1
+        ? getAnimeEpisodeSources(tmdbId, 1, targetEpisode)
+        : getAnimeSources(tmdbId);
+  };
+
+  const resolvePlayableSources = async (targetEpisode = episode): Promise<StreamSource[]> => {
+    const titleCandidates = expandAnimeTitles(anime.title, anime.alt_title).slice(0, 6);
+    const normalizedAudio = normalizeAudioPreference(audio);
+
+    if (normalizedAudio === "hi") {
+      const movieBoxMatches = new Map<string, { id: string; title?: string; year?: number; moviebox_media_type?: "movie" | "series"; is_hindi?: boolean }>();
+
+      for (const candidateTitle of titleCandidates) {
+        try {
+          const result = await searchMovieBox({
+            query: candidateTitle,
+            page: 1,
+            perPage: 8,
+            mediaType: "anime",
+            animeOnly: true,
+            preferHindi: true,
+            sortBy: "search",
+          });
+          for (const item of result.items) {
+            movieBoxMatches.set(item.id, item);
           }
         } catch {
           continue;
         }
       }
 
-      const titleCandidates = expandAnimeTitles(anime.title, anime.alt_title).slice(0, 6);
-      if (normalizedAudio === "hi") {
-        const movieBoxMatches = new Map<string, { id: string; title?: string; year?: number; moviebox_media_type?: "movie" | "series"; is_hindi?: boolean }>();
-
-        for (const candidateTitle of titleCandidates) {
-          try {
-            const result = await searchMovieBox({
-              query: candidateTitle,
-              page: 1,
-              perPage: 8,
-              mediaType: "anime",
-              animeOnly: true,
-              preferHindi: true,
-              sortBy: "search",
-            });
-            for (const item of result.items) {
-              movieBoxMatches.set(item.id, item);
-            }
-          } catch {
-            continue;
-          }
+      const rankedMovieBoxMatches = [...movieBoxMatches.values()].sort((left, right) => {
+        if (Boolean(left.is_hindi) !== Boolean(right.is_hindi)) {
+          return left.is_hindi ? -1 : 1;
         }
+        return 0;
+      });
 
-        const rankedMovieBoxMatches = [...movieBoxMatches.values()].sort((left, right) => {
-          if (Boolean(left.is_hindi) !== Boolean(right.is_hindi)) {
-            return left.is_hindi ? -1 : 1;
-          }
-          return 0;
-        });
+      for (const item of rankedMovieBoxMatches.slice(0, 6)) {
+        try {
+          const movieBoxSources = await fetchMovieBoxSources({
+            subjectId: item.id,
+            title: item.title || title,
+            mediaType: item.moviebox_media_type === "movie" ? "movie" : "series",
+            year: item.year,
+            season: 1,
+            episode: targetEpisode,
+          });
+          if (movieBoxSources.length > 0) return movieBoxSources;
+        } catch {
+          continue;
+        }
+      }
 
-        for (const item of rankedMovieBoxMatches.slice(0, 6)) {
+      for (const candidateTitle of titleCandidates) {
+        try {
+          const movieBoxSources = await fetchMovieBoxSources({
+            title: candidateTitle,
+            mediaType: isMovie ? "movie" : "anime",
+            season: 1,
+            episode: targetEpisode,
+          });
+          if (movieBoxSources.length > 0) return movieBoxSources;
+        } catch {
+          if (isMovie) continue;
           try {
-            const movieBoxSources = await fetchMovieBoxSources({
-              subjectId: item.id,
-              title: item.title || title,
-              mediaType: item.moviebox_media_type === "movie" ? "movie" : "series",
-              year: item.year,
+            const seriesSources = await fetchMovieBoxSources({
+              title: candidateTitle,
+              mediaType: "series",
               season: 1,
-              episode,
+              episode: targetEpisode,
             });
-            if (movieBoxSources.length > 0) {
-              fallbackSources = movieBoxSources;
-              break;
-            }
+            if (seriesSources.length > 0) return seriesSources;
           } catch {
             continue;
           }
         }
+      }
 
-        if (!fallbackSources.length) {
-          for (const candidateTitle of titleCandidates) {
-            try {
-              const movieBoxSources = await fetchMovieBoxSources({
-                title: candidateTitle,
-                mediaType: "anime",
-                season: 1,
-                episode,
-              });
-              if (movieBoxSources.length > 0) {
-                fallbackSources = movieBoxSources;
-                break;
-              }
-            } catch {
-              try {
-                const seriesSources = await fetchMovieBoxSources({
-                  title: candidateTitle,
-                  mediaType: "series",
-                  season: 1,
-                  episode,
-                });
-                if (seriesSources.length > 0) {
-                  fallbackSources = seriesSources;
-                  break;
-                }
-              } catch {
-                continue;
-              }
-            }
-          }
+      return [];
+    }
+
+    const resolvedSource = await resolveAnimeSourceViaBackend(targetEpisode, "play");
+    if (resolvedSource) {
+      return [resolvedSource];
+    }
+
+    const fallbackSources = await buildFallbackSources(targetEpisode);
+    const watchCandidates = getWatchCandidates();
+
+    for (const candidate of watchCandidates) {
+      try {
+        const episodeList = await getEpisodeListForCandidate(candidate);
+        const match = episodeList.find((item) => item.number === targetEpisode) || episodeList[0];
+        if (!match) continue;
+
+        const playback = await fetchConsumetAnimeWatch(
+          match.id,
+          candidate.provider,
+          normalizedAudio,
+          server === "auto" ? undefined : server
+        );
+        if (playback.sources.length > 0) {
+          return server === "auto" ? [...playback.sources, ...fallbackSources] : playback.sources;
         }
+      } catch {
+        continue;
       }
+    }
 
-      if (fallbackSources.length > 0) {
-        onPlay({
-          title,
-          subtitle: `Fallback anime playback - Episode ${episode}`,
-          poster: anime.image,
-          sources: fallbackSources,
-        });
-        return;
-      }
+    return fallbackSources;
+  };
 
-      alert("No playable anime sources were found for this episode.");
+  const resolveDownloadSource = async (targetEpisode = episode): Promise<StreamSource | null> => {
+    const resolvedSource = await resolveAnimeSourceViaBackend(targetEpisode, "download");
+    if (resolvedSource) return resolvedSource;
+
+    const primarySources = await resolvePlayableSources(targetEpisode);
+    const fallbackSources = normalizeAudioPreference(audio) === "hi"
+      ? []
+      : await buildFallbackSources(targetEpisode);
+    const candidates = [...primarySources, ...fallbackSources];
+
+    return candidates.find((source) =>
+      source.kind === "direct" ||
+      source.kind === "hls" ||
+      source.kind === "local" ||
+      Boolean(source.canExtract)
+    ) ?? candidates[0] ?? null;
+  };
+
+  const buildPlayerPayload = async (targetEpisode = episode) => {
+    const normalizedAudio = normalizeAudioPreference(audio);
+    const sources = await resolvePlayableSources(targetEpisode);
+    if (sources.length === 0) {
+      throw new Error(
+        normalizedAudio === "hi"
+          ? "No Hindi sources were found for this title."
+          : `No playable anime sources were found for ${selectionLabel.toLowerCase()} ${targetEpisode}.`
+      );
+    }
+
+    const subtitleText = normalizedAudio === "hi"
+      ? `Hindi playback from Movie Box - ${selectionLabel} ${targetEpisode}`
+      : `Anime playback with ${normalizedAudio === "en" ? "English dub" : "sub"} preference - ${selectionLabel} ${targetEpisode}`;
+
+    return {
+      sources,
+      subtitle: subtitleText,
+      subtitleSearchTitle: `${title} ${selectionLabel} ${targetEpisode}`.trim(),
+    };
+  };
+
+  const handlePlay = async () => {
+    if (playing) return;
+    setPlaying(true);
+
+    try {
+      const initialPayload = await buildPlayerPayload(episode);
+      onPlay({
+        title,
+        subtitle: initialPayload.subtitle,
+        subtitleSearchTitle: initialPayload.subtitleSearchTitle,
+        poster: anime.image,
+        sources: initialPayload.sources,
+        mediaType: isMovie ? "movie" : "tv",
+        currentEpisode: episode,
+        episodeOptions: totalEpisodes > 1 ? Array.from({ length: totalEpisodes }, (_, index) => index + 1) : undefined,
+        episodeLabel: selectionLabel,
+        onSelectEpisode: async (nextEpisode: number) => buildPlayerPayload(nextEpisode),
+      });
+      return;
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "No playable anime sources were found for this episode.");
     } finally {
       setPlaying(false);
     }
   };
 
+  const handleDownload = async () => {
+    if (downloading) return;
+    setDownloading(true);
+    try {
+      const source = await resolveDownloadSource();
+      if (!source) {
+        alert(normalizeAudioPreference(audio) === "hi" ? "No Hindi sources were found for this title." : "No downloadable sources were found for this title.");
+        return;
+      }
+      await queueDownload(source);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Download could not be started.");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   const handleTrailer = () => {
-    if (!anime.trailer_url) {
+    if (!trailerUrl) {
       alert("Trailer is not available for this title.");
       return;
     }
     onPlay({
       title: `${title} Trailer`,
       subtitle: "Official trailer playback",
+      subtitleSearchTitle: `${title} Trailer`,
       poster: anime.image,
+      mediaType: "movie",
       sources: [{
         id: `trailer-${anime.id}`,
         label: "Trailer",
         provider: "Trailer",
         kind: "embed",
-        url: anime.trailer_url,
+        url: trailerUrl,
         description: "Official trailer",
         quality: "Preview",
-        externalUrl: anime.trailer_url,
+        externalUrl: trailerUrl,
         canExtract: false,
       }],
     });
@@ -695,7 +1154,11 @@ function AnimeDetail({
             <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6, lineHeight: 1.3 }}>{title}</div>
             <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 8 }}>
               {anime.rating ? <span style={{ display: "flex", alignItems: "center", gap: 4, background: "var(--bg-surface2)", padding: "3px 9px", borderRadius: 20, fontSize: 12, fontWeight: 600, color: "#fdd663" }}><IconStar size={11} color="#fdd663" /> {anime.rating.toFixed(1)}</span> : null}
-              {totalEpisodes ? <span style={{ background: "var(--bg-surface2)", padding: "3px 9px", borderRadius: 20, fontSize: 12, color: "var(--text-secondary)" }}>{totalEpisodes} eps</span> : null}
+              {isMovie ? (
+                totalEpisodes > 1
+                  ? <span style={{ background: "var(--bg-surface2)", padding: "3px 9px", borderRadius: 20, fontSize: 12, color: "var(--text-secondary)" }}>{totalEpisodes} parts</span>
+                  : <span style={{ background: "var(--bg-surface2)", padding: "3px 9px", borderRadius: 20, fontSize: 12, color: "var(--text-secondary)" }}>Movie</span>
+              ) : totalEpisodes ? <span style={{ background: "var(--bg-surface2)", padding: "3px 9px", borderRadius: 20, fontSize: 12, color: "var(--text-secondary)" }}>{totalEpisodes} eps</span> : null}
               {anime.status ? <span style={{ background: "var(--bg-surface2)", padding: "3px 9px", borderRadius: 20, fontSize: 12, color: "var(--text-secondary)" }}>{anime.status}</span> : null}
             </div>
             <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
@@ -711,35 +1174,77 @@ function AnimeDetail({
             {finding ? "Resolving anime providers..." : detailHint || "Fallback playback only"}
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10, marginBottom: 16 }}>
-            <div>
-              <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>Preferred Audio</div>
-              <select className="input-base" value={audio} onChange={(event) => setAudio(normalizeAudioPreference(event.target.value))}>
-                <option value="en">Dub first</option>
-                <option value="original">Sub first</option>
-                <option value="hi">Hindi first</option>
-              </select>
+          {(!isMovie || totalEpisodes > 1) && (
+          <div style={{ marginBottom: 18, padding: "14px 14px 12px", borderRadius: 14, background: "var(--bg-surface2)", border: "1px solid var(--border)" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+              <div style={{ fontSize: 13, color: "var(--text-primary)", fontWeight: 700 }}>{isMovie ? "Parts" : "Episodes"}</div>
+              {episodeGroups > 1 && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {Array.from({ length: episodeGroups }, (_, index) => {
+                    const start = index * 50 + 1;
+                    const end = Math.min(totalEpisodes, start + 49);
+                    return (
+                      <button key={`${start}-${end}`} className={`quality-chip${selectedGroup === index ? " active" : ""}`} onClick={() => setEpisode(start)} style={{ padding: "6px 12px", fontSize: 12, fontWeight: 600 }}>
+                        {start}-{end}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
-            <div>
-              <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>Server</div>
-              <select className="input-base" value={server} onChange={(event) => setServer(event.target.value)}>
-                <option value="auto">Auto</option>
-                <option value="vidstreaming">VidStreaming</option>
-                <option value="vidcloud">VidCloud</option>
-                <option value="hd-1">HD-1</option>
-                <option value="hd-2">HD-2</option>
-                <option value="streamsb">StreamSB</option>
-                <option value="streamtape">Streamtape</option>
-              </select>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", maxHeight: 176, overflowY: "auto", paddingRight: 4 }}>
+              {visibleEpisodes.map((value) => (
+                <button key={value} className={`quality-chip${episode === value ? " active" : ""}`} onClick={() => setEpisode(value)} style={{ padding: "9px 14px", fontSize: 13, fontWeight: 700, minWidth: 52 }}>
+                  {value}
+                </button>
+              ))}
             </div>
+          </div>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: audio !== "hi" ? "repeat(2, minmax(0, 1fr))" : "minmax(0, 1fr)", gap: 12, marginBottom: 18, padding: "10px 0 0" }}>
+            <div>
+              <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>Audio</div>
+              <div className="anime-option-grid compact">
+                {AUDIO_BUTTONS.filter((option) => option.id !== "hi" || hasHindiFallback).map((option) => (
+                  <button
+                    key={option.id}
+                    className={`anime-option-btn compact${audio === option.id ? " active" : ""}`}
+                    onClick={() => setAudio(option.id)}
+                    type="button"
+                  >
+                    <strong>{option.label}</strong>
+                    <span>{option.help}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            {audio !== "hi" && (
+            <div>
+              <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>Server</div>
+              <div className="anime-option-grid compact">
+                {SERVER_BUTTONS.map((option) => (
+                  <button
+                    key={option.id}
+                    className={`anime-option-btn compact${server === option.id ? " active" : ""}`}
+                    onClick={() => setServer(option.id)}
+                    type="button"
+                  >
+                    <strong>{option.label}</strong>
+                    <span>{option.help}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            )}
           </div>
 
           <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
-            <button className="btn btn-primary" style={{ gap: 7, flex: 1, justifyContent: "center" }} onClick={() => void handlePlay()} disabled={finding || playing}>
-              <IconPlay size={15} /> {finding ? "Finding..." : playing ? "Loading..." : "Play"}
+            <button className="btn btn-primary" style={{ gap: 7, flex: 1, justifyContent: "center" }} onClick={() => void handlePlay()} disabled={playing}>
+              <IconPlay size={15} /> {playing ? "Loading..." : "Play"}
             </button>
-            <button className="btn btn-ghost" style={{ gap: 7, flex: 1, justifyContent: "center" }} onClick={() => window.open(anime.url || `https://myanimelist.net/anime/${anime.mal_id ?? anime.id}`, "_blank")}>
-              <IconDownload size={15} /> Info
+            <button className="btn btn-ghost" style={{ gap: 7, flex: 1, justifyContent: "center" }} onClick={() => void handleDownload()} disabled={downloading}>
+              <IconDownload size={15} /> {downloading ? "Queueing..." : "Download"}
             </button>
             <button className="btn btn-ghost" style={{ gap: 7, flex: 1, justifyContent: "center" }} onClick={handleTrailer} disabled={!hasTrailer}>
               <IconPlay size={15} /> Trailer
@@ -748,32 +1253,6 @@ function AnimeDetail({
               <IconHeart size={15} color={fav ? "var(--text-danger)" : "currentColor"} filled={fav} />
               {fav ? "Saved" : "Favorite"}
             </button>
-          </div>
-
-          <div style={{ marginBottom: 18 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Episodes</div>
-              {episodeGroups > 1 && (
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  {Array.from({ length: episodeGroups }, (_, index) => {
-                    const start = index * 50 + 1;
-                    const end = Math.min(totalEpisodes, start + 49);
-                    return (
-                      <button key={`${start}-${end}`} className={`quality-chip${selectedGroup === index ? " active" : ""}`} onClick={() => setEpisode(start)}>
-                        {start}-{end}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", maxHeight: 144, overflowY: "auto", paddingRight: 4 }}>
-              {visibleEpisodes.map((value) => (
-                <button key={value} className={`quality-chip${episode === value ? " active" : ""}`} onClick={() => setEpisode(value)}>
-                  {value}
-                </button>
-              ))}
-            </div>
           </div>
         </div>
       </div>

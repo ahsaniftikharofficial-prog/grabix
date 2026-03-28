@@ -30,8 +30,9 @@ async def consumet_health():
 async def consumet_discover_anime(
     section: str = Query("trending"),
     page: int = Query(1, ge=1),
+    period: str = Query("daily"),
 ):
-    return await discover_anime(section=section, page=page)
+    return await discover_anime(section=section, page=page, period=period)
 
 
 @router.get("/discover/manga")

@@ -5,11 +5,25 @@ import yt_dlp, os, uuid, sqlite3, shutil, threading, subprocess, time, json, re
 from pathlib import Path
 from datetime import datetime
 from difflib import SequenceMatcher
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse, urlencode
 from urllib.request import Request as URLRequest, urlopen
+from pydantic import BaseModel
 from app.routes.consumet import router as consumet_router
 from app.routes.manga import router as manga_router
 from app.routes.subtitles import router as subtitles_router
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.edge.options import Options as EdgeOptions
+    SELENIUM_AVAILABLE = True
+    SELENIUM_IMPORT_ERROR = ""
+except Exception as exc:
+    webdriver = None
+    By = None
+    EdgeOptions = None
+    SELENIUM_AVAILABLE = False
+    SELENIUM_IMPORT_ERROR = str(exc)
 
 try:
     from moviebox_api import (
@@ -50,6 +64,33 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 downloads: dict = {}
 download_controls: dict = {}
 FFMPEG_PATH = shutil.which("ffmpeg")
+HIANIME_LOCAL_BASE = os.getenv("CONSUMET_API_BASE", "http://127.0.0.1:3000").rstrip("/")
+EDGE_BINARY_PATH = next(
+    (
+        path
+        for path in (
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        )
+        if os.path.exists(path)
+    ),
+    "",
+)
+ANIME_RESOLVE_CACHE_TTL_SECONDS = 300
+anime_resolve_cache: dict[str, tuple[float, dict]] = {}
+
+
+class AnimeResolveRequest(BaseModel):
+    episodeId: str
+    animeId: str = ""
+    title: str = ""
+    altTitle: str = ""
+    episodeNumber: int = 1
+    audio: str = "original"
+    server: str = "auto"
+    isMovie: bool = False
+    tmdbId: int | None = None
+    purpose: str = "play"
 
 
 def _strip_ansi(s: str) -> str:
@@ -240,6 +281,265 @@ def resolve_embed(url: str):
         return {"url": resolved or url}
     except Exception as e:
         return {"url": url, "error": str(e)}
+
+
+def _fetch_json(url: str, *, headers: dict[str, str] | None = None, timeout: int = 25) -> dict:
+    request = URLRequest(url, headers=headers or {"User-Agent": "Mozilla/5.0"})
+    with urlopen(request, timeout=timeout) as response:
+        raw = response.read().decode("utf-8", errors="ignore")
+    return json.loads(raw or "{}")
+
+
+def _anime_resolve_cache_key(payload: AnimeResolveRequest) -> str:
+    return "|".join(
+        [
+            payload.episodeId,
+            payload.audio,
+            payload.server,
+            payload.purpose,
+            str(payload.episodeNumber),
+            str(payload.tmdbId or ""),
+        ]
+    )
+
+
+def _get_cached_anime_resolution(payload: AnimeResolveRequest) -> dict | None:
+    cache_key = _anime_resolve_cache_key(payload)
+    cached = anime_resolve_cache.get(cache_key)
+    if not cached:
+        return None
+    expires_at, result = cached
+    if time.time() >= expires_at:
+        anime_resolve_cache.pop(cache_key, None)
+        return None
+    return result
+
+
+def _set_cached_anime_resolution(payload: AnimeResolveRequest, result: dict) -> None:
+    anime_resolve_cache[_anime_resolve_cache_key(payload)] = (
+        time.time() + ANIME_RESOLVE_CACHE_TTL_SECONDS,
+        result,
+    )
+
+
+def _extract_stream_url(url: str) -> tuple[str, str]:
+    result = subprocess.run(
+        ["yt-dlp", "--get-url", "--no-playlist", url],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output_lines = result.stdout.strip().splitlines()
+    direct_url = output_lines[0].strip() if output_lines else ""
+    if not direct_url:
+        raise RuntimeError(result.stderr.strip() or "No stream found")
+    return direct_url, ("hls" if ".m3u8" in direct_url.lower() else "direct")
+
+
+def _anime_server_order(server: str) -> list[str]:
+    normalized = (server or "auto").strip().lower()
+    if normalized in {"auto", ""}:
+        return ["vidstreaming", "vidcloud", "streamtape", "streamsb"]
+    ordered = [normalized]
+    for candidate in ("vidstreaming", "vidcloud", "streamtape", "streamsb"):
+        if candidate not in ordered:
+            ordered.append(candidate)
+    return ordered
+
+
+def _map_audio_category(audio: str) -> str:
+    return "dub" if str(audio or "").lower() == "en" else "sub"
+
+
+def _normalize_resolved_source(
+    *,
+    source_url: str,
+    kind: str,
+    provider: str,
+    selected_server: str,
+    strategy: str,
+    headers: dict[str, str] | None = None,
+    subtitles: list[dict] | None = None,
+    tried: list[dict] | None = None,
+) -> dict:
+    return {
+        "source": {
+            "url": source_url,
+            "kind": kind,
+            "headers": headers or {},
+        },
+        "subtitles": subtitles or [],
+        "provider": provider,
+        "selectedServer": selected_server,
+        "strategy": strategy,
+        "tried": tried or [],
+    }
+
+
+def _convert_hianime_source_payload(payload: dict, server: str, tried: list[dict]) -> dict | None:
+    sources = payload.get("sources") or []
+    subtitles = payload.get("subtitles") or []
+    headers = payload.get("headers") or {}
+    for item in sources:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        kind = "hls" if item.get("isM3U8") or ".m3u8" in url.lower() else ("embed" if item.get("isEmbed") else "direct")
+        if kind == "embed":
+            continue
+        return _normalize_resolved_source(
+            source_url=url,
+            kind=kind,
+            provider="HiAnime",
+            selected_server=server,
+            strategy="hianime-direct",
+            headers=headers,
+            subtitles=subtitles,
+            tried=tried,
+        )
+    return None
+
+
+def _capture_hianime_stream_via_edge(embed_url: str, watch_url: str, server: str, tried: list[dict]) -> dict | None:
+    if not SELENIUM_AVAILABLE:
+        raise RuntimeError(f"Selenium is unavailable: {SELENIUM_IMPORT_ERROR}")
+    if not EDGE_BINARY_PATH:
+        raise RuntimeError("Microsoft Edge is not installed.")
+
+    options = EdgeOptions()
+    options.binary_location = EDGE_BINARY_PATH
+    options.add_argument("--autoplay-policy=no-user-gesture-required")
+    options.add_argument("--disable-features=msEdgeSidebarV2")
+    options.add_argument("--mute-audio")
+
+    driver = webdriver.Edge(options=options)
+    try:
+        driver.set_window_position(-2000, 0)
+        driver.set_window_size(1280, 720)
+        driver.get(watch_url or embed_url)
+        time.sleep(6)
+        if embed_url and embed_url not in driver.current_url:
+            driver.get(embed_url)
+            time.sleep(6)
+
+        for _ in range(12):
+            entries = driver.execute_script(
+                """
+                return performance.getEntriesByType('resource')
+                  .map((entry) => entry.name)
+                  .filter((name) => name.includes('.m3u8') || name.includes('.mp4'));
+                """
+            ) or []
+            if entries:
+                url = str(entries[-1])
+                return _normalize_resolved_source(
+                    source_url=url,
+                    kind="hls" if ".m3u8" in url.lower() else "direct",
+                    provider="HiAnime",
+                    selected_server=server,
+                    strategy="hianime-browser-capture",
+                    headers={"Referer": watch_url or embed_url},
+                    subtitles=[],
+                    tried=tried,
+                )
+            time.sleep(1.5)
+        return None
+    finally:
+        driver.quit()
+
+
+def _fallback_embed_sources(tmdb_id: int | None, season: int, episode: int) -> list[dict]:
+    if not tmdb_id:
+        return []
+    providers = [
+        ("VidSrc.mov", f"https://vidsrc.mov/embed/tv/{tmdb_id}/{season}/{episode}"),
+        ("embed.su", f"https://embed.su/embed/tv/{tmdb_id}/{season}/{episode}"),
+        ("Autoembed", f"https://autoembed.cc/tv/tmdb/{tmdb_id}-{season}-{episode}"),
+        ("Vidlink.pro", f"https://vidlink.pro/tv/{tmdb_id}/{season}/{episode}"),
+    ]
+    return [{"provider": provider, "url": url} for provider, url in providers]
+
+
+def _resolve_fallback_provider(tmdb_id: int | None, season: int, episode: int, tried: list[dict]) -> dict | None:
+    for candidate in _fallback_embed_sources(tmdb_id, season, episode):
+        try:
+            resolved_url = _resolve_embed_target(candidate["url"])
+            direct_url, kind = _extract_stream_url(resolved_url)
+            return _normalize_resolved_source(
+                source_url=direct_url,
+                kind=kind,
+                provider=candidate["provider"],
+                selected_server="fallback",
+                strategy="fallback-provider",
+                headers={"Referer": resolved_url},
+                subtitles=[],
+                tried=tried,
+            )
+        except Exception as exc:
+            tried.append({"server": candidate["provider"], "stage": "fallback-provider", "detail": str(exc)})
+            continue
+    return None
+
+
+@app.post("/anime/resolve-source")
+def anime_resolve_source(payload: AnimeResolveRequest):
+    cached = _get_cached_anime_resolution(payload)
+    if cached:
+        return cached
+
+    tried: list[dict] = []
+    category = _map_audio_category(payload.audio)
+    episode_id = payload.episodeId.strip()
+    if not episode_id:
+        raise HTTPException(status_code=400, detail="episodeId is required")
+
+    watch_url = episode_id if episode_id.startswith("http") else f"https://aniwatchtv.to/watch/{episode_id}"
+    for server in _anime_server_order(payload.server):
+        try:
+            data = _fetch_json(
+                f"{HIANIME_LOCAL_BASE}/anime/hianime/watch/{quote(episode_id, safe='')}"
+                f"?{urlencode({'server': server, 'category': category})}"
+            )
+            direct_result = _convert_hianime_source_payload(data, server, tried)
+            if direct_result:
+                _set_cached_anime_resolution(payload, direct_result)
+                return direct_result
+
+            sources = data.get("sources") or []
+            embed_url = ""
+            for item in sources:
+                if isinstance(item, dict) and str(item.get("type") or "").lower() == "embed":
+                    embed_url = str(item.get("url") or "").strip()
+                    break
+            if embed_url:
+                tried.append({"server": server, "stage": "hianime-protected", "detail": embed_url})
+                browser_result = _capture_hianime_stream_via_edge(embed_url, watch_url, server, tried)
+                if browser_result:
+                    _set_cached_anime_resolution(payload, browser_result)
+                    return browser_result
+        except Exception as exc:
+            tried.append({"server": server, "stage": "hianime", "detail": str(exc)})
+            continue
+
+    fallback_result = _resolve_fallback_provider(
+        payload.tmdbId,
+        1,
+        max(1, payload.episodeNumber),
+        tried,
+    )
+    if fallback_result:
+        _set_cached_anime_resolution(payload, fallback_result)
+        return fallback_result
+
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "message": "Stream unavailable - HiAnime protected source could not be resolved.",
+            "tried": tried,
+        },
+    )
 
 
 @app.get("/check-link")
@@ -1125,45 +1425,234 @@ def _guess_media_extension(url: str, content_type: str = "") -> str:
     return "mp4"
 
 
-def _download_direct_media(dl_id: str, url: str) -> str:
+def _parse_timecode_to_seconds(value: str) -> float:
+    try:
+        parts = str(value or "").strip().split(":")
+        if len(parts) != 3:
+            return 0.0
+        hours = float(parts[0])
+        minutes = float(parts[1])
+        seconds = float(parts[2])
+        return (hours * 3600) + (minutes * 60) + seconds
+    except Exception:
+        return 0.0
+
+
+def _download_direct_media(dl_id: str, url: str, headers: dict[str, str] | None = None) -> str:
     target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or f"grabix-{dl_id}"
     safe_title = re.sub(r'[\\\\/:*?"<>|]+', " ", target_title).strip() or f"grabix-{dl_id}"
 
-    request = URLRequest(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urlopen(request, timeout=30) as response:
+    request_headers = {"User-Agent": "Mozilla/5.0"}
+    request_headers.update(headers or {})
+    initial_request = URLRequest(url, headers=request_headers)
+    with urlopen(initial_request, timeout=30) as response:
         content_type = response.headers.get("Content-Type", "video/mp4")
-        total_bytes = int(response.headers.get("Content-Length", "0") or 0)
+        initial_length = int(response.headers.get("Content-Length", "0") or 0)
         ext = _guess_media_extension(url, content_type)
-        output_path = str(Path(DOWNLOAD_DIR) / f"{safe_title}.{ext}")
 
-        downloaded_bytes = 0
-        with open(output_path, "wb") as file_obj:
-            while True:
-                controls = download_controls[dl_id]
-                while controls["pause"].is_set() and not controls["cancel"].is_set():
-                    time.sleep(0.2)
-                if controls["cancel"].is_set():
-                    raise RuntimeError("Download canceled")
+    output_path = str(Path(DOWNLOAD_DIR) / f"{safe_title}.{ext}")
+    part_path = f"{output_path}.part"
+    downloaded_bytes = Path(part_path).stat().st_size if Path(part_path).exists() else 0
+    total_bytes = initial_length if initial_length > 0 else 0
+    controls = download_controls[dl_id]
 
-                chunk = response.read(1024 * 256)
-                if not chunk:
-                    break
-                file_obj.write(chunk)
-                downloaded_bytes += len(chunk)
-                pct = round((downloaded_bytes / total_bytes) * 100, 1) if total_bytes else 0
+    while True:
+        while controls["pause"].is_set() and not controls["cancel"].is_set():
+            time.sleep(0.2)
+        if controls["cancel"].is_set():
+            raise RuntimeError("Download canceled")
+
+        range_headers = dict(request_headers)
+        if downloaded_bytes > 0:
+            range_headers["Range"] = f"bytes={downloaded_bytes}-"
+
+        request = URLRequest(url, headers=range_headers)
+        with urlopen(request, timeout=30) as response:
+            response_status = getattr(response, "status", None) or response.getcode()
+            content_range = response.headers.get("Content-Range", "")
+            response_length = int(response.headers.get("Content-Length", "0") or 0)
+            if downloaded_bytes > 0 and (response_status != 206 or not content_range):
+                try:
+                    Path(part_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                downloaded_bytes = 0
+                total_bytes = 0
                 downloads[dl_id].update({
-                    "percent": pct,
-                    "downloaded": _format_bytes(downloaded_bytes),
-                    "total": _format_bytes(total_bytes),
-                    "size": _format_bytes(total_bytes or downloaded_bytes),
+                    "percent": 0,
+                    "downloaded": "",
+                    "total": "",
+                    "size": "",
                     "file_path": output_path,
                 })
+                continue
+            if content_range and "/" in content_range:
+                try:
+                    total_bytes = int(content_range.rsplit("/", 1)[1] or 0)
+                except Exception:
+                    total_bytes = max(total_bytes, downloaded_bytes + response_length)
+            elif response_length > 0:
+                total_bytes = max(total_bytes, downloaded_bytes + response_length)
 
+            with open(part_path, "ab" if downloaded_bytes > 0 else "wb") as file_obj:
+                while True:
+                    while controls["pause"].is_set() and not controls["cancel"].is_set():
+                        time.sleep(0.2)
+                    if controls["cancel"].is_set():
+                        raise RuntimeError("Download canceled")
+
+                    chunk = response.read(1024 * 256)
+                    if not chunk:
+                        break
+                    file_obj.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    pct = round((downloaded_bytes / total_bytes) * 100, 1) if total_bytes else 0
+                    downloads[dl_id].update({
+                        "percent": pct,
+                        "downloaded": _format_bytes(downloaded_bytes),
+                        "total": _format_bytes(total_bytes),
+                        "size": _format_bytes(total_bytes or downloaded_bytes),
+                        "file_path": output_path,
+                    })
+
+        if not total_bytes or downloaded_bytes >= total_bytes:
+            break
+        time.sleep(0.2)
+
+    if Path(output_path).exists():
+        Path(output_path).unlink()
+    Path(part_path).replace(output_path)
+    downloads[dl_id].update({
+        "percent": 100,
+        "downloaded": _format_bytes(total_bytes or downloaded_bytes),
+        "total": _format_bytes(total_bytes or downloaded_bytes),
+        "size": _format_bytes(total_bytes or downloaded_bytes),
+        "file_path": output_path,
+    })
     return output_path
+
+
+def _download_hls_media(dl_id: str, url: str, headers: dict[str, str] | None = None) -> str:
+    if not has_ffmpeg():
+        raise RuntimeError("FFmpeg is required for HLS downloads.")
+
+    target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or f"grabix-{dl_id}"
+    safe_title = re.sub(r'[\\\\/:*?"<>|]+', " ", target_title).strip() or f"grabix-{dl_id}"
+    final_path = str(Path(DOWNLOAD_DIR) / f"{safe_title}.mkv")
+    output_path = f"{final_path}.part.mkv"
+
+    request_headers = {"User-Agent": "Mozilla/5.0"}
+    request_headers.update(headers or {})
+    controls = download_controls[dl_id]
+
+    command = [FFMPEG_PATH, "-y"]
+    if request_headers:
+        header_blob = "".join(f"{key}: {value}\r\n" for key, value in request_headers.items())
+        command.extend(["-headers", header_blob])
+    command.extend([
+        "-protocol_whitelist", "file,http,https,tcp,tls,crypto,data",
+        "-allowed_extensions", "ALL",
+        "-allowed_segment_extensions", "ALL",
+        "-extension_picky", "0",
+        "-stats_period", "1",
+        "-i", url,
+        "-c", "copy",
+        "-f", "matroska",
+        output_path,
+    ])
+
+    downloads[dl_id].update({
+        "file_path": final_path,
+        "downloaded": "",
+        "total": "",
+        "size": "",
+        "speed": "",
+        "eta": "",
+    })
+
+    last_error = "FFmpeg could not start the HLS download."
+    for attempt in range(3):
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        error_tail: list[str] = []
+        total_duration_seconds = 0.0
+
+        try:
+            while True:
+                if controls["cancel"].is_set():
+                    process.terminate()
+                    raise RuntimeError("Download canceled")
+
+                line = process.stderr.readline() if process.stderr else ""
+                if not line:
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.1)
+                    continue
+
+                clean_line = line.strip()
+                if clean_line:
+                    error_tail.append(clean_line)
+                    if len(error_tail) > 12:
+                        error_tail.pop(0)
+
+                duration_match = re.search(r"Duration:\s*(\d+:\d+:\d+\.\d+)", line)
+                if duration_match:
+                    total_label = duration_match.group(1)
+                    total_duration_seconds = _parse_timecode_to_seconds(total_label)
+                    downloads[dl_id]["total"] = total_label
+
+                match = re.search(r"time=(\d+:\d+:\d+\.\d+)", line)
+                if match:
+                    current_label = match.group(1)
+                    downloads[dl_id]["downloaded"] = current_label
+                    if total_duration_seconds > 0:
+                        downloads[dl_id]["percent"] = round(
+                            min(100.0, (_parse_timecode_to_seconds(current_label) / total_duration_seconds) * 100),
+                            1,
+                        )
+                speed_match = re.search(r"speed=\s*([0-9.]+x)", line)
+                if speed_match:
+                    downloads[dl_id]["speed"] = speed_match.group(1)
+                try:
+                    current_size = Path(output_path).stat().st_size
+                except Exception:
+                    current_size = 0
+                if current_size > 0:
+                    downloads[dl_id]["size"] = _format_bytes(current_size)
+                    if not downloads[dl_id].get("downloaded"):
+                        downloads[dl_id]["downloaded"] = _format_bytes(current_size)
+        finally:
+            if process.stderr:
+                process.stderr.close()
+
+        return_code = process.wait()
+        if return_code == 0:
+            if Path(final_path).exists():
+                Path(final_path).unlink()
+            Path(output_path).replace(final_path)
+            downloads[dl_id].update({
+                "percent": 100,
+                "file_path": final_path,
+            })
+            return final_path
+
+        last_error = " | ".join(error_tail[-3:]) or f"FFmpeg exited with code {return_code}"
+        if attempt < 2:
+            time.sleep(2 ** (attempt + 1))
+
+    raise RuntimeError(last_error)
 
 
 # ── Download record helpers ───────────────────────────────────────────────────
 def _create_download_record(dl_id: str, title: str = "", params: dict | None = None) -> dict:
+    pause_supported = bool((params or {}).get("can_pause", False))
     downloads[dl_id] = {
         "id": dl_id,
         "status": "queued",
@@ -1179,6 +1668,7 @@ def _create_download_record(dl_id: str, title: str = "", params: dict | None = N
         "folder": DOWNLOAD_DIR,
         "created_at": datetime.now().isoformat(),
         "params": params or {},
+        "can_pause": pause_supported,
     }
     download_controls[dl_id] = {
         "pause": threading.Event(),
@@ -1204,6 +1694,7 @@ def _public_download(d: dict) -> dict:
         "folder": d.get("folder", DOWNLOAD_DIR),
         "created_at": d.get("created_at", ""),
         "dl_type": (d.get("params") or {}).get("dl_type", ""),
+        "can_pause": d.get("can_pause", False),
     }
 
 
@@ -1224,6 +1715,8 @@ def _start_download_thread(dl_id: str):
             params["trim_end"],
             params["trim_enabled"],
             params.get("use_cpu", True),
+            params.get("headers_json", ""),
+            params.get("force_hls", False),
         ),
         daemon=True,
     )
@@ -1235,6 +1728,7 @@ def _start_download_thread(dl_id: str):
 @app.get("/download")
 def start_download(
     url: str,
+    title: str = "",
     dl_type: str = "video",
     quality: str = "best",
     audio_format: str = "mp3",
@@ -1245,10 +1739,14 @@ def start_download(
     trim_end: float = 0,
     trim_enabled: bool = False,
     use_cpu: bool = True,
+    headers_json: str = "",
+    force_hls: bool = False,
 ):
     dl_id = str(uuid.uuid4())
+    pause_supported = dl_type == "video" and not force_hls and _is_direct_media_url(url)
     params = {
         "url": url,
+        "title": title,
         "dl_type": dl_type,
         "quality": quality,
         "audio_format": audio_format,
@@ -1259,26 +1757,45 @@ def start_download(
         "trim_end": trim_end,
         "trim_enabled": trim_enabled,
         "use_cpu": use_cpu,
+        "headers_json": headers_json,
+        "force_hls": force_hls,
+        "can_pause": pause_supported,
     }
-    _create_download_record(dl_id, params=params)
+    _create_download_record(dl_id, title=title, params=params)
 
     # Quick metadata fetch for history DB — non-blocking, errors are swallowed
+    fallback_title = title.strip() or Path(urlparse(url).path).stem or f"grabix-{dl_id}"
     try:
-        with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True, "noplaylist": True}) as ydl:
-            info = ydl.extract_info(url, download=False)
+        if dl_type == "video" and (force_hls or ".m3u8" in url.lower()):
             meta = {
                 "id": dl_id, "url": url,
-                "title": info.get("title", "Unknown"),
-                "thumbnail": info.get("thumbnail", ""),
-                "channel": info.get("channel") or info.get("uploader", ""),
-                "duration": info.get("duration", 0),
+                "title": fallback_title,
+                "thumbnail": "",
+                "channel": "",
+                "duration": 0,
                 "dl_type": dl_type, "file_path": "",
                 "status": "queued",
                 "created_at": datetime.now().isoformat(),
             }
             downloads[dl_id]["title"] = meta["title"]
             db_insert(meta)
+        else:
+            with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True, "noplaylist": True}) as ydl:
+                info = ydl.extract_info(url, download=False)
+                meta = {
+                    "id": dl_id, "url": url,
+                    "title": info.get("title", fallback_title),
+                    "thumbnail": info.get("thumbnail", ""),
+                    "channel": info.get("channel") or info.get("uploader", ""),
+                    "duration": info.get("duration", 0),
+                    "dl_type": dl_type, "file_path": "",
+                    "status": "queued",
+                    "created_at": datetime.now().isoformat(),
+                }
+                downloads[dl_id]["title"] = meta["title"]
+                db_insert(meta)
     except Exception as e:
+        downloads[dl_id]["title"] = fallback_title
         print(f"[GRABIX] metadata fetch (non-fatal): {e}")
 
     _start_download_thread(dl_id)
@@ -1356,11 +1873,15 @@ def download_action(dl_id: str, action: str):
         raise HTTPException(status_code=404, detail="Download controls not found")
 
     if action == "pause":
+        if not item.get("can_pause"):
+            raise HTTPException(status_code=400, detail="Pause is not supported for this download type")
         controls["pause"].set()
         if item["status"] == "downloading":
             item["status"] = "paused"
             db_update_status(dl_id, "paused", item.get("file_path", ""))
     elif action == "resume":
+        if not item.get("can_pause"):
+            raise HTTPException(status_code=400, detail="Resume is not supported for this download type")
         controls["pause"].clear()
         if item["status"] == "paused":
             item["status"] = "downloading"
@@ -1742,10 +2263,23 @@ def organize_library():
 
 
 def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
-                   subtitle_lang, thumbnail_format, trim_start, trim_end, trim_enabled, use_cpu=True):
+                   subtitle_lang, thumbnail_format, trim_start, trim_end, trim_enabled,
+                   use_cpu=True, headers_json="", force_hls=False):
     downloads[dl_id]["status"] = "downloading"
     downloads[dl_id]["error"] = ""
     controls = download_controls[dl_id]
+    request_headers: dict[str, str] = {}
+    if headers_json:
+        try:
+            parsed_headers = json.loads(headers_json)
+            if isinstance(parsed_headers, dict):
+                request_headers = {
+                    str(key): str(value)
+                    for key, value in parsed_headers.items()
+                    if value is not None and str(value).strip()
+                }
+        except Exception:
+            request_headers = {}
 
     def progress_hook(d):
         while controls["pause"].is_set() and not controls["cancel"].is_set():
@@ -1784,8 +2318,16 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
     opts: dict = {"outtmpl": template, "noplaylist": True, "progress_hooks": [progress_hook], "continuedl": True}
 
     try:
+        if dl_type == "video" and (force_hls or ".m3u8" in url.lower()):
+            output_path = _download_hls_media(dl_id, url, request_headers)
+            downloads[dl_id]["file_path"] = output_path
+            downloads[dl_id]["status"] = "done"
+            downloads[dl_id]["percent"] = 100
+            db_update_status(dl_id, "done", output_path)
+            return
+
         if dl_type == "video" and _is_direct_media_url(url):
-            output_path = _download_direct_media(dl_id, url)
+            output_path = _download_direct_media(dl_id, url, request_headers)
             downloads[dl_id]["file_path"] = output_path
             downloads[dl_id]["status"] = "done"
             downloads[dl_id]["percent"] = 100
@@ -1828,6 +2370,9 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
             opts["writesubtitles"] = True
             opts["writeautomaticsub"] = True
             opts["subtitleslangs"] = [subtitle_lang]
+
+        if request_headers:
+            opts["http_headers"] = request_headers
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
@@ -2040,11 +2585,19 @@ def ffmpeg_status():
 
 @app.get("/extract-stream")
 async def extract_stream(url: str):
-    result = subprocess.run(
-        ["yt-dlp", "--get-url", "--no-playlist", url],
-        capture_output=True, text=True, timeout=30
-    )
-    direct_url = result.stdout.strip().splitlines()[0]
+    try:
+        result = subprocess.run(
+            ["yt-dlp", "--get-url", "--no-playlist", url],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="Stream extraction timed out") from exc
+
+    output_lines = result.stdout.strip().splitlines()
+    direct_url = output_lines[0].strip() if output_lines else ""
     if not direct_url:
-        raise HTTPException(status_code=422, detail="No stream found")
+        detail = result.stderr.strip() or "No stream found"
+        raise HTTPException(status_code=422, detail=detail)
     return {"url": direct_url, "quality": "Auto"}
