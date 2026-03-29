@@ -1171,15 +1171,15 @@ export default function VidSrcPlayer({
 
   useEffect(() => {
     if (!activeSource || activeSource.kind !== "embed") return;
-    const isMovieBoxEmbed = activeSource.provider.toLowerCase().includes("moviebox");
-    if (!isMovieBoxEmbed) return;
+    const providerName = activeSource.provider.toLowerCase();
+    const shouldPrepareDirect =
+      providerName.includes("moviebox") || Boolean(activeSource.canExtract);
+    if (!shouldPrepareDirect) return;
 
     const sourceKey = activeSource.externalUrl || activeSource.url;
     const existingPreparedIndex = extractedSourcesRef.current.findIndex((source) => source.externalUrl === sourceKey);
     if (existingPreparedIndex >= 0) {
-      if (isMovieBoxEmbed) {
-        setActiveIndex(baseSources.length + existingPreparedIndex);
-      }
+      setActiveIndex(baseSources.length + existingPreparedIndex);
       return;
     }
 
@@ -1210,11 +1210,13 @@ export default function VidSrcPlayer({
 
         extractedSourcesRef.current = [...extractedSourcesRef.current, extracted];
         setExtractedSources([...extractedSourcesRef.current]);
-        if (isMovieBoxEmbed) {
-          const nextIndex = baseSources.length + extractedSourcesRef.current.length - 1;
-          setActiveIndex(nextIndex);
-          setFallbackNotice("Prepared an internal MovieBox stream so volume boost and subtitles work more reliably.");
-        }
+        const nextIndex = baseSources.length + extractedSourcesRef.current.length - 1;
+        setActiveIndex(nextIndex);
+        setFallbackNotice(
+          providerName.includes("moviebox")
+            ? "Prepared an internal MovieBox stream so playback, subtitles, and downloads work more reliably."
+            : `Prepared an internal ${activeSource.provider} stream so iframe restrictions do not block playback.`
+        );
       } catch {
         // Silent background preparation.
       }

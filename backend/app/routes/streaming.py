@@ -1,3 +1,4 @@
+import sys
 from importlib import import_module
 
 from fastapi import APIRouter, Request
@@ -6,6 +7,9 @@ router = APIRouter()
 
 
 def _main_module():
+    main_module = sys.modules.get("main") or sys.modules.get("__main__") or sys.modules.get("backend.main")
+    if main_module is not None:
+        return main_module
     try:
         return import_module("main")
     except ModuleNotFoundError:

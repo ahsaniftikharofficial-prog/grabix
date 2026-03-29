@@ -1,17 +1,22 @@
-// grabix-ui/src/pages/LibraryPage.tsx
-// Phase 3 — Library & Organization
-// Replaces the Phase 2 stub completely.
-
-import { useState, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  IconSearch, IconFilter, IconGrid, IconList,
-  IconFolder, IconTrash, IconVideo, IconAudio, IconImage,
-  IconClock, IconCheck, IconRefresh, IconChevronDown, IconX,
+  IconAudio,
+  IconCheck,
+  IconFilter,
+  IconFolder,
+  IconGrid,
+  IconImage,
+  IconList,
+  IconRefresh,
+  IconSearch,
+  IconTrash,
+  IconVideo,
+  IconX,
 } from "../components/Icons";
 import { BACKEND_API } from "../lib/api";
+
 const API = BACKEND_API;
 
-// ─── Types ────────────────────────────────────────────────────────────────────
 interface LibItem {
   id: string;
   url: string;
@@ -24,619 +29,685 @@ interface LibItem {
   file_size_label: string;
   duration: string;
   date: string;
+  raw_date: string;
   tags: string;
   category: string;
   status: string;
 }
 
-type SortKey = "date" | "title" | "size" | "type";
-type SortDir = "desc" | "asc";
-type FilterType = "all" | "video" | "audio" | "thumbnail" | "subtitle";
+type ViewMode = "grid" | "list";
+type CategoryId =
+  | "all"
+  | "movies"
+  | "tv"
+  | "anime"
+  | "youtube"
+  | "manga"
+  | "books"
+  | "comics"
+  | "light-novels"
+  | "audio"
+  | "subtitles"
+  | "other";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-function fmtDuration(secs: number): string {
-  const m = Math.floor(secs / 60);
-  const s = Math.floor(secs % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
+const CATEGORY_META: Array<{ id: CategoryId; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "movies", label: "Movies" },
+  { id: "tv", label: "TV Series" },
+  { id: "anime", label: "Anime" },
+  { id: "youtube", label: "YouTube" },
+  { id: "manga", label: "Manga" },
+  { id: "books", label: "Books" },
+  { id: "comics", label: "Comics" },
+  { id: "light-novels", label: "Light Novels" },
+  { id: "audio", label: "Audio" },
+  { id: "subtitles", label: "Subtitles" },
+  { id: "other", label: "Other" },
+];
+
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "";
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  const hours = Math.floor(mins / 60);
+  if (hours > 0) {
+    return `${hours}:${String(mins % 60).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }
+  return `${mins}:${String(secs).padStart(2, "0")}`;
 }
 
-function toLibItem(row: Record<string, any>): LibItem {
-  const type = (["video","audio","thumbnail","subtitle"].includes(row.dl_type)
-    ? row.dl_type : "video") as LibItem["type"];
+function toLibItem(row: Record<string, unknown>): LibItem {
+  const type = (["video", "audio", "thumbnail", "subtitle"].includes(String(row.dl_type || ""))
+    ? row.dl_type
+    : "video") as LibItem["type"];
+  const createdAt = String(row.created_at || "");
   return {
-    id:             row.id,
-    url:            row.url ?? "",
-    title:          row.title ?? "Unknown",
-    thumbnail:      row.thumbnail ?? "",
-    channel:        row.channel ?? "",
+    id: String(row.id || ""),
+    url: String(row.url || ""),
+    title: String(row.title || "Unknown"),
+    thumbnail: String(row.thumbnail || ""),
+    channel: String(row.channel || ""),
     type,
-    file_path:      row.file_path ?? "",
-    file_size:      row.file_size ?? 0,
-    file_size_label:row.file_size_label ?? "",
-    duration:       row.duration ? fmtDuration(Number(row.duration)) : "—",
-    date:           row.created_at ? new Date(row.created_at).toLocaleDateString() : "",
-    tags:           row.tags ?? "",
-    category:       row.category ?? "",
-    status:         row.status ?? "",
+    file_path: String(row.file_path || ""),
+    file_size: Number(row.file_size || 0),
+    file_size_label: String(row.file_size_label || ""),
+    duration: formatDuration(Number(row.duration || 0)),
+    date: createdAt ? new Date(createdAt).toLocaleDateString() : "",
+    raw_date: createdAt,
+    tags: String(row.tags || ""),
+    category: String(row.category || ""),
+    status: String(row.status || ""),
   };
 }
 
-const TYPE_COLORS: Record<string, string> = {
-  video:     "var(--accent)",
-  audio:     "var(--text-success)",
-  thumbnail: "var(--text-warning)",
-  subtitle:  "var(--text-secondary)",
-};
+function inferCategory(item: LibItem): CategoryId {
+  const explicit = item.category.trim().toLowerCase();
+  if (explicit === "movies" || explicit === "movie") return "movies";
+  if (explicit === "tv series" || explicit === "tv" || explicit === "series") return "tv";
+  if (explicit === "anime") return "anime";
+  if (explicit === "youtube") return "youtube";
+  if (explicit === "manga") return "manga";
+  if (explicit === "books" || explicit === "book") return "books";
+  if (explicit === "comics" || explicit === "comic") return "comics";
+  if (explicit === "light novels" || explicit === "light novel") return "light-novels";
+  if (explicit === "audio") return "audio";
+  if (explicit === "subtitles" || explicit === "subtitle") return "subtitles";
 
-// ─── Main Page ────────────────────────────────────────────────────────────────
+  const text = `${item.title} ${item.url} ${item.tags} ${item.channel}`.toLowerCase();
+  if (item.type === "audio") return "audio";
+  if (item.type === "subtitle") return "subtitles";
+  if (text.includes("youtube.com") || text.includes("youtu.be")) return "youtube";
+  if (text.includes("manga")) return "manga";
+  if (text.includes("anime") || text.includes("hianime") || text.includes("aniwatch")) return "anime";
+  if (text.includes("tv series") || text.includes("season ") || text.match(/\bs\d{1,2}e\d{1,2}\b/i)) return "tv";
+  if (text.includes("book")) return "books";
+  if (text.includes("comic")) return "comics";
+  if (text.includes("light novel")) return "light-novels";
+  return item.type === "video" ? "movies" : "other";
+}
+
+function categoryLabel(id: CategoryId): string {
+  return CATEGORY_META.find((entry) => entry.id === id)?.label || "Other";
+}
+
+function categoryAccent(id: CategoryId): string {
+  switch (id) {
+    case "movies":
+      return "var(--accent)";
+    case "tv":
+      return "#3fbf8f";
+    case "anime":
+      return "#ff8c42";
+    case "youtube":
+      return "#ff5d5d";
+    case "manga":
+      return "#8e9bff";
+    case "books":
+      return "#c58bff";
+    case "comics":
+      return "#ffb020";
+    case "light-novels":
+      return "#59c3c3";
+    case "audio":
+      return "var(--text-success)";
+    case "subtitles":
+      return "var(--text-secondary)";
+    default:
+      return "var(--text-muted)";
+  }
+}
+
+function typeIcon(type: LibItem["type"]) {
+  if (type === "audio") return <IconAudio size={14} color="currentColor" />;
+  if (type === "thumbnail") return <IconImage size={14} color="currentColor" />;
+  return <IconVideo size={14} color="currentColor" />;
+}
+
 export default function LibraryPage() {
-  const [items, setItems]           = useState<LibItem[]>([]);
-  const [loading, setLoading]       = useState(true);
-  const [search, setSearch]         = useState("");
-  const [view, setView]             = useState<"grid" | "list">("list");
-  const [filterType, setFilterType] = useState<FilterType>("all");
-  const [sortKey, setSortKey]       = useState<SortKey>("date");
-  const [sortDir, setSortDir]       = useState<SortDir>("desc");
-  const [showSort, setShowSort]     = useState(false);
-  const [selected, setSelected]     = useState<Set<string>>(new Set());
-  const [editItem, setEditItem]     = useState<LibItem | null>(null);
+  const [items, setItems] = useState<LibItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [viewMode, setViewMode] = useState<ViewMode>("grid");
+  const [activeCategory, setActiveCategory] = useState<CategoryId>("all");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [toast, setToast] = useState("");
+  const [editItem, setEditItem] = useState<LibItem | null>(null);
   const [organizing, setOrganizing] = useState(false);
-  const [toast, setToast]           = useState("");
 
-  const showToast = (msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(""), 2500);
+  const showToast = (message: string) => {
+    setToast(message);
+    window.setTimeout(() => setToast(""), 2600);
   };
 
   const load = useCallback(() => {
     setLoading(true);
     fetch(`${API}/history/full`)
-      .then(r => r.json())
-      .then((rows: any[]) => setItems(rows.map(toLibItem)))
-      .catch(() => setItems([]))
+      .then((response) => response.json())
+      .then((rows: Array<Record<string, unknown>>) => {
+        setItems((rows || []).map(toLibItem));
+      })
+      .catch(() => {
+        setItems([]);
+      })
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
-  // ── Filtering + Sorting ────────────────────────────────────────────────────
-  const filtered = items
-    .filter(i =>
-      (filterType === "all" || i.type === filterType) &&
-      (
-        i.title.toLowerCase().includes(search.toLowerCase()) ||
-        i.channel.toLowerCase().includes(search.toLowerCase()) ||
-        i.tags.toLowerCase().includes(search.toLowerCase()) ||
-        i.category.toLowerCase().includes(search.toLowerCase())
-      )
-    )
-    .sort((a, b) => {
-      let v = 0;
-      if (sortKey === "date")  v = (a.date  < b.date  ? -1 : 1);
-      if (sortKey === "title") v = a.title.localeCompare(b.title);
-      if (sortKey === "size")  v = a.file_size - b.file_size;
-      if (sortKey === "type")  v = a.type.localeCompare(b.type);
-      return sortDir === "desc" ? -v : v;
-    });
+  const enhancedItems = useMemo(
+    () => items.map((item) => ({ ...item, inferredCategory: inferCategory(item) })),
+    [items]
+  );
 
-  // ── Selection helpers ──────────────────────────────────────────────────────
-  const toggleSelect = (id: string) => {
-    setSelected(prev => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+  const filteredItems = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return enhancedItems
+      .filter((item) => activeCategory === "all" || item.inferredCategory === activeCategory)
+      .filter((item) => {
+        if (!query) return true;
+        return [
+          item.title,
+          item.channel,
+          item.tags,
+          item.category,
+          item.url,
+          categoryLabel(item.inferredCategory),
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(query);
+      })
+      .sort((left, right) => String(right.raw_date).localeCompare(String(left.raw_date)));
+  }, [activeCategory, enhancedItems, search]);
+
+  const groupedItems = useMemo(() => {
+    const groups = new Map<CategoryId, Array<(typeof filteredItems)[number]>>();
+    for (const entry of filteredItems) {
+      const bucket = groups.get(entry.inferredCategory) || [];
+      bucket.push(entry);
+      groups.set(entry.inferredCategory, bucket);
+    }
+    return CATEGORY_META
+      .filter((entry) => entry.id !== "all")
+      .map((entry) => ({
+        id: entry.id,
+        label: entry.label,
+        items: groups.get(entry.id) || [],
+      }))
+      .filter((entry) => entry.items.length > 0);
+  }, [filteredItems]);
+
+  const totalSize = enhancedItems.reduce((sum, item) => sum + item.file_size, 0);
+  const totalSizeLabel = totalSize > 1024 ** 3
+    ? `${(totalSize / 1024 ** 3).toFixed(1)} GB`
+    : totalSize > 1024 ** 2
+      ? `${(totalSize / 1024 ** 2).toFixed(1)} MB`
+      : `${Math.round(totalSize / 1024)} KB`;
+
+  const toggleSelected = (id: string) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
 
-  const selectAll  = () => setSelected(new Set(filtered.map(i => i.id)));
-  const clearSel   = () => setSelected(new Set());
-
-  // ── Actions ────────────────────────────────────────────────────────────────
   const openFolder = async (item: LibItem) => {
     try {
       await fetch(`${API}/open-download-folder?path=${encodeURIComponent(item.file_path)}`, { method: "POST" });
-    } catch { /* ignore on web dev */ }
+    } catch {
+      // Ignore browser-only failures.
+    }
   };
 
   const deleteItem = async (id: string) => {
-    if (!confirm("Delete this file from disk and history?")) return;
+    if (!window.confirm("Delete this file from disk and library?")) return;
     await fetch(`${API}/history/${id}?delete_file=true`, { method: "DELETE" });
-    setItems(prev => prev.filter(i => i.id !== id));
-    setSelected(prev => { const n = new Set(prev); n.delete(id); return n; });
-    showToast("File deleted.");
+    setItems((current) => current.filter((item) => item.id !== id));
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
+    showToast("Removed from library.");
   };
 
   const deleteSelected = async () => {
-    if (!selected.size) return;
-    if (!confirm(`Delete ${selected.size} file(s) from disk and history?`)) return;
-    await Promise.all([...selected].map(id =>
-      fetch(`${API}/history/${id}?delete_file=true`, { method: "DELETE" })
-    ));
-    setItems(prev => prev.filter(i => !selected.has(i.id)));
-    setSelected(new Set());
-    showToast(`${selected.size} file(s) deleted.`);
+    if (!selectedIds.size) return;
+    if (!window.confirm(`Delete ${selectedIds.size} selected item(s)?`)) return;
+    await Promise.all(
+      [...selectedIds].map((id) => fetch(`${API}/history/${id}?delete_file=true`, { method: "DELETE" }))
+    );
+    setItems((current) => current.filter((item) => !selectedIds.has(item.id)));
+    setSelectedIds(new Set());
+    showToast("Selected items deleted.");
   };
 
-  const organize = async () => {
+  const organizeLibrary = async () => {
     setOrganizing(true);
     try {
-      const r = await fetch(`${API}/library/organize`, { method: "POST" });
-      const data = await r.json();
-      showToast(`Organized! ${data.moved} file(s) moved.`);
+      const response = await fetch(`${API}/library/organize`, { method: "POST" });
+      const payload = (await response.json()) as { moved?: number };
+      showToast(`Organized ${payload.moved || 0} file(s).`);
       load();
     } catch {
-      showToast("Organize failed.");
+      showToast("Library organize failed.");
     } finally {
       setOrganizing(false);
     }
   };
 
-  const saveTags = async (item: LibItem, tags: string, category: string) => {
-    await fetch(`${API}/history/${item.id}?tags=${encodeURIComponent(tags)}&category=${encodeURIComponent(category)}`, {
-      method: "PATCH",
-    });
-    setItems(prev => prev.map(i => i.id === item.id ? { ...i, tags, category } : i));
+  const saveMetadata = async (tags: string, category: string) => {
+    if (!editItem) return;
+    await fetch(
+      `${API}/history/${editItem.id}?tags=${encodeURIComponent(tags)}&category=${encodeURIComponent(category)}`,
+      { method: "PATCH" }
+    );
+    setItems((current) =>
+      current.map((item) => (item.id === editItem.id ? { ...item, tags, category } : item))
+    );
     setEditItem(null);
-    showToast("Tags saved.");
+    showToast("Library item updated.");
   };
 
-  // ── Stats ──────────────────────────────────────────────────────────────────
-  const totalSize = items.reduce((s, i) => s + i.file_size, 0);
-  const fmtTotal  = totalSize > 1073741824
-    ? `${(totalSize / 1073741824).toFixed(1)} GB`
-    : totalSize > 1048576
-    ? `${(totalSize / 1048576).toFixed(1)} MB`
-    : `${Math.round(totalSize / 1024)} KB`;
+  const renderItems = (entries: typeof filteredItems) => {
+    if (viewMode === "list") {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {entries.map((item) => (
+            <LibraryRow
+              key={item.id}
+              item={item}
+              selected={selectedIds.has(item.id)}
+              onSelect={() => toggleSelected(item.id)}
+              onOpen={() => void openFolder(item)}
+              onDelete={() => void deleteItem(item.id)}
+              onEdit={() => setEditItem(item)}
+            />
+          ))}
+        </div>
+      );
+    }
 
-  const SORT_OPTIONS: { key: SortKey; label: string }[] = [
-    { key: "date",  label: "Date added" },
-    { key: "title", label: "Title (A–Z)" },
-    { key: "size",  label: "File size" },
-    { key: "type",  label: "Type" },
-  ];
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(185px, 1fr))", gap: 14 }}>
+        {entries.map((item) => (
+          <LibraryCard
+            key={item.id}
+            item={item}
+            selected={selectedIds.has(item.id)}
+            onSelect={() => toggleSelected(item.id)}
+            onOpen={() => void openFolder(item)}
+            onDelete={() => void deleteItem(item.id)}
+            onEdit={() => setEditItem(item)}
+          />
+        ))}
+      </div>
+    );
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
+      {toast ? (
+        <div
+          style={{
+            position: "fixed",
+            left: "50%",
+            bottom: 24,
+            transform: "translateX(-50%)",
+            background: "var(--accent)",
+            color: "var(--text-on-accent)",
+            borderRadius: 999,
+            padding: "9px 16px",
+            fontSize: 12,
+            fontWeight: 600,
+            boxShadow: "var(--shadow-md)",
+            zIndex: 999,
+          }}
+        >
+          {toast}
+        </div>
+      ) : null}
 
-      {/* ── Toast ─────────────────────────────────────────────────────────── */}
-      {toast && (
-        <div style={{
-          position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)",
-          background: "var(--accent)", color: "var(--text-on-accent)",
-          padding: "8px 20px", borderRadius: 8, fontSize: 13, fontWeight: 500,
-          zIndex: 999, boxShadow: "var(--shadow-md)", pointerEvents: "none",
-        }}>{toast}</div>
-      )}
-
-      {/* ── Topbar ────────────────────────────────────────────────────────── */}
-      <div style={{
-        padding: "14px 24px", borderBottom: "1px solid var(--border)",
-        background: "var(--bg-surface)", display: "flex",
-        alignItems: "center", justifyContent: "space-between", gap: 12,
-      }}>
+      <div
+        style={{
+          padding: "16px 24px",
+          borderBottom: "1px solid var(--border)",
+          background: "var(--bg-surface)",
+          display: "flex",
+          justifyContent: "space-between",
+          gap: 16,
+          alignItems: "center",
+        }}
+      >
         <div>
-          <div style={{ fontSize: 16, fontWeight: 600 }}>Library</div>
-          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 1 }}>
-            {loading ? "Loading…" : `${items.length} files · ${fmtTotal}`}
+          <div style={{ fontSize: 17, fontWeight: 700 }}>Library</div>
+          <div style={{ marginTop: 2, fontSize: 12, color: "var(--text-muted)" }}>
+            {loading ? "Refreshing downloads..." : `${enhancedItems.length} items • ${totalSizeLabel}`}
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          {selected.size > 0 && (
-            <>
-              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{selected.size} selected</span>
-              <button className="btn btn-ghost" style={{ fontSize: 12, color: "var(--text-danger)", gap: 5 }} onClick={deleteSelected}>
-                <IconTrash size={13} /> Delete
-              </button>
-              <button className="btn btn-ghost" style={{ fontSize: 12, gap: 5 }} onClick={clearSel}>
-                <IconX size={13} /> Clear
-              </button>
-            </>
-          )}
-          <button
-            className="btn btn-ghost"
-            style={{ fontSize: 12, gap: 6 }}
-            onClick={organize}
-            disabled={organizing}
-            title="Move files into Videos / Audio / Thumbnails subfolders"
-          >
-            <IconFolder size={14} />
-            {organizing ? "Organizing…" : "Organize"}
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+          {selectedIds.size > 0 ? (
+            <button className="btn btn-ghost" style={{ fontSize: 12, color: "var(--text-danger)" }} onClick={() => void deleteSelected()}>
+              <IconTrash size={13} /> Delete {selectedIds.size}
+            </button>
+          ) : null}
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => void organizeLibrary()} disabled={organizing}>
+            <IconFolder size={13} /> {organizing ? "Organizing..." : "Organize"}
           </button>
-          <button className="btn-icon" title="Refresh library" onClick={load}><IconRefresh size={15} /></button>
-          <button className={`btn-icon${view === "grid" ? " active" : ""}`} onClick={() => setView("grid")} title="Grid view"><IconGrid size={15} /></button>
-          <button className={`btn-icon${view === "list" ? " active" : ""}`} onClick={() => setView("list")} title="List view"><IconList size={15} /></button>
+          <button className="btn-icon" title="Refresh" onClick={load}>
+            <IconRefresh size={15} />
+          </button>
+          <button className={`btn-icon${viewMode === "grid" ? " active" : ""}`} title="Grid view" onClick={() => setViewMode("grid")}>
+            <IconGrid size={15} />
+          </button>
+          <button className={`btn-icon${viewMode === "list" ? " active" : ""}`} title="List view" onClick={() => setViewMode("list")}>
+            <IconList size={15} />
+          </button>
         </div>
       </div>
 
-      {/* ── Content ───────────────────────────────────────────────────────── */}
       <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
-
-        {/* Search + Sort */}
-        <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
-          <div style={{ position: "relative", flex: 1 }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
+          <div style={{ position: "relative", flex: 1, minWidth: 220 }}>
             <div style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)" }}>
               <IconSearch size={14} color="var(--text-muted)" />
             </div>
             <input
               className="input-base"
               style={{ paddingLeft: 38 }}
-              placeholder="Search title, channel, tags…"
+              placeholder="Search titles, categories, tags, channels..."
               value={search}
-              onChange={e => setSearch(e.target.value)}
+              onChange={(event) => setSearch(event.target.value)}
             />
           </div>
-
-          {/* Sort dropdown */}
-          <div style={{ position: "relative" }}>
-            <button
-              className="btn btn-ghost"
-              style={{ gap: 6, fontSize: 13 }}
-              onClick={() => setShowSort(v => !v)}
-            >
-              <IconFilter size={14} />
-              {SORT_OPTIONS.find(s => s.key === sortKey)?.label}
-              <IconChevronDown size={13} />
-            </button>
-            {showSort && (
-              <div style={{
-                position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 100,
-                background: "var(--bg-surface)", border: "1px solid var(--border)",
-                borderRadius: 10, padding: "6px", minWidth: 160,
-                boxShadow: "var(--shadow-md)",
-              }}>
-                {SORT_OPTIONS.map(opt => (
-                  <div
-                    key={opt.key}
-                    onClick={() => {
-                      if (sortKey === opt.key) setSortDir(d => d === "desc" ? "asc" : "desc");
-                      else { setSortKey(opt.key); setSortDir("desc"); }
-                      setShowSort(false);
-                    }}
-                    style={{
-                      padding: "7px 12px", borderRadius: 7, cursor: "pointer",
-                      fontSize: 13, display: "flex", justifyContent: "space-between",
-                      background: sortKey === opt.key ? "var(--bg-active)" : "transparent",
-                      color: sortKey === opt.key ? "var(--text-accent)" : "var(--text-primary)",
-                    }}
-                  >
-                    {opt.label}
-                    {sortKey === opt.key && <span style={{ fontSize: 11 }}>{sortDir === "desc" ? "↓" : "↑"}</span>}
-                  </div>
-                ))}
-              </div>
-            )}
+          <div style={{ fontSize: 12, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6 }}>
+            <IconFilter size={13} /> Organized by content type
           </div>
         </div>
 
-        {/* Type filter chips + Select all */}
-        <div style={{ display: "flex", gap: 6, marginBottom: 16, alignItems: "center" }}>
-          {(["all","video","audio","thumbnail","subtitle"] as FilterType[]).map(f => (
-            <button key={f} className={`quality-chip${filterType === f ? " active" : ""}`} onClick={() => setFilterType(f)}>
-              {f === "all" ? "All" : f.charAt(0).toUpperCase() + f.slice(1)}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
+          {CATEGORY_META.map((entry) => (
+            <button
+              key={entry.id}
+              className={`quality-chip${activeCategory === entry.id ? " active" : ""}`}
+              onClick={() => setActiveCategory(entry.id)}
+            >
+              {entry.label}
             </button>
           ))}
-          <div style={{ flex: 1 }} />
-          {filtered.length > 0 && (
-            <button
-              style={{ fontSize: 11, color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer" }}
-              onClick={selected.size === filtered.length ? clearSel : selectAll}
-            >
-              {selected.size === filtered.length ? "Deselect all" : "Select all"}
-            </button>
-          )}
         </div>
 
-        {/* Storage mini-bar */}
-        {items.length > 0 && <StorageBar items={items} />}
-
-        {/* Empty state */}
-        {filtered.length === 0 ? (
+        {!loading && filteredItems.length === 0 ? (
           <div className="empty-state">
             <IconFolder size={40} />
-            <p>No files found</p>
-            <span>{search ? "Try a different search term" : "Your downloads will appear here"}</span>
+            <p>No library items found</p>
+            <span>{search ? "Try another search." : "Downloads will appear here once they finish."}</span>
           </div>
-        ) : view === "list" ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-            {filtered.map(item => (
-              <LibListItem
-                key={item.id}
-                item={item}
-                selected={selected.has(item.id)}
-                onSelect={() => toggleSelect(item.id)}
-                onOpen={openFolder}
-                onDelete={deleteItem}
-                onEdit={setEditItem}
-              />
-            ))}
-          </div>
-        ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
-            {filtered.map(item => (
-              <LibGridItem
-                key={item.id}
-                item={item}
-                selected={selected.has(item.id)}
-                onSelect={() => toggleSelect(item.id)}
-                onDelete={deleteItem}
-              />
-            ))}
-          </div>
-        )}
+        ) : null}
+
+        {activeCategory === "all"
+          ? groupedItems.map((group) => (
+              <section key={group.id} style={{ marginBottom: 26 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div
+                      style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: 999,
+                        background: categoryAccent(group.id),
+                        boxShadow: `0 0 0 4px color-mix(in srgb, ${categoryAccent(group.id)} 18%, transparent)`,
+                      }}
+                    />
+                    <div style={{ fontSize: 15, fontWeight: 700 }}>{group.label}</div>
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{group.items.length} item(s)</div>
+                </div>
+                {renderItems(group.items)}
+              </section>
+            ))
+          : filteredItems.length > 0
+            ? renderItems(filteredItems)
+            : null}
       </div>
 
-      {/* ── Edit Tags Modal ────────────────────────────────────────────────── */}
-      {editItem && (
-        <TagsModal item={editItem} onSave={saveTags} onClose={() => setEditItem(null)} />
-      )}
+      {editItem ? (
+        <EditLibraryModal item={editItem} onClose={() => setEditItem(null)} onSave={saveMetadata} />
+      ) : null}
     </div>
   );
 }
 
-// ─── Storage mini-bar ────────────────────────────────────────────────────────
-function StorageBar({ items }: { items: LibItem[] }) {
-  const byType: Record<string, number> = { video: 0, audio: 0, thumbnail: 0, subtitle: 0 };
-  let total = 0;
-  for (const i of items) {
-    byType[i.type] = (byType[i.type] ?? 0) + i.file_size;
-    total += i.file_size;
+function Thumbnail({ item }: { item: LibItem & { inferredCategory?: CategoryId } }) {
+  const accent = categoryAccent(item.inferredCategory || inferCategory(item));
+  if (item.thumbnail) {
+    return (
+      <img
+        src={item.thumbnail}
+        alt={item.title}
+        style={{ width: "100%", height: "100%", objectFit: "cover" }}
+        onError={(event) => {
+          (event.currentTarget as HTMLImageElement).style.display = "none";
+        }}
+      />
+    );
   }
-  if (!total) return null;
-
-  const COLORS: Record<string, string> = {
-    video: "var(--accent)", audio: "var(--text-success)",
-    thumbnail: "var(--text-warning)", subtitle: "var(--text-muted)",
-  };
-
   return (
-    <div style={{ marginBottom: 18, background: "var(--bg-surface2)", borderRadius: 10, padding: "12px 16px" }}>
-      <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>Storage used</div>
-      <div style={{ height: 6, borderRadius: 4, background: "var(--border)", overflow: "hidden", display: "flex" }}>
-        {Object.entries(byType).map(([type, bytes]) => (
-          bytes > 0 && (
-            <div key={type} style={{
-              width: `${(bytes / total) * 100}%`,
-              background: COLORS[type],
-              transition: "width 0.4s ease",
-            }} />
-          )
-        ))}
-      </div>
-      <div style={{ display: "flex", gap: 14, marginTop: 8, flexWrap: "wrap" }}>
-        {Object.entries(byType).map(([type, bytes]) => bytes > 0 && (
-          <div key={type} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "var(--text-secondary)" }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: COLORS[type], flexShrink: 0 }} />
-            {type.charAt(0).toUpperCase() + type.slice(1)}: {bytes > 1048576 ? `${(bytes/1048576).toFixed(1)} MB` : `${Math.round(bytes/1024)} KB`}
-          </div>
-        ))}
-      </div>
+    <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: accent }}>
+      {typeIcon(item.type)}
     </div>
   );
 }
 
-// ─── Type icon helper ─────────────────────────────────────────────────────────
-function TypeIcon({ type }: { type: string }) {
-  const col = TYPE_COLORS[type] ?? "var(--text-muted)";
-  if (type === "audio")     return <IconAudio size={13} color={col} />;
-  if (type === "thumbnail") return <IconImage size={13} color={col} />;
-  return <IconVideo size={13} color={col} />;
+function CategoryPill({ id }: { id: CategoryId }) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        background: "var(--bg-active)",
+        color: categoryAccent(id),
+        borderRadius: 999,
+        padding: "3px 9px",
+        fontSize: 11,
+        fontWeight: 700,
+      }}
+    >
+      {categoryLabel(id)}
+    </span>
+  );
 }
 
-// ─── List row ─────────────────────────────────────────────────────────────────
-function LibListItem({
-  item, selected, onSelect, onOpen, onDelete, onEdit,
+function LibraryCard({
+  item,
+  selected,
+  onSelect,
+  onOpen,
+  onDelete,
+  onEdit,
 }: {
-  item: LibItem;
+  item: LibItem & { inferredCategory?: CategoryId };
   selected: boolean;
   onSelect: () => void;
-  onOpen: (i: LibItem) => void;
-  onDelete: (id: string) => void;
-  onEdit: (i: LibItem) => void;
+  onOpen: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
 }) {
+  const inferred = item.inferredCategory || inferCategory(item);
   return (
     <div
       className="card"
       style={{
-        padding: "9px 14px", display: "flex", alignItems: "center", gap: 11,
-        outline: selected ? "2px solid var(--accent)" : "none",
+        overflow: "hidden",
         cursor: "pointer",
+        outline: selected ? "2px solid var(--accent)" : "none",
+        border: "1px solid var(--border)",
       }}
       onClick={onSelect}
     >
-      {/* Checkbox */}
+      <div style={{ position: "relative", height: 250, background: "var(--bg-surface2)" }}>
+        <Thumbnail item={{ ...item, inferredCategory: inferred }} />
+        <div style={{ position: "absolute", top: 10, left: 10 }}>
+          <CategoryPill id={inferred} />
+        </div>
+        {selected ? (
+          <div style={{ position: "absolute", right: 10, top: 10, width: 28, height: 28, borderRadius: 999, background: "rgba(0,0,0,0.65)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <IconCheck size={15} color="white" />
+          </div>
+        ) : null}
+      </div>
+      <div style={{ padding: "12px 12px 14px" }}>
+        <div style={{ fontSize: 13, fontWeight: 700, lineHeight: 1.4, minHeight: 36 }}>{item.title}</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>
+          {item.file_size_label ? <span>{item.file_size_label}</span> : null}
+          {item.duration ? <span>{item.duration}</span> : null}
+          {item.date ? <span>{item.date}</span> : null}
+        </div>
+        <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
+          <button className="btn-icon" onClick={(event) => { event.stopPropagation(); onOpen(); }} title="Open folder">
+            <IconFolder size={14} />
+          </button>
+          <button className="btn-icon" onClick={(event) => { event.stopPropagation(); onEdit(); }} title="Edit library info">
+            <IconFilter size={14} />
+          </button>
+          <button className="btn-icon" onClick={(event) => { event.stopPropagation(); onDelete(); }} title="Delete" style={{ color: "var(--text-danger)" }}>
+            <IconTrash size={14} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LibraryRow({
+  item,
+  selected,
+  onSelect,
+  onOpen,
+  onDelete,
+  onEdit,
+}: {
+  item: LibItem & { inferredCategory?: CategoryId };
+  selected: boolean;
+  onSelect: () => void;
+  onOpen: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
+}) {
+  const inferred = item.inferredCategory || inferCategory(item);
+  const tags = item.tags
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .slice(0, 3);
+
+  return (
+    <div className="card" style={{ display: "flex", gap: 14, padding: 12, alignItems: "center", outline: selected ? "2px solid var(--accent)" : "none" }} onClick={onSelect}>
       <div
         style={{
-          width: 16, height: 16, borderRadius: 4, border: `2px solid ${selected ? "var(--accent)" : "var(--border)"}`,
+          width: 18,
+          height: 18,
+          borderRadius: 4,
+          border: `2px solid ${selected ? "var(--accent)" : "var(--border)"}`,
           background: selected ? "var(--accent)" : "transparent",
-          display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-          transition: "var(--transition)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
         }}
       >
-        {selected && <IconCheck size={10} color="white" />}
+        {selected ? <IconCheck size={10} color="white" /> : null}
       </div>
-
-      {/* Thumbnail */}
-      {item.thumbnail ? (
-        <img
-          src={item.thumbnail}
-          alt=""
-          style={{ width: 62, height: 38, objectFit: "cover", borderRadius: 5, border: "1px solid var(--border)", flexShrink: 0 }}
-          onError={e => { (e.target as HTMLImageElement).style.display = "none"; }}
-        />
-      ) : (
-        <div style={{ width: 62, height: 38, borderRadius: 5, background: "var(--bg-surface2)", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <TypeIcon type={item.type} />
-        </div>
-      )}
-
-      {/* Info */}
+      <div style={{ width: 82, height: 54, borderRadius: 10, overflow: "hidden", background: "var(--bg-surface2)", flexShrink: 0 }}>
+        <Thumbnail item={{ ...item, inferredCategory: inferred }} />
+      </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-          {item.title}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 14, fontWeight: 700, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</div>
+          <CategoryPill id={inferred} />
         </div>
-        <div style={{ display: "flex", gap: 8, marginTop: 3, fontSize: 11, color: "var(--text-muted)", alignItems: "center", flexWrap: "wrap" }}>
-          <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
-            <TypeIcon type={item.type} />
-            <span style={{ color: TYPE_COLORS[item.type] ?? "var(--text-muted)", fontWeight: 500 }}>
-              {item.type}
-            </span>
-          </span>
-          {item.duration !== "—" && (
-            <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
-              <IconClock size={11} />{item.duration}
-            </span>
-          )}
-          {item.file_size_label && <span>{item.file_size_label}</span>}
-          {item.channel && <span style={{ overflow: "hidden", textOverflow: "ellipsis", maxWidth: 120 }}>{item.channel}</span>}
-          <span>{item.date}</span>
-          {item.category && (
-            <span style={{ background: "var(--bg-active)", color: "var(--text-accent)", padding: "1px 7px", borderRadius: 10, fontSize: 10, fontWeight: 500 }}>
-              {item.category}
-            </span>
-          )}
-          {item.tags && item.tags.split(",").filter(Boolean).map(t => (
-            <span key={t} style={{ background: "var(--bg-overlay)", color: "var(--text-secondary)", padding: "1px 6px", borderRadius: 10, fontSize: 10 }}>
-              #{t.trim()}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>{typeIcon(item.type)} {item.type}</span>
+          {item.file_size_label ? <span>{item.file_size_label}</span> : null}
+          {item.duration ? <span>{item.duration}</span> : null}
+          {item.channel ? <span>{item.channel}</span> : null}
+          {item.date ? <span>{item.date}</span> : null}
+          {tags.map((tag) => (
+            <span key={tag} style={{ background: "var(--bg-overlay)", borderRadius: 999, padding: "2px 7px" }}>
+              #{tag}
             </span>
           ))}
         </div>
       </div>
-
-      {/* Actions */}
-      <div style={{ display: "flex", gap: 5 }} onClick={e => e.stopPropagation()}>
-        <button className="btn-icon" style={{ width: 28, height: 28 }} title="Edit tags" onClick={() => onEdit(item)}>
-          <IconFilter size={12} />
+      <div style={{ display: "flex", gap: 6 }} onClick={(event) => event.stopPropagation()}>
+        <button className="btn-icon" onClick={onOpen} title="Open folder">
+          <IconFolder size={14} />
         </button>
-        <button className="btn-icon" style={{ width: 28, height: 28 }} title="Open file location" onClick={() => onOpen(item)}>
-          <IconFolder size={13} />
+        <button className="btn-icon" onClick={onEdit} title="Edit">
+          <IconFilter size={14} />
         </button>
-        <button className="btn-icon" style={{ width: 28, height: 28, color: "var(--text-danger)" }} title="Delete" onClick={() => onDelete(item.id)}>
-          <IconTrash size={13} />
+        <button className="btn-icon" onClick={onDelete} title="Delete" style={{ color: "var(--text-danger)" }}>
+          <IconTrash size={14} />
         </button>
-      </div>
-
-      {item.status === "done" && (
-        <div style={{ color: "var(--text-success)", flexShrink: 0 }}>
-          <IconCheck size={13} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Grid card ────────────────────────────────────────────────────────────────
-function LibGridItem({
-  item, selected, onSelect, onDelete,
-}: {
-  item: LibItem;
-  selected: boolean;
-  onSelect: () => void;
-  onDelete: (id: string) => void;
-}) {
-  return (
-    <div
-      className="card"
-      style={{ overflow: "hidden", cursor: "pointer", outline: selected ? "2px solid var(--accent)" : "none" }}
-      onClick={onSelect}
-    >
-      <div style={{ position: "relative" }}>
-        {item.thumbnail ? (
-          <img
-            src={item.thumbnail}
-            alt=""
-            style={{ width: "100%", height: 100, objectFit: "cover" }}
-            onError={e => { (e.target as HTMLImageElement).style.display = "none"; }}
-          />
-        ) : (
-          <div style={{ width: "100%", height: 100, background: "var(--bg-surface2)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <TypeIcon type={item.type} />
-          </div>
-        )}
-        <div style={{ position: "absolute", top: 5, right: 5, background: "rgba(0,0,0,0.72)", color: "white", fontSize: 10, padding: "2px 6px", borderRadius: 4, fontFamily: "var(--font-mono)" }}>
-          {item.duration}
-        </div>
-        <div style={{ position: "absolute", top: 5, left: 5 }}><TypeIcon type={item.type} /></div>
-        {selected && (
-          <div style={{ position: "absolute", inset: 0, background: "rgba(138,180,248,0.22)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <IconCheck size={22} color="var(--accent)" />
-          </div>
-        )}
-        <button
-          className="btn-icon"
-          style={{ position: "absolute", bottom: 5, right: 5, width: 24, height: 24, background: "rgba(0,0,0,0.65)", color: "var(--text-danger)", borderRadius: 5 }}
-          title="Delete"
-          onClick={e => { e.stopPropagation(); onDelete(item.id); }}
-        >
-          <IconTrash size={11} />
-        </button>
-      </div>
-      <div style={{ padding: "8px 10px" }}>
-        <div style={{ fontSize: 12, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</div>
-        <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
-          {item.file_size_label || "—"} · {item.date}
-        </div>
       </div>
     </div>
   );
 }
 
-// ─── Tags / Category modal ────────────────────────────────────────────────────
-function TagsModal({
-  item, onSave, onClose,
+function EditLibraryModal({
+  item,
+  onClose,
+  onSave,
 }: {
   item: LibItem;
-  onSave: (item: LibItem, tags: string, category: string) => void;
   onClose: () => void;
+  onSave: (tags: string, category: string) => Promise<void>;
 }) {
-  const [tags, setTags]         = useState(item.tags);
-  const [category, setCategory] = useState(item.category);
-
-  const CATEGORIES = ["", "Music", "Tutorials", "Gaming", "Movies", "Anime", "Podcasts", "Sports", "Other"];
+  const [tags, setTags] = useState(item.tags);
+  const [category, setCategory] = useState(item.category || categoryLabel(inferCategory(item)));
+  const [saving, setSaving] = useState(false);
 
   return (
-    <div
-      style={{
-        position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 200,
-        display: "flex", alignItems: "center", justifyContent: "center",
-      }}
-      onClick={onClose}
-    >
-      <div
-        style={{
-          background: "var(--bg-surface)", borderRadius: 14, padding: "24px 28px",
-          width: 360, boxShadow: "var(--shadow-lg)", border: "1px solid var(--border)",
-        }}
-        onClick={e => e.stopPropagation()}
-      >
-        <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Edit Tags</div>
-        <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 16, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {item.title}
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.74)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 300 }} onClick={onClose}>
+      <div className="card" style={{ width: "100%", maxWidth: 520, padding: 20, border: "1px solid var(--border)" }} onClick={(event) => event.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontSize: 17, fontWeight: 700 }}>Edit Library Item</div>
+          <button className="btn-icon" onClick={onClose}>
+            <IconX size={15} />
+          </button>
         </div>
-
-        <label style={{ fontSize: 12, color: "var(--text-secondary)", display: "block", marginBottom: 5 }}>Category</label>
-        <select
-          value={category}
-          onChange={e => setCategory(e.target.value)}
-          className="input-base"
-          style={{ marginBottom: 14, width: "100%" }}
-        >
-          {CATEGORIES.map(c => <option key={c} value={c}>{c || "None"}</option>)}
-        </select>
-
-        <label style={{ fontSize: 12, color: "var(--text-secondary)", display: "block", marginBottom: 5 }}>
-          Tags <span style={{ color: "var(--text-muted)" }}>(comma-separated)</span>
-        </label>
-        <input
-          className="input-base"
-          style={{ width: "100%", marginBottom: 18 }}
-          placeholder="e.g. lo-fi, study, chill"
-          value={tags}
-          onChange={e => setTags(e.target.value)}
-        />
-
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>{item.title}</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Category</div>
+            <input className="input-base" value={category} onChange={(event) => setCategory(event.target.value)} placeholder="Movies, Anime, Books..." />
+          </div>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Tags</div>
+            <input className="input-base" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="Hindi, S01E01, Favorites..." />
+          </div>
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 18 }}>
           <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" onClick={() => onSave(item, tags, category)}>Save</button>
+          <button
+            className="btn btn-primary"
+            disabled={saving}
+            onClick={async () => {
+              setSaving(true);
+              try {
+                await onSave(tags, category);
+              } finally {
+                setSaving(false);
+              }
+            }}
+          >
+            {saving ? "Saving..." : "Save"}
+          </button>
         </div>
       </div>
     </div>

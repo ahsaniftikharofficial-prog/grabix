@@ -415,6 +415,8 @@ function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: ()
         thumbnail: poster,
         headers: selectedOption.headers,
         forceHls: selectedOption.forceHls,
+        category: "Movies",
+        tags: [downloadLanguage === "hindi" ? "Hindi" : "English"],
       });
       setDownloadDialogOpen(false);
     } catch (error) {

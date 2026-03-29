@@ -312,6 +312,86 @@ def _normalize_download_target(url: str, headers_json: str = "") -> tuple[str, s
     return _validate_outbound_url(url), headers_json
 
 
+def _normalize_category_label(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(value or "").strip())
+    if not cleaned:
+        return ""
+    lowered = cleaned.lower()
+    mapping = {
+        "movie": "Movies",
+        "movies": "Movies",
+        "film": "Movies",
+        "tv": "TV Series",
+        "show": "TV Series",
+        "series": "TV Series",
+        "tv series": "TV Series",
+        "anime": "Anime",
+        "manga": "Manga",
+        "youtube": "YouTube",
+        "yt": "YouTube",
+        "book": "Books",
+        "books": "Books",
+        "comic": "Comics",
+        "comics": "Comics",
+        "light novel": "Light Novels",
+        "light novels": "Light Novels",
+        "subtitle": "Subtitles",
+        "subtitles": "Subtitles",
+        "audio": "Audio",
+        "music": "Audio",
+    }
+    return mapping.get(lowered, cleaned.title())
+
+
+def _infer_download_category(url: str, title: str, dl_type: str, category: str = "") -> str:
+    normalized = _normalize_category_label(category)
+    if normalized:
+        return normalized
+
+    haystack = f"{title} {url}".lower()
+    host = (urlparse(url).hostname or "").lower()
+
+    if "youtube" in host or "youtu.be" in host:
+        return "YouTube"
+    if "mangadex" in host or "comick" in host or "manga" in haystack:
+        return "Manga"
+    if "anime" in haystack or "hianime" in host or "aniwatch" in host:
+        return "Anime"
+    if "comic" in haystack:
+        return "Comics"
+    if "light novel" in haystack:
+        return "Light Novels"
+    if "book" in haystack or "libgen" in host or "openlibrary" in host:
+        return "Books"
+    if dl_type == "subtitle":
+        return "Subtitles"
+    if dl_type == "audio":
+        return "Audio"
+    return "Videos"
+
+
+def _normalize_tags_csv(tags_csv: str = "", category: str = "", dl_type: str = "") -> str:
+    tokens: list[str] = []
+    for raw in str(tags_csv or "").split(","):
+        cleaned = re.sub(r"\s+", " ", raw).strip()
+        if cleaned:
+            tokens.append(cleaned)
+    if category:
+        tokens.append(category)
+    if dl_type:
+        tokens.append(dl_type)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        key = token.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(token)
+    return ",".join(deduped)
+
+
 # ── DB Setup ──────────────────────────────────────────────────────────────────
 def get_db_connection():
     """Return a new sqlite3 connection with row_factory set."""
@@ -2451,8 +2531,12 @@ def start_download(
     use_cpu: bool = True,
     headers_json: str = "",
     force_hls: bool = False,
+    category: str = "",
+    tags_csv: str = "",
 ):
     safe_url, headers_json = _normalize_download_target(url, headers_json)
+    resolved_category = _infer_download_category(safe_url, title, dl_type, category)
+    resolved_tags = _normalize_tags_csv(tags_csv, resolved_category, dl_type)
     dl_id = str(uuid.uuid4())
     pause_supported = dl_type == "video" and (force_hls or _is_direct_media_url(safe_url))
     params = {
@@ -2472,6 +2556,8 @@ def start_download(
         "headers_json": headers_json,
         "force_hls": force_hls,
         "can_pause": pause_supported,
+        "category": resolved_category,
+        "tags_csv": resolved_tags,
     }
     _create_download_record(dl_id, title=title, params=params)
 
@@ -2488,6 +2574,8 @@ def start_download(
                 "dl_type": dl_type, "file_path": "",
                 "status": "queued",
                 "created_at": datetime.now().isoformat(),
+                "category": resolved_category,
+                "tags": resolved_tags,
             }
             downloads[dl_id]["title"] = meta["title"]
             downloads[dl_id]["thumbnail"] = meta["thumbnail"]
@@ -2502,6 +2590,8 @@ def start_download(
                 "dl_type": dl_type, "file_path": "",
                 "status": "queued",
                 "created_at": datetime.now().isoformat(),
+                "category": resolved_category,
+                "tags": resolved_tags,
             }
             downloads[dl_id]["title"] = meta["title"]
             downloads[dl_id]["thumbnail"] = meta["thumbnail"]
@@ -2518,6 +2608,8 @@ def start_download(
                     "dl_type": dl_type, "file_path": "",
                     "status": "queued",
                     "created_at": datetime.now().isoformat(),
+                    "category": resolved_category,
+                    "tags": resolved_tags,
                 }
                 downloads[dl_id]["title"] = meta["title"]
                 downloads[dl_id]["thumbnail"] = thumbnail or meta["thumbnail"]
@@ -2525,6 +2617,20 @@ def start_download(
     except Exception as e:
         downloads[dl_id]["title"] = fallback_title
         downloads[dl_id]["thumbnail"] = thumbnail
+        db_insert({
+            "id": dl_id,
+            "url": safe_url,
+            "title": fallback_title,
+            "thumbnail": thumbnail,
+            "channel": "",
+            "duration": 0,
+            "dl_type": dl_type,
+            "file_path": "",
+            "status": "queued",
+            "created_at": datetime.now().isoformat(),
+            "category": resolved_category,
+            "tags": resolved_tags,
+        })
         print(f"[GRABIX] metadata fetch (non-fatal): {e}")
 
     _start_download_thread(dl_id)

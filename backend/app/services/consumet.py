@@ -755,7 +755,8 @@ async def get_health_status() -> dict[str, Any]:
             message = "Consumet is running, but Hianime returned no anime data. Playback will use fallback providers."
     except HTTPException as exc:
         healthy = False
-        message = exc.detail
+        _ = exc
+        message = "Consumet is unavailable right now, so GRABIX will use its built-in anime fallbacks."
 
     return {
         "configured": True,

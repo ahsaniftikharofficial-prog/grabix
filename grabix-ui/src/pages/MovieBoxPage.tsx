@@ -660,6 +660,8 @@ function MovieBoxDetail({
         thumbnail: details.poster_proxy || details.poster || "",
         headers: selectedOption.headers,
         forceHls: selectedOption.forceHls,
+        category: details.moviebox_media_type === "movie" ? "Movies" : details.is_anime ? "Anime" : "TV Series",
+        tags: [downloadLanguage === "hindi" ? "Hindi" : "English"],
       });
       setSent(true);
       setDownloadDialogOpen(false);

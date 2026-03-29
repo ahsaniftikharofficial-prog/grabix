@@ -1,3 +1,4 @@
+import sys
 from importlib import import_module
 
 from fastapi import APIRouter
@@ -7,6 +8,9 @@ router = APIRouter()
 
 
 def _main_module():
+    main_module = sys.modules.get("main") or sys.modules.get("__main__") or sys.modules.get("backend.main")
+    if main_module is not None:
+        return main_module
     try:
         return import_module("main")
     except ModuleNotFoundError:
@@ -29,6 +33,8 @@ class DownloadRequest(BaseModel):
     use_cpu: bool = True
     headers_json: str = ""
     force_hls: bool = False
+    category: str = ""
+    tags_csv: str = ""
 
 
 @router.get("/download")
@@ -48,6 +54,8 @@ def start_download(
     use_cpu: bool = True,
     headers_json: str = "",
     force_hls: bool = False,
+    category: str = "",
+    tags_csv: str = "",
 ):
     main_module = _main_module()
     return main_module.start_download(
@@ -66,6 +74,8 @@ def start_download(
         use_cpu=use_cpu,
         headers_json=headers_json,
         force_hls=force_hls,
+        category=category,
+        tags_csv=tags_csv,
     )
 
 
@@ -88,6 +98,8 @@ def start_download_post(payload: DownloadRequest):
         use_cpu=payload.use_cpu,
         headers_json=payload.headers_json,
         force_hls=payload.force_hls,
+        category=payload.category,
+        tags_csv=payload.tags_csv,
     )
 
 

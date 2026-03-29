@@ -226,7 +226,14 @@ function sortSourcesByAudioPreference(sources: StreamSource[], audio: AudioPrefe
 }
 
 export async function fetchConsumetHealth(): Promise<ConsumetHealth> {
-  return await getCachedJson<ConsumetHealth>("consumet:health", "/consumet/health", 120_000, true);
+  const health = await getCachedJson<ConsumetHealth>("consumet:health", "/consumet/health", 120_000, true);
+  if (!health.healthy && /all connection attempts failed|consumet request failed/i.test(health.message || "")) {
+    return {
+      ...health,
+      message: "Consumet is unavailable right now, so GRABIX will use its built-in anime fallbacks.",
+    };
+  }
+  return health;
 }
 
 export async function fetchConsumetAnimeDiscover(

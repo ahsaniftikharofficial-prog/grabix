@@ -837,6 +837,10 @@ function AnimeDetail({
           });
         }
         if (!source) {
+          const movieBoxSources = await resolveMovieBoxAnimeSources(episode);
+          source = movieBoxSources[0] ?? null;
+        }
+        if (!source) {
           setDownloadQualityOptions([]);
           setDownloadSubtitleTracks([]);
           setDownloadIncludeSubtitle(false);
@@ -1021,7 +1025,11 @@ function AnimeDetail({
         : getAnimeSources(tmdbId);
   };
 
-  const resolveHindiMovieBoxSources = async (targetEpisode = episode): Promise<StreamSource[]> => {
+  const resolveMovieBoxAnimeSources = async (
+    targetEpisode = episode,
+    options?: { preferHindi?: boolean }
+  ): Promise<StreamSource[]> => {
+    const preferHindi = Boolean(options?.preferHindi);
     const titleCandidates = expandAnimeTitles(anime.title, anime.alt_title).slice(0, 6);
     const movieBoxMatches = new Map<string, { id: string; title?: string; year?: number; moviebox_media_type?: "movie" | "series"; is_hindi?: boolean }>();
 
@@ -1033,7 +1041,7 @@ function AnimeDetail({
           perPage: 8,
           mediaType: "anime",
           animeOnly: true,
-          preferHindi: true,
+          preferHindi,
           sortBy: "search",
         });
         for (const item of result.items) {
@@ -1045,7 +1053,7 @@ function AnimeDetail({
     }
 
     const rankedMovieBoxMatches = [...movieBoxMatches.values()].sort((left, right) => {
-      if (Boolean(left.is_hindi) !== Boolean(right.is_hindi)) {
+      if (preferHindi && Boolean(left.is_hindi) !== Boolean(right.is_hindi)) {
         return left.is_hindi ? -1 : 1;
       }
       return 0;
@@ -1095,6 +1103,9 @@ function AnimeDetail({
     return [];
   };
 
+  const resolveHindiMovieBoxSources = async (targetEpisode = episode): Promise<StreamSource[]> =>
+    resolveMovieBoxAnimeSources(targetEpisode, { preferHindi: true });
+
   const resolvePlayableSources = async (targetEpisode = episode): Promise<StreamSource[]> => {
     const normalizedAudio = normalizeAudioPreference(audio);
 
@@ -1105,6 +1116,11 @@ function AnimeDetail({
     const resolvedSource = await resolveAnimeSourceViaBackend(targetEpisode, "play");
     if (resolvedSource) {
       return [resolvedSource];
+    }
+
+    const movieBoxSources = await resolveMovieBoxAnimeSources(targetEpisode);
+    if (movieBoxSources.length > 0) {
+      return movieBoxSources;
     }
 
     const fallbackSources = await buildFallbackSources(targetEpisode);
@@ -1317,6 +1333,8 @@ function AnimeDetail({
         thumbnail: anime.image,
         headers: selectedOption.headers,
         forceHls: selectedOption.forceHls,
+        category: "Anime",
+        tags: [languageLabel, isMovie ? "Movie" : selectionLabel],
       });
       if (downloadIncludeSubtitle && downloadSubtitleTracks[0]?.url) {
         const subtitleTitle = isMovie
@@ -1326,6 +1344,8 @@ function AnimeDetail({
           url: downloadSubtitleTracks[0].url,
           title: subtitleTitle,
           headers: downloadSubtitleTracks[0].headers,
+          category: "Anime",
+          tags: ["Subtitle", isMovie ? "Movie" : selectionLabel],
         });
       }
       setDownloadDialogOpen(false);
@@ -1362,6 +1382,8 @@ function AnimeDetail({
         url: subtitleTrack.url,
         title: isMovie ? `${title} Subtitle` : `${title} EP ${episode} Subtitle`,
         headers: subtitleTrack.headers,
+        category: "Anime",
+        tags: ["Subtitle", isMovie ? "Movie" : selectionLabel],
       });
       setDownloadDialogOpen(false);
     } catch (error) {

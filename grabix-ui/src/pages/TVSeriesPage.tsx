@@ -448,6 +448,8 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
         thumbnail: poster,
         headers: selectedOption.headers,
         forceHls: selectedOption.forceHls,
+        category: "TV Series",
+        tags: [episodeLabel, downloadLanguage === "hindi" ? "Hindi" : "English"],
       });
       setDownloadDialogOpen(false);
     } catch (error) {
