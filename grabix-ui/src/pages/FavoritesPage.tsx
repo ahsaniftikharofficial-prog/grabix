@@ -2,21 +2,15 @@ import { useState } from "react";
 import { IconPlay, IconX } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import VidSrcPlayer from "../components/VidSrcPlayer";
-import { useContentFilter } from "../context/ContentFilterContext";
 import { FavItem, useFavorites } from "../context/FavoritesContext";
-import { filterAdultContent } from "../lib/contentFilter";
 import { fetchMovieBoxSources, getAnimeSources, getMovieSources, getTvSources, type StreamSource } from "../lib/streamProviders";
 
 export default function FavoritesPage() {
-  const { adultContentBlocked } = useContentFilter();
   const { favorites, remove } = useFavorites();
   const [filter, setFilter] = useState<"all" | "movie" | "anime" | "manga" | "series">("all");
   const [player, setPlayer] = useState<{ title: string; poster?: string; sources: StreamSource[]; mediaType: "movie" | "tv" } | null>(null);
 
-  const filtered = filterAdultContent(
-    filter === "all" ? favorites : favorites.filter(favorite => favorite.type === filter),
-    adultContentBlocked
-  );
+  const filtered = filter === "all" ? favorites : favorites.filter(favorite => favorite.type === filter);
 
   const playItem = async (item: FavItem) => {
     let sources: StreamSource[] = [];

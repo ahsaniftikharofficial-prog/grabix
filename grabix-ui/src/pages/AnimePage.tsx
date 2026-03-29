@@ -4,9 +4,7 @@ import { IconHeart } from "../components/Icons";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import { useFavorites } from "../context/FavoritesContext";
-import { useContentFilter } from "../context/ContentFilterContext";
-import { queueSubtitleDownload, queueVideoDownload, resolveSourceDownloadOptions } from "../lib/downloads";
-import { filterAdultContent } from "../lib/contentFilter";
+import { queueVideoDownload, resolveSourceDownloadOptions } from "../lib/downloads";
 import {
   fetchConsumetAnimeDiscover,
   fetchConsumetAnimeEpisodes,
@@ -253,7 +251,6 @@ async function resolveTmdbEpisodeNumber(tmdbId: number | null, episodeNumber: nu
 }
 
 export default function AnimePage() {
-  const { adultContentBlocked } = useContentFilter();
   const [tab, setTab] = useState<Tab>("trending");
   const [trendingPeriod, setTrendingPeriod] = useState<TrendingPeriod>("daily");
   const [items, setItems] = useState<AnimeCardItem[]>([]);
@@ -296,7 +293,6 @@ export default function AnimePage() {
     { id: "seasonal", label: "Top Airing" },
     { id: "movie", label: "Movies" },
   ];
-  const filteredItems = useMemo(() => filterAdultContent(items, adultContentBlocked), [items, adultContentBlocked]);
 
   const loadDiscover = async (nextTab: Tab, nextPage = 1, nextPeriod: TrendingPeriod = trendingPeriod) => {
     setLoading(true);
@@ -459,12 +455,12 @@ export default function AnimePage() {
       )}
 
       <div ref={scrollRef} onScroll={handleScroll} style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
-        {loading && filteredItems.length === 0 ? <LoadingGrid /> : filteredItems.length === 0 ? (
+        {loading && items.length === 0 ? <LoadingGrid /> : items.length === 0 ? (
           <div className="empty-state"><IconSearch size={36} /><p>No results</p></div>
         ) : (
           <>
             <div style={{ display: "grid", gridTemplateColumns: tab === "trending" ? "repeat(auto-fit, minmax(190px, 1fr))" : "repeat(auto-fill, minmax(150px, 1fr))", gap: tab === "trending" ? 16 : 14 }}>
-              {filteredItems.map((anime, index) => <AnimeCard key={`${anime.provider}-${anime.id}`} anime={anime} activeTab={tab} featured={tab === "trending"} rank={index + 1} onClick={() => setDetail(anime)} />)}
+              {items.map((anime, index) => <AnimeCard key={`${anime.provider}-${anime.id}`} anime={anime} activeTab={tab} featured={tab === "trending"} rank={index + 1} onClick={() => setDetail(anime)} />)}
             </div>
             <div ref={bottomRef} style={{ height: 24 }} />
           </>
@@ -608,8 +604,6 @@ function AnimeDetail({
   const [downloadServer, setDownloadServer] = useState<AnimeServerOption>("hd-1");
   const [downloadQuality, setDownloadQuality] = useState("source");
   const [downloadQualityOptions, setDownloadQualityOptions] = useState<Array<{ id: string; label: string; url: string; headers?: Record<string, string>; forceHls?: boolean }>>([]);
-  const [downloadSubtitleTracks, setDownloadSubtitleTracks] = useState<Array<{ label: string; url: string; headers?: Record<string, string> }>>([]);
-  const [downloadIncludeSubtitle, setDownloadIncludeSubtitle] = useState(false);
   const [downloadDialogLoading, setDownloadDialogLoading] = useState(false);
   const [downloadDialogError, setDownloadDialogError] = useState("");
   const resolvedSourceCacheRef = useRef<Record<string, StreamSource>>({});
@@ -772,20 +766,12 @@ function AnimeDetail({
           const sources = await resolveHindiMovieBoxSources(episode);
           if (sources.length === 0) {
             setDownloadQualityOptions([]);
-            setDownloadSubtitleTracks([]);
-            setDownloadIncludeSubtitle(false);
             setDownloadQuality("");
             setDownloadDialogError("No Hindi source available. Try downloading in English.");
             return;
           }
           const options = await resolveSourceDownloadOptions(sources);
           setDownloadQualityOptions(options);
-          setDownloadSubtitleTracks((sources[0]?.subtitles ?? []).filter((track) => Boolean(track.url)).map((track) => ({
-            label: track.label,
-            url: track.url,
-            headers: sources[0]?.requestHeaders,
-          })));
-          setDownloadIncludeSubtitle(false);
           setDownloadQuality(options[0]?.id || "");
           return;
         }
@@ -802,21 +788,7 @@ function AnimeDetail({
           });
         }
         if (!source) {
-          source = await resolveAnimeSourceViaBackend(episode, "play", {
-            audio: requestedAudio,
-            server: requestedServer,
-          });
-        }
-        if (!source && requestedServer !== "auto") {
-          source = await resolveAnimeSourceViaBackend(episode, "play", {
-            audio: requestedAudio,
-            server: "auto",
-          });
-        }
-        if (!source) {
           setDownloadQualityOptions([]);
-          setDownloadSubtitleTracks([]);
-          setDownloadIncludeSubtitle(false);
           setDownloadQuality("");
           setDownloadDialogError("No downloadable source was found for that selection.");
           return;
@@ -824,27 +796,14 @@ function AnimeDetail({
         const options = await resolveSourceDownloadOptions([source]);
         if (options.length === 0) {
           setDownloadQualityOptions([]);
-          setDownloadSubtitleTracks([]);
-          setDownloadIncludeSubtitle(false);
           setDownloadQuality("");
           setDownloadDialogError("No downloadable quality was found for that selection.");
           return;
         }
         setDownloadQualityOptions(options);
-        const subtitles = (source.subtitles ?? [])
-          .filter((track) => Boolean(track.url))
-          .map((track) => ({
-            label: track.label,
-            url: track.url,
-            headers: source?.requestHeaders,
-          }));
-        setDownloadSubtitleTracks(subtitles);
-        setDownloadIncludeSubtitle(requestedLanguage === "sub" && subtitles.length > 0);
         setDownloadQuality(options[0]?.id || "");
       } catch (error) {
         setDownloadQualityOptions([]);
-        setDownloadSubtitleTracks([]);
-        setDownloadIncludeSubtitle(false);
         setDownloadQuality("");
         setDownloadDialogError(error instanceof Error ? error.message : "Download options could not be loaded.");
       } finally {
@@ -1161,21 +1120,9 @@ function AnimeDetail({
 
     const warm = async () => {
       try {
-        const preferredServers: AnimeServerOption[] = server === "auto" ? ["hd-1", "hd-2"] : [server];
-        await Promise.allSettled([
-          resolveAnimeSourceViaBackend(episode, "play"),
-          ...preferredServers.map((preferredServer) =>
-            resolveAnimeSourceViaBackend(episode, "play", {
-              audio: normalizedAudio,
-              server: preferredServer,
-            })
-          ),
-        ]);
+        await resolveAnimeSourceViaBackend(episode, "play");
         if (!cancelled && totalEpisodes > episode) {
-          await resolveAnimeSourceViaBackend(episode + 1, "play", {
-            audio: normalizedAudio,
-            server,
-          });
+          await resolveAnimeSourceViaBackend(episode + 1, "play");
         }
       } catch {
         // Warm the cache quietly; handle real errors on user action.
@@ -1276,10 +1223,6 @@ function AnimeDetail({
       setDownloadDialogError("Choose a quality before downloading.");
       return;
     }
-    if (downloadLanguage === "sub" && downloadIncludeSubtitle && downloadSubtitleTracks.length === 0) {
-      setDownloadDialogError("No subtitle file is available for this episode.");
-      return;
-    }
 
     const languageLabel = downloadLanguage === "hindi" ? "Hindi" : downloadLanguage === "dub" ? "Dub" : "Sub";
     const formattedTitle = isMovie
@@ -1295,16 +1238,6 @@ function AnimeDetail({
         headers: selectedOption.headers,
         forceHls: selectedOption.forceHls,
       });
-      if (downloadIncludeSubtitle && downloadSubtitleTracks[0]?.url) {
-        const subtitleTitle = isMovie
-          ? `${title} Subtitle`
-          : `${title} EP ${episode} Subtitle`;
-        await queueSubtitleDownload({
-          url: downloadSubtitleTracks[0].url,
-          title: subtitleTitle,
-          headers: downloadSubtitleTracks[0].headers,
-        });
-      }
       setDownloadDialogOpen(false);
     } catch (error) {
       setDownloadDialogError(error instanceof Error ? error.message : "Download could not be started.");
@@ -1319,34 +1252,9 @@ function AnimeDetail({
       setDownloadServer("auto");
       setDownloadQuality("");
       setDownloadQualityOptions([]);
-      setDownloadSubtitleTracks([]);
-      setDownloadIncludeSubtitle(!hasHindiFallback);
       setDownloadDialogError("");
       setDownloadDialogOpen(true);
     };
-
-  const handleSubtitleOnlyDownload = async () => {
-    if (downloading) return;
-    const subtitleTrack = downloadSubtitleTracks[0];
-    if (!subtitleTrack?.url) {
-      setDownloadDialogError("No subtitle file is available for this episode.");
-      return;
-    }
-
-    setDownloading(true);
-    try {
-      await queueSubtitleDownload({
-        url: subtitleTrack.url,
-        title: isMovie ? `${title} Subtitle` : `${title} EP ${episode} Subtitle`,
-        headers: subtitleTrack.headers,
-      });
-      setDownloadDialogOpen(false);
-    } catch (error) {
-      setDownloadDialogError(error instanceof Error ? error.message : "Subtitle download could not be started.");
-    } finally {
-      setDownloading(false);
-    }
-  };
 
   const handleTrailer = () => {
     if (!trailerUrl) {
@@ -1507,38 +1415,6 @@ function AnimeDetail({
         onSelectQuality={setDownloadQuality}
         loading={downloadDialogLoading || downloading}
         error={downloadDialogError}
-        extraContent={
-          <div style={{ display: "grid", gap: 10 }}>
-            {(downloadLanguage === "sub" || downloadSubtitleTracks.length > 0) && (
-              <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: "var(--text-primary)" }}>
-                <input
-                  type="checkbox"
-                  checked={downloadIncludeSubtitle}
-                  disabled={downloadLanguage === "sub" || downloadSubtitleTracks.length === 0}
-                  onChange={(event) => setDownloadIncludeSubtitle(event.target.checked)}
-                />
-                <span>
-                  {downloadLanguage === "sub"
-                    ? "Download subtitle too (required for Sub)"
-                    : "Download subtitle too"}
-                </span>
-              </label>
-            )}
-            {downloadSubtitleTracks.length > 0 && (
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 12px", borderRadius: 12, border: "1px solid var(--border)", background: "var(--bg-surface2)" }}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>Subtitle file</div>
-                  <div style={{ fontSize: 12, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {downloadSubtitleTracks[0].label || "Episode subtitle"}
-                  </div>
-                </div>
-                <button className="btn btn-ghost" type="button" onClick={() => void handleSubtitleOnlyDownload()} disabled={downloadDialogLoading || downloading}>
-                  Subtitle Only
-                </button>
-              </div>
-            )}
-          </div>
-        }
         onClose={() => setDownloadDialogOpen(false)}
         onConfirm={() => void confirmDownloadSelection()}
       />

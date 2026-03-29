@@ -77,7 +77,6 @@ export interface MovieBoxItem {
   section?: string;
   duration_seconds?: number;
   available_seasons?: number[];
-  season_episode_counts?: Record<number, number>;
 }
 
 export interface MovieBoxSection {
