@@ -8,6 +8,12 @@ export interface DownloadQueueRequest {
   forceHls?: boolean;
 }
 
+export interface SubtitleDownloadRequest {
+  url: string;
+  title?: string;
+  headers?: Record<string, string>;
+}
+
 export interface DownloadQualityOption {
   id: string;
   label: string;
@@ -107,6 +113,38 @@ export async function queueVideoDownload(request: DownloadQueueRequest): Promise
       detail = "";
     }
     throw new Error(detail || `Downloader returned ${response.status}`);
+  }
+
+  window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
+}
+
+export async function queueSubtitleDownload(request: SubtitleDownloadRequest): Promise<void> {
+  const params = new URLSearchParams({
+    url: request.url,
+    dl_type: "subtitle",
+  });
+
+  if (request.title?.trim()) params.set("title", request.title.trim());
+  if (request.headers && Object.keys(request.headers).length > 0) {
+    params.set("headers_json", JSON.stringify(request.headers));
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${BACKEND_API}/download?${params.toString()}`);
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message : "Subtitle downloader could not be reached.");
+  }
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const payload = (await response.json()) as { detail?: string };
+      detail = payload.detail || "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail || `Subtitle downloader returned ${response.status}`);
   }
 
   window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));

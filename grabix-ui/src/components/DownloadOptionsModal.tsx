@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { IconDownload, IconX } from "./Icons";
 
 interface Option {
@@ -21,6 +22,7 @@ interface Props {
   onSelectServer?: (value: string) => void;
   loading?: boolean;
   error?: string;
+  extraContent?: ReactNode;
   onClose: () => void;
   onConfirm: () => void;
   confirmLabel?: string;
@@ -41,6 +43,7 @@ export default function DownloadOptionsModal({
   onSelectServer,
   loading = false,
   error = "",
+  extraContent,
   onClose,
   onConfirm,
   confirmLabel = "Queue Download",
@@ -90,6 +93,7 @@ export default function DownloadOptionsModal({
           {renderOptionGroup("Language", languageOptions, selectedLanguage, onSelectLanguage)}
           {serverOptions.length > 0 && onSelectServer ? renderOptionGroup("Server", serverOptions, selectedServer, onSelectServer) : null}
           {renderOptionGroup("Quality", qualityOptions, selectedQuality, onSelectQuality)}
+          {extraContent ? <div style={{ marginBottom: 16 }}>{extraContent}</div> : null}
 
           {error ? <div style={{ fontSize: 12, color: "var(--text-danger)", marginBottom: 12 }}>{error}</div> : null}
 

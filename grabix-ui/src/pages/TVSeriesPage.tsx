@@ -4,7 +4,9 @@ import { IconHeart } from "../components/Icons";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import { useFavorites } from "../context/FavoritesContext";
+import { useContentFilter } from "../context/ContentFilterContext";
 import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
+import { filterAdultContent } from "../lib/contentFilter";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
 import { fetchMovieBoxSources, getTvSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
 
@@ -34,6 +36,7 @@ interface Show {
 type Tab = "trending" | "popular" | "toprated" | "onair";
 
 export default function TVSeriesPage() {
+  const { adultContentBlocked } = useContentFilter();
   const [tab, setTab] = useState<Tab>("trending");
   const [shows, setShows] = useState<Show[]>([]);
   const [loading, setLoading] = useState(true);
@@ -99,6 +102,7 @@ export default function TVSeriesPage() {
     { id: "toprated" as Tab, label: "Top Rated" },
     { id: "onair" as Tab, label: "On Air" },
   ];
+  const filteredShows = useMemo(() => filterAdultContent(shows, adultContentBlocked), [shows, adultContentBlocked]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
@@ -128,12 +132,12 @@ export default function TVSeriesPage() {
       )}
 
       <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
-        {loading && shows.length === 0 ? <LoadingGrid /> : shows.length === 0 ? (
+        {loading && filteredShows.length === 0 ? <LoadingGrid /> : filteredShows.length === 0 ? (
           <div className="empty-state"><IconSearch size={36} /><p>No results</p></div>
         ) : (
           <>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 }}>
-              {shows.map((show) => <SeriesCard key={show.id} show={show} onClick={() => setDetail(show)} />)}
+              {filteredShows.map((show) => <SeriesCard key={show.id} show={show} onClick={() => setDetail(show)} />)}
             </div>
             <div style={{ textAlign: "center", marginTop: 24 }}>
               <button className="btn btn-ghost" style={{ gap: 6 }} onClick={loadMore} disabled={loading}><IconRefresh size={14} /> Load more</button>

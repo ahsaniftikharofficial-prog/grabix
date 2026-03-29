@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { IconDownload, IconRefresh, IconSearch, IconX } from "../components/Icons";
+import { useContentFilter } from "../context/ContentFilterContext";
 import {
   fetchConsumetDomainInfo,
   fetchConsumetGenericRead,
@@ -12,6 +13,7 @@ import {
   type ConsumetNewsArticle,
   type ConsumetNewsItem,
 } from "../lib/consumetProviders";
+import { filterAdultContent } from "../lib/contentFilter";
 
 type ExploreTab = "news" | "books" | "comics" | "light-novels";
 
@@ -88,6 +90,7 @@ function LoadingGrid({ count = 8 }: { count?: number }) {
 }
 
 export default function ExplorePage() {
+  const { adultContentBlocked } = useContentFilter();
   const [tab, setTab] = useState<ExploreTab>("news");
   const [topic, setTopic] = useState("");
   const [searchText, setSearchText] = useState("");
@@ -112,6 +115,8 @@ export default function ExplorePage() {
     if (tab === "comics") return "Comics";
     return "Light Novels";
   }, [tab]);
+  const filteredNewsItems = useMemo(() => filterAdultContent(newsItems, adultContentBlocked), [newsItems, adultContentBlocked]);
+  const filteredMediaItems = useMemo(() => filterAdultContent(mediaItems, adultContentBlocked), [mediaItems, adultContentBlocked]);
 
   const loadNews = async (nextTopic: string) => {
     setLoading(true);
@@ -252,9 +257,9 @@ export default function ExplorePage() {
             <button className="btn btn-ghost" onClick={() => isNews ? void loadNews(topic) : setQuery((value) => value)}><IconRefresh size={14} /> Try Again</button>
           </div>
         ) : isNews ? (
-          newsItems.length === 0 ? <EmptyState label="No news articles were available." /> : (
+          filteredNewsItems.length === 0 ? <EmptyState label="No news articles were available." /> : (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 }}>
-              {newsItems.map((item) => (
+              {filteredNewsItems.map((item) => (
                 <button key={item.id} className="card" style={{ textAlign: "left", overflow: "hidden", cursor: "pointer", border: "1px solid var(--border)", background: "var(--bg-surface)" }} onClick={() => void openNews(item)}>
                   {item.image ? <img src={item.image} alt={item.title} style={{ width: "100%", height: 160, objectFit: "cover" }} /> : <div style={{ width: "100%", height: 160, background: "var(--bg-surface2)" }} />}
                   <div style={{ padding: "12px 14px" }}>
@@ -267,11 +272,11 @@ export default function ExplorePage() {
           )
         ) : !query ? (
           <EmptyState label={`Search ${title.toLowerCase()} to load results from ${provider}.`} />
-        ) : mediaItems.length === 0 ? (
+        ) : filteredMediaItems.length === 0 ? (
           <EmptyState label={`No ${title.toLowerCase()} results found.`} />
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 14 }}>
-            {mediaItems.map((item) => (
+            {filteredMediaItems.map((item) => (
               <button key={`${item.provider}-${item.id}`} className="card" style={{ overflow: "hidden", textAlign: "left", cursor: "pointer", border: "1px solid var(--border)", background: "var(--bg-surface)" }} onClick={() => void openMedia(item)}>
                 {item.image ? <img src={item.image} alt={item.title} style={{ width: "100%", height: 220, objectFit: "cover" }} /> : <div style={{ width: "100%", height: 220, background: "var(--bg-surface2)" }} />}
                 <div style={{ padding: "10px 12px" }}>

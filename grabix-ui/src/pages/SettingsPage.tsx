@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useTheme } from "../context/ThemeContext";
+import { useContentFilter } from "../context/ContentFilterContext";
 import { IconFolder, IconSun, IconMoon, IconInfo, IconCheck } from "../components/Icons";
 
 const API = "http://127.0.0.1:8000";
@@ -32,12 +33,14 @@ function Toggle({ value, onChange }: { value: boolean; onChange: (value: boolean
 
 export default function SettingsPage() {
   const { theme, toggle } = useTheme();
+  const { adultContentBlocked, unlockAdultContent } = useContentFilter();
   const [autoFetch, setAutoFetch] = useState(true);
   const [notifications, setNotifications] = useState(true);
   const [format, setFormat] = useState("mp4");
   const [quality, setQuality] = useState("1080p");
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState(false);
+  const [adultError, setAdultError] = useState("");
 
   useEffect(() => {
     fetch(`${API}/settings`)
@@ -74,6 +77,18 @@ export default function SettingsPage() {
         setSaveError(true);
         setTimeout(() => setSaveError(false), 3000);
       });
+  };
+
+  const handleAdultUnlock = async () => {
+    const password = window.prompt("Enter the adult content password");
+    if (!password) return;
+    setAdultError("");
+    try {
+      await unlockAdultContent(password);
+    } catch (error) {
+      setAdultError(error instanceof Error ? error.message : "Could not unlock adult content.");
+      window.setTimeout(() => setAdultError(""), 3000);
+    }
   };
 
   return (
@@ -132,6 +147,27 @@ export default function SettingsPage() {
           <SettingRow label="Download notifications" sub="Show a notification when a download completes">
             <Toggle value={notifications} onChange={setNotifications} />
           </SettingRow>
+        </div>
+
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>Content Filter</div>
+        <div className="card card-padded" style={{ marginBottom: 20 }}>
+          <SettingRow
+            label="Adult content"
+            sub={adultContentBlocked ? "Blocked across the app until you unlock it for this session." : "Unlocked for this session only. It will reset after app restart."}
+          >
+            {adultContentBlocked ? (
+              <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => void handleAdultUnlock()}>
+                Enable Adult Content
+              </button>
+            ) : (
+              <span style={{ fontSize: 12, color: "var(--text-success)", fontWeight: 600 }}>Unlocked for this session</span>
+            )}
+          </SettingRow>
+          {adultError && (
+            <div style={{ fontSize: 12, color: "var(--text-danger)", paddingTop: 10 }}>
+              {adultError}
+            </div>
+          )}
         </div>
 
         <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>About</div>

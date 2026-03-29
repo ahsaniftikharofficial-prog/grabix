@@ -6,7 +6,9 @@ import { IconSearch, IconStar, IconPlay, IconDownload, IconX, IconRefresh } from
 import { IconHeart } from "../components/Icons";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import { useFavorites } from "../context/FavoritesContext";
+import { useContentFilter } from "../context/ContentFilterContext";
 import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
+import { filterAdultContent } from "../lib/contentFilter";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import { fetchMovieBoxSources, getArchiveMovieSources, getMovieSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
@@ -32,6 +34,7 @@ interface ArchiveItem {
 type Tab = "trending" | "popular" | "toprated" | "free";
 
 export default function MoviesPage() {
+  const { adultContentBlocked } = useContentFilter();
   const [tab, setTab]       = useState<Tab>("trending");
   const [movies, setMovies] = useState<Movie[]>([]);
   const [free, setFree]     = useState<ArchiveItem[]>([]);
@@ -85,6 +88,8 @@ export default function MoviesPage() {
     { id: "toprated" as Tab, label: "Top Rated"},
     { id: "free"     as Tab, label: "Free Movies"},
   ];
+  const filteredMovies = filterAdultContent(movies, adultContentBlocked);
+  const filteredFree = filterAdultContent(free, adultContentBlocked);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
@@ -115,18 +120,18 @@ export default function MoviesPage() {
       )}
 
       <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
-        {loading && (tab === "free" ? free.length === 0 : movies.length === 0) ? <LoadingGrid /> :
+        {loading && (tab === "free" ? filteredFree.length === 0 : filteredMovies.length === 0) ? <LoadingGrid /> :
          tab === "free" ? (
           <>
             <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>Public domain films from Archive.org — free to stream and download legally.</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 }}>
-              {free.map(m => <FreeCard key={m.identifier} movie={m} onClick={() => setFD(m)} />)}
+              {filteredFree.map(m => <FreeCard key={m.identifier} movie={m} onClick={() => setFD(m)} />)}
             </div>
           </>
-         ) : movies.length === 0 ? <div className="empty-state"><IconSearch size={36} /><p>No results</p></div> : (
+         ) : filteredMovies.length === 0 ? <div className="empty-state"><IconSearch size={36} /><p>No results</p></div> : (
           <>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 }}>
-              {movies.map(m => <MovieCard key={m.id} movie={m} onClick={() => setDetail(m)} />)}
+              {filteredMovies.map(m => <MovieCard key={m.id} movie={m} onClick={() => setDetail(m)} />)}
             </div>
             <div style={{ textAlign: "center", marginTop: 24 }}>
               <button className="btn btn-ghost" style={{ gap: 6 }} onClick={loadMore} disabled={loading}><IconRefresh size={14} /> Load more</button>
