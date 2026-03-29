@@ -46,6 +46,15 @@ function buildMovieBoxSubtitleSearchTitle(item: MovieBoxItem, season?: number, e
   return `${item.title} season ${season ?? 1} episode ${episode ?? 1} subtitle English`.trim();
 }
 
+function toServerOption(option: DownloadQualityOption) {
+  const label = option.serverLabel || "MovieBox";
+  return {
+    id: option.serverId || label.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+    label,
+    help: "Download server",
+  };
+}
+
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
@@ -339,6 +348,7 @@ function MovieBoxDetail({
   );
   const [downloadQuality, setDownloadQuality] = useState("");
   const [downloadOptions, setDownloadOptions] = useState<DownloadQualityOption[]>([]);
+  const [downloadServer, setDownloadServer] = useState("");
   const [downloadError, setDownloadError] = useState("");
   const [playOptions, setPlayOptions] = useState<DownloadQualityOption[]>([]);
   const [playQuality, setPlayQuality] = useState("");
@@ -445,9 +455,9 @@ function MovieBoxDetail({
 
   const loadSourcesForLanguage = async (language: "english" | "hindi") => {
     const wantsHindi = language === "hindi";
-    const currentMatches = Boolean(details.is_hindi) === wantsHindi;
-    if (currentMatches) {
-      return await loadSources();
+    const currentSources = await loadSources().catch(() => [] as StreamSource[]);
+    if (currentSources.length > 0) {
+      return currentSources;
     }
 
     const result = await searchMovieBox({
@@ -463,7 +473,9 @@ function MovieBoxDetail({
     const matchedItem = (result.items ?? []).find((candidate) => {
       const sameYear = !details.year || !candidate.year || candidate.year === details.year;
       if (!sameYear) return false;
-      return wantsHindi ? Boolean(candidate.is_hindi) : !candidate.is_hindi;
+      if (!wantsHindi) return !candidate.is_hindi;
+      const normalized = `${candidate.title} ${candidate.corner || ""} ${candidate.country || ""}`.toLowerCase();
+      return Boolean(candidate.is_hindi) || normalized.includes("hindi") || normalized.includes("dub");
     }) ?? (result.items ?? []).find((candidate) => {
       const sameYear = !details.year || !candidate.year || candidate.year === details.year;
       return sameYear;
@@ -501,9 +513,12 @@ function MovieBoxDetail({
 
       const options = await resolveSourceDownloadOptions(sources);
       setDownloadOptions(options);
-      setDownloadQuality(options[0]?.id || "");
+      const defaultServer = options[0]?.serverId || "";
+      setDownloadServer(defaultServer);
+      setDownloadQuality(options.find((option) => option.serverId === defaultServer)?.id || options[0]?.id || "");
     } catch (error) {
       setDownloadOptions([]);
+      setDownloadServer("");
       setDownloadQuality("");
       setDownloadError(error instanceof Error ? error.message : "Could not load Movie Box download options.");
     } finally {
@@ -619,6 +634,7 @@ function MovieBoxDetail({
 
   const handleDownloadDialog = async () => {
     setDownloadLanguage(details.is_hindi ? "hindi" : "english");
+    setDownloadServer("");
     setDownloadQuality("");
     setDownloadOptions([]);
     setDownloadError("");
@@ -626,7 +642,7 @@ function MovieBoxDetail({
   };
 
   const confirmDownload = async () => {
-    const selectedOption = downloadOptions.find((option) => option.id === downloadQuality);
+    const selectedOption = visibleDownloadOptions.find((option) => option.id === downloadQuality);
     if (!selectedOption) {
       setDownloadError("Choose a quality before downloading.");
       return;
@@ -658,6 +674,19 @@ function MovieBoxDetail({
   const seasonNumbers = details.available_seasons?.length ? details.available_seasons : [1];
   const totalEpisodes = details.season_episode_counts?.[season] || Math.max(1, Math.min(100, episode));
   const episodeOptions = Array.from({ length: totalEpisodes }, (_, index) => index + 1);
+  const serverOptions = Array.from(
+    new Map(downloadOptions.map((option) => [option.serverId || option.serverLabel || "moviebox", toServerOption(option)])).values()
+  );
+  const visibleDownloadOptions = downloadServer
+    ? downloadOptions.filter((option) => option.serverId === downloadServer)
+    : downloadOptions;
+
+  useEffect(() => {
+    if (!downloadDialogOpen) return;
+    if (!visibleDownloadOptions.some((option) => option.id === downloadQuality)) {
+      setDownloadQuality(visibleDownloadOptions[0]?.id || "");
+    }
+  }, [downloadDialogOpen, downloadServer, downloadQuality, visibleDownloadOptions]);
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
@@ -800,7 +829,14 @@ function MovieBoxDetail({
         ]}
         selectedLanguage={downloadLanguage}
         onSelectLanguage={(value) => setDownloadLanguage(value as "english" | "hindi")}
-        qualityOptions={downloadOptions.map((option) => ({ id: option.id, label: option.label }))}
+        serverOptions={serverOptions}
+        selectedServer={downloadServer}
+        onSelectServer={setDownloadServer}
+        qualityOptions={visibleDownloadOptions.map((option) => ({
+          id: option.id,
+          label: option.label,
+          help: option.sizeLabel ? `Estimated size: ${option.sizeLabel}` : undefined,
+        }))}
         selectedQuality={downloadQuality}
         onSelectQuality={setDownloadQuality}
         loading={sending}

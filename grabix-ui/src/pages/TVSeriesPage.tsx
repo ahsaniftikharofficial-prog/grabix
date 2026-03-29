@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { IconDownload, IconPlay, IconRefresh, IconSearch, IconStar, IconX } from "../components/Icons";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { IconDownload, IconPlay, IconSearch, IconStar, IconX } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import VidSrcPlayer from "../components/VidSrcPlayer";
@@ -8,13 +8,14 @@ import { useContentFilter } from "../context/ContentFilterContext";
 import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
 import { filterAdultContent } from "../lib/contentFilter";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
+import { BACKEND_API } from "../lib/api";
 import { fetchMovieBoxSources, getTvSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
 
 const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzdWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
 const TMDB = "https://api.themoviedb.org/3";
 const IMG_BASE = "https://image.tmdb.org/t/p/w500";
 const IMG_LG = "https://image.tmdb.org/t/p/w780";
-const GRABIX = "http://127.0.0.1:8000";
+const GRABIX = BACKEND_API;
 const HEADERS = { Authorization: `Bearer ${TMDB_TOKEN}`, "Content-Type": "application/json" };
 
 interface Show {
@@ -45,6 +46,8 @@ export default function TVSeriesPage() {
   const [detail, setDetail] = useState<Show | null>(null);
   const [player, setPlayer] = useState<{ title: string; subtitle?: string; poster?: string; sources: StreamSource[] } | null>(null);
   const [page, setPage] = useState(1);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const tf = async (endpoint: string) => (await fetch(`${TMDB}${endpoint}`, { headers: HEADERS })).json();
 
@@ -89,6 +92,22 @@ export default function TVSeriesPage() {
     fetchTMDB(tab, 1);
   }, [tab, query]);
 
+  useEffect(() => {
+    const root = scrollRef.current;
+    const node = bottomRef.current;
+    if (!root || !node) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting) && !loading) {
+          loadMore();
+        }
+      },
+      { root, rootMargin: "240px 0px" }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [loading, page, query, tab]);
+
   const loadMore = () => {
     const nextPage = page + 1;
     setPage(nextPage);
@@ -131,7 +150,7 @@ export default function TVSeriesPage() {
         </div>
       )}
 
-      <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
+      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
         {loading && filteredShows.length === 0 ? <LoadingGrid /> : filteredShows.length === 0 ? (
           <div className="empty-state"><IconSearch size={36} /><p>No results</p></div>
         ) : (
@@ -139,9 +158,7 @@ export default function TVSeriesPage() {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 }}>
               {filteredShows.map((show) => <SeriesCard key={show.id} show={show} onClick={() => setDetail(show)} />)}
             </div>
-            <div style={{ textAlign: "center", marginTop: 24 }}>
-              <button className="btn btn-ghost" style={{ gap: 6 }} onClick={loadMore} disabled={loading}><IconRefresh size={14} /> Load more</button>
-            </div>
+            <div ref={bottomRef} style={{ height: 24 }} />
           </>
         )}
       </div>

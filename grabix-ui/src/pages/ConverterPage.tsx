@@ -2,8 +2,8 @@ import { useState, useRef } from "react";
 import {
   IconConvert, IconFolder, IconX, IconAlert, IconUpload,
 } from "../components/Icons";
-
-const API = "http://127.0.0.1:8000";
+import { BACKEND_API } from "../lib/api";
+const API = BACKEND_API;
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 

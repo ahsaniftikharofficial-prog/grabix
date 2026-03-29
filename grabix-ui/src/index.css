@@ -546,6 +546,7 @@ html, body, #root {
   right: 28px;
   bottom: 26px;
   pointer-events: auto;
+  transition: transform 0.22s ease, opacity 0.22s ease;
 }
 .player-controls-wrap.compact {
   left: auto;
@@ -569,6 +570,11 @@ html, body, #root {
   border-radius: 999px;
   background: rgba(255,255,255,0.24);
   outline: none;
+  transition: transform 0.18s ease, background 0.18s ease;
+}
+.player-progress-range:hover {
+  transform: scaleY(1.35);
+  background: rgba(255,255,255,0.34);
 }
 .player-progress-range::-webkit-slider-thumb {
   appearance: none;
@@ -578,6 +584,10 @@ html, body, #root {
   background: #fff;
   border: none;
   cursor: pointer;
+  transition: transform 0.16s ease;
+}
+.player-progress-range:active::-webkit-slider-thumb {
+  transform: scale(1.14);
 }
 .player-control-row {
   display: flex;
@@ -670,6 +680,10 @@ html, body, #root {
   box-shadow: 0 18px 44px rgba(0,0,0,0.34);
   backdrop-filter: blur(18px);
 }
+.player-popover-animated {
+  animation: playerPopoverIn 180ms ease;
+  transform-origin: bottom left;
+}
 .player-controls-wrap.compact .player-popover {
   left: auto;
   right: 0;
@@ -749,6 +763,17 @@ html, body, #root {
   right: 24px;
   left: auto;
   bottom: auto;
+}
+
+@keyframes playerPopoverIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 @media (max-width: 720px) {

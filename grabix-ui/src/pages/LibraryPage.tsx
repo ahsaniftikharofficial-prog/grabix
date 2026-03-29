@@ -8,8 +8,8 @@ import {
   IconFolder, IconTrash, IconVideo, IconAudio, IconImage,
   IconClock, IconCheck, IconRefresh, IconChevronDown, IconX,
 } from "../components/Icons";
-
-const API = "http://127.0.0.1:8000";
+import { BACKEND_API } from "../lib/api";
+const API = BACKEND_API;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface LibItem {

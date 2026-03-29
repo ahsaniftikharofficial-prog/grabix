@@ -6,6 +6,7 @@ import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import { useFavorites } from "../context/FavoritesContext";
 import { useContentFilter } from "../context/ContentFilterContext";
 import { queueSubtitleDownload, queueVideoDownload, resolveSourceDownloadOptions } from "../lib/downloads";
+import { BACKEND_API } from "../lib/api";
 import { filterAdultContent } from "../lib/contentFilter";
 import {
   fetchConsumetAnimeDiscover,
@@ -25,7 +26,7 @@ import { fetchMovieBoxSources, getAnimeEpisodeSources, getAnimeSources, searchMo
 const JIKAN = "https://api.jikan.moe/v4";
 const TMDB = "https://api.themoviedb.org/3";
 const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzYWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
-const GRABIX = "http://127.0.0.1:8000";
+const GRABIX = BACKEND_API;
 
 function buildPlaybackProxyUrl(url: string, headers?: Record<string, string>): string {
   if (!url) return url;
@@ -129,6 +130,22 @@ function dedupeItems(items: AnimeCardItem[]): AnimeCardItem[] {
 
 async function searchJikanAnime(query: string, page = 1): Promise<AnimeCardItem[]> {
   const response = await fetch(`${JIKAN}/anime?q=${encodeURIComponent(query)}&page=${page}&limit=20&sfw=true`);
+  const data = (await response.json()) as { data?: LegacyAnime[] };
+  return (data.data ?? []).map(mapLegacyAnime);
+}
+
+async function fetchJikanDiscover(tab: Tab, page = 1): Promise<AnimeCardItem[]> {
+  const path =
+    tab === "popular"
+      ? `/top/anime?filter=bypopularity&page=${page}&limit=20`
+      : tab === "toprated"
+        ? `/top/anime?filter=favorite&page=${page}&limit=20`
+        : tab === "seasonal"
+          ? `/seasons/now?page=${page}&limit=20`
+          : tab === "movie"
+            ? `/top/anime?type=movie&page=${page}&limit=20`
+            : `/top/anime?page=${page}&limit=20`;
+  const response = await fetch(`${JIKAN}${path}`);
   const data = (await response.json()) as { data?: LegacyAnime[] };
   return (data.data ?? []).map(mapLegacyAnime);
 }
@@ -305,8 +322,14 @@ export default function AnimePage() {
       setHasMore(nextItems.length > 0);
       setItems((prev) => (nextPage === 1 ? nextItems : dedupeItems([...prev, ...nextItems])));
     } catch {
-      setItems([]);
-      setHasMore(false);
+      try {
+        const fallbackItems = await fetchJikanDiscover(nextTab, nextPage);
+        setHasMore(fallbackItems.length > 0);
+        setItems((prev) => (nextPage === 1 ? fallbackItems : dedupeItems([...prev, ...fallbackItems])));
+      } catch {
+        setItems([]);
+        setHasMore(false);
+      }
     } finally {
       setLoading(false);
     }

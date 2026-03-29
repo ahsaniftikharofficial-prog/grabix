@@ -18,16 +18,35 @@ import {
   fetchSeasonalManga,
   fetchTrendingManga,
   searchManga,
+  toMangaImageProxy,
   type MangaChapter,
   type MangaDetailsResponse,
   type MangaDiscoveryItem,
 } from "../lib/mangaProviders";
 import { useContentFilter } from "../context/ContentFilterContext";
 import { filterAdultContent } from "../lib/contentFilter";
-import { IconSearch, IconStar, IconX } from "../components/Icons";
+import { IconDownload, IconFolder, IconSearch, IconStar, IconX } from "../components/Icons";
+import { BACKEND_API } from "../lib/api";
+import {
+  getOfflineChapterPages,
+  getOfflineMangaKey,
+  getOfflineMangaRecord,
+  saveOfflineChapterPages,
+  saveOfflineMangaRecord,
+  type OfflineMangaRecord,
+} from "../lib/mangaOffline";
 
 type ReaderState = { chapterIndex: number; chapter: MangaChapter };
 type ChapterSource = "auto" | "mangadex" | "consumet" | "comick";
+type DownloadState = {
+  status: "idle" | "downloading" | "done" | "error";
+  message?: string;
+  progress?: number;
+};
+
+function chapterDownloadKey(mangaKey: string, chapterId: string): string {
+  return `${mangaKey}:${chapterId}`;
+}
 
 const LANGUAGE_OPTIONS = [
   { label: "English", value: "en" },
@@ -154,9 +173,38 @@ function EmptyState({ label }: { label: string }) {
   );
 }
 
-function MangaCard({ item, onClick }: { item: MangaDiscoveryItem; onClick: () => void }) {
+function MangaReaderImage({ src, alt, index, total, onLoadNext }: { src: string; alt: string; index: number; total: number; onLoadNext: () => void }) {
   return (
-    <button className="card" onClick={onClick} style={{ overflow: "hidden", textAlign: "left", cursor: "pointer", border: "1px solid var(--border)", background: "var(--bg-surface)" }}>
+    <div style={{ width: "100%", maxWidth: 900 }}>
+      <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>Page {index + 1} / {total}</div>
+      <img
+        src={src}
+        alt={alt}
+        loading={index < 2 ? "eager" : "lazy"}
+        decoding="async"
+        referrerPolicy="no-referrer"
+        style={{ width: "100%", display: "block", borderRadius: 12, border: "1px solid var(--border)", background: "var(--bg-surface2)" }}
+        onLoad={onLoadNext}
+        onError={(event) => { (event.target as HTMLImageElement).style.opacity = "0.35"; }}
+      />
+    </div>
+  );
+}
+
+function MangaCard({
+  item,
+  onOpen,
+  onRead,
+  onDownload,
+}: {
+  item: MangaDiscoveryItem;
+  onOpen: () => void;
+  onRead: () => void;
+  onDownload: () => void;
+}) {
+  return (
+    <div className="card" style={{ overflow: "hidden", textAlign: "left", cursor: "pointer", border: "1px solid var(--border)", background: "var(--bg-surface)" }}>
+      <div role="button" tabIndex={0} onClick={onOpen} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onOpen(); }} style={{ outline: "none" }}>
       <div style={{ position: "relative" }}>
         <img
           src={item.cover_image || coverFallback(item.title)}
@@ -180,11 +228,36 @@ function MangaCard({ item, onClick }: { item: MangaDiscoveryItem; onClick: () =>
           {item.year ? <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{item.year}</span> : null}
         </div>
       </div>
-    </button>
+      </div>
+      <div style={{ padding: "0 12px 12px" }}>
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <button className="btn btn-primary" style={{ flex: 1, justifyContent: "center", height: 32 }} onClick={onRead}>
+            Read
+          </button>
+          <button className="btn btn-ghost" style={{ flex: 1, justifyContent: "center", height: 32 }} onClick={onDownload}>
+            Chapters
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
-function HorizontalRail({ title, subtitle, items, onOpen }: { title: string; subtitle?: string; items: MangaDiscoveryItem[]; onOpen: (item: MangaDiscoveryItem) => void }) {
+function HorizontalRail({
+  title,
+  subtitle,
+  items,
+  onOpen,
+  onRead,
+  onDownload,
+}: {
+  title: string;
+  subtitle?: string;
+  items: MangaDiscoveryItem[];
+  onOpen: (item: MangaDiscoveryItem) => void;
+  onRead: (item: MangaDiscoveryItem) => void;
+  onDownload: (item: MangaDiscoveryItem) => void;
+}) {
   return (
     <section>
       <div style={{ marginBottom: 12 }}>
@@ -192,7 +265,17 @@ function HorizontalRail({ title, subtitle, items, onOpen }: { title: string; sub
         {subtitle ? <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>{subtitle}</div> : null}
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(165px, 1fr))", gap: 14 }}>
-        {items.map((item) => <MangaCard key={`${title}-${item.anilist_id ?? item.mangadex_id ?? item.title}`} item={item} onClick={() => onOpen(item)} />)}
+        {items.map((item) => {
+          return (
+            <MangaCard
+              key={`${title}-${item.anilist_id ?? item.mangadex_id ?? item.title}`}
+              item={item}
+              onOpen={() => onOpen(item)}
+              onRead={() => onRead(item)}
+              onDownload={() => onDownload(item)}
+            />
+          );
+        })}
       </div>
     </section>
   );
@@ -228,6 +311,9 @@ export default function MangaPage() {
   const [readerError, setReaderError] = useState<string | null>(null);
   const [recommendations, setRecommendations] = useState<MangaDiscoveryItem[]>([]);
   const [recommendationsLoading, setRecommendationsLoading] = useState(false);
+  const [offlineRecord, setOfflineRecord] = useState<OfflineMangaRecord | null>(null);
+  const [chapterDownloadStates, setChapterDownloadStates] = useState<Record<string, DownloadState>>({});
+  const [downloadedChapterKeys, setDownloadedChapterKeys] = useState<Set<string>>(new Set());
 
   const season = useMemo(() => currentSeason(), []);
   const seasonYear = useMemo(() => new Date().getFullYear(), []);
@@ -237,6 +323,225 @@ export default function MangaPage() {
   const filteredConsumetHot = useMemo(() => filterAdultContent(consumetHot, adultContentBlocked), [consumetHot, adultContentBlocked]);
   const filteredSearchResults = useMemo(() => filterAdultContent(searchResults, adultContentBlocked), [searchResults, adultContentBlocked]);
   const filteredRecommendations = useMemo(() => filterAdultContent(recommendations, adultContentBlocked), [recommendations, adultContentBlocked]);
+  const visibleLibraryItems = useMemo(
+    () => dedupeMangaItems([...filteredTrending, ...filteredSeasonal, ...filteredComickHot, ...filteredConsumetHot, ...filteredSearchResults, ...filteredRecommendations]),
+    [filteredTrending, filteredSeasonal, filteredComickHot, filteredConsumetHot, filteredSearchResults, filteredRecommendations]
+  );
+
+  const updateChapterDownloadState = (mangaKey: string, chapterId: string, next: DownloadState) => {
+    const key = chapterDownloadKey(mangaKey, chapterId);
+    setChapterDownloadStates((current) => ({ ...current, [key]: next }));
+  };
+
+  const markChapterDownloaded = (mangaKey: string, chapterId: string) => {
+    const key = chapterDownloadKey(mangaKey, chapterId);
+    setDownloadedChapterKeys((current) => new Set([...current, key]));
+  };
+
+  const revealDownloadedChapter = async (chapter: MangaChapter) => {
+    if (!selectedItem) return;
+    const mangaKey = getOfflineMangaKey(selectedItem);
+    try {
+      const response = await fetch(
+        `${BACKEND_API}/open-download-folder?path=${encodeURIComponent("")}`,
+        { method: "POST" }
+      );
+      if (!response.ok) {
+        throw new Error(`Reveal failed with ${response.status}`);
+      }
+      updateChapterDownloadState(mangaKey, chapter.chapter_id, {
+        status: "done",
+        message: "Opened downloads folder.",
+        progress: 100,
+      });
+    } catch (error) {
+      updateChapterDownloadState(mangaKey, chapter.chapter_id, {
+        status: "error",
+        message: error instanceof Error ? error.message : "Could not open Explorer.",
+      });
+    }
+  };
+
+  const resolveDetailsForItem = async (item: MangaDiscoveryItem) => (
+    item.anilist_id
+      ? await fetchMangaDetails(item.anilist_id, "anilist_id")
+      : await fetchMangaDetails(item.mangadex_id!, "mangadex_id")
+  );
+
+  const resolveChaptersForItem = async (item: MangaDiscoveryItem, details: MangaDetailsResponse | null, language = "en", source: ChapterSource = "auto") => {
+    const mangadexId = details?.mangadex?.mangadex_id || item.mangadex_id;
+    const wantsMangadex = source !== "comick" && source !== "consumet" && !!mangadexId;
+    const wantsConsumet = source !== "comick" && !!mangadexId;
+    const wantsComick = source !== "mangadex";
+    const [mdxResult, consumetResult, comickResult] = await Promise.allSettled([
+      wantsMangadex ? fetchMangaChapters(mangadexId!, language) : Promise.resolve([] as MangaChapter[]),
+      wantsConsumet ? fetchConsumetMangaChapters(mangadexId!, "mangadex") : Promise.resolve([] as ConsumetChapter[]),
+      wantsComick ? fetchComickChapters(item.title) : Promise.resolve({ match: null, items: [] as MangaChapter[], total: 0 }),
+    ]);
+
+    const mdxItems = mdxResult.status === "fulfilled"
+      ? [...mdxResult.value].map((entry) => ({ ...entry, provider: "mangadex" as const })).sort((a, b) => chapterNumber(a.chapter_number) - chapterNumber(b.chapter_number))
+      : [];
+    const consumetItems = consumetResult.status === "fulfilled"
+      ? [...consumetResult.value].map(mapConsumetChapter).sort((a, b) => chapterNumber(a.chapter_number) - chapterNumber(b.chapter_number))
+      : [];
+    const comickItems = comickResult.status === "fulfilled"
+      ? [...(comickResult.value.items ?? [])].map((entry) => ({ ...entry, provider: "comick" as const })).sort((a, b) => chapterNumber(a.chapter_number) - chapterNumber(b.chapter_number))
+      : [];
+
+    let chosen: MangaChapter[] = [];
+    let resolvedSource: "mangadex" | "comick" | null = null;
+    if (source === "mangadex") {
+      chosen = mdxItems;
+      resolvedSource = chosen.length ? "mangadex" : null;
+    } else if (source === "consumet") {
+      chosen = consumetItems;
+      resolvedSource = chosen.length ? "mangadex" : null;
+    } else if (source === "comick") {
+      chosen = comickItems;
+      resolvedSource = chosen.length ? "comick" : null;
+    } else {
+      chosen = mergeChapterSets(consumetItems, mdxItems, comickItems);
+      resolvedSource = consumetItems.length || mdxItems.length ? "mangadex" : (comickItems.length ? "comick" : null);
+    }
+
+    if (!chosen.length && mdxItems.length) {
+      chosen = mdxItems;
+      resolvedSource = "mangadex";
+    }
+    if (!chosen.length && comickItems.length) {
+      chosen = comickItems;
+      resolvedSource = "comick";
+    }
+    if (!chosen.length) {
+      throw new Error("No chapters available from Consumet, MangaDex, or Comick for this title.");
+    }
+    return { chapters: chosen, resolvedSource };
+  };
+
+  const resolvePagesForChapter = async (chapter: MangaChapter): Promise<string[]> => {
+    const attempts: Array<() => Promise<string[]>> = [];
+    const consumetRead = async () => fetchConsumetMangaRead(chapter.chapter_id, "mangadex");
+    const mangadexRead = async () => fetchMangaPages(chapter.chapter_id);
+    const comickRead = async () => fetchComickPages(chapter.chapter_url ?? chapter.chapter_id);
+
+    if (chapter.provider === "comick") {
+      attempts.push(comickRead);
+    } else {
+      attempts.push(mangadexRead, consumetRead, comickRead);
+    }
+
+    let lastError: unknown = null;
+    for (const attempt of attempts) {
+      try {
+        const nextPages = await attempt();
+        if (nextPages.length > 0) {
+          return sortPageUrls(
+            nextPages.map((url) => (
+              !url || url.startsWith("blob:") || url.includes("/manga/image-proxy?")
+                ? url
+                : toMangaImageProxy(url)
+            ))
+          );
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (lastError) throw lastError;
+    return [];
+  };
+
+  const hydrateOfflineFlags = async (items: MangaDiscoveryItem[]) => {
+    const chapterKeys: string[] = [];
+    await Promise.all(items.map(async (item) => {
+      const mangaKey = getOfflineMangaKey(item);
+      const record = await getOfflineMangaRecord(mangaKey);
+      if (!record) return;
+      await Promise.all(record.chapters.map(async (chapter) => {
+        const pages = await getOfflineChapterPages(mangaKey, chapter.chapter_id);
+        if (pages.length > 0) {
+          chapterKeys.push(chapterDownloadKey(mangaKey, chapter.chapter_id));
+        }
+      }));
+    }));
+    setDownloadedChapterKeys((current) => new Set([...current, ...chapterKeys]));
+  };
+
+  const openDetails = async (item: MangaDiscoveryItem, preferOffline = false) => {
+    const key = getOfflineMangaKey(item);
+    const localRecord = await getOfflineMangaRecord(key);
+    setSelectedItem(item);
+    setReader(null);
+    if (preferOffline && localRecord) {
+      setOfflineRecord(localRecord);
+      setDetailData(localRecord.detailData);
+      setChapters(localRecord.chapters);
+      setResolvedChapterSource(localRecord.chapterSource);
+      setDetailError(null);
+      setChaptersError(null);
+      return;
+    }
+    setOfflineRecord(localRecord);
+  };
+
+  const handleRead = async (item: MangaDiscoveryItem) => {
+    await openDetails(item, true);
+  };
+
+  const ensureOfflineMetadata = async (item: MangaDiscoveryItem) => {
+    const key = getOfflineMangaKey(item);
+    const existing = await getOfflineMangaRecord(key);
+    if (existing) return existing;
+    const details = await resolveDetailsForItem(item);
+    const chapterData = await resolveChaptersForItem(item, details);
+    const record: OfflineMangaRecord = {
+      key,
+      item,
+      detailData: details,
+      chapters: chapterData.chapters,
+      chapterSource: chapterData.resolvedSource,
+      downloadedAt: new Date().toISOString(),
+    };
+    await saveOfflineMangaRecord(record);
+    return record;
+  };
+
+  const handleDownload = async (item: MangaDiscoveryItem) => {
+    await openDetails(item, true);
+  };
+
+  const handleChapterDownload = async (chapter: MangaChapter) => {
+    if (!selectedItem) return;
+    const mangaKey = getOfflineMangaKey(selectedItem);
+    updateChapterDownloadState(mangaKey, chapter.chapter_id, { status: "downloading", message: "Preparing chapter...", progress: 0 });
+    try {
+      const record = await ensureOfflineMetadata(selectedItem);
+      if (!offlineRecord || offlineRecord.key !== record.key) {
+        setOfflineRecord(record);
+      }
+      const pageUrls = await resolvePagesForChapter(chapter);
+      const blobs: Blob[] = [];
+      for (let pageIndex = 0; pageIndex < pageUrls.length; pageIndex += 1) {
+        const response = await fetch(pageUrls[pageIndex]);
+        if (!response.ok) throw new Error(`Page ${pageIndex + 1} failed with ${response.status}`);
+        blobs.push(await response.blob());
+        updateChapterDownloadState(mangaKey, chapter.chapter_id, {
+          status: "downloading",
+          message: `Downloading page ${pageIndex + 1}/${pageUrls.length}`,
+          progress: ((pageIndex + 1) / Math.max(1, pageUrls.length)) * 100,
+        });
+      }
+      await saveOfflineChapterPages(mangaKey, chapter.chapter_id, blobs);
+      markChapterDownloaded(mangaKey, chapter.chapter_id);
+      updateChapterDownloadState(mangaKey, chapter.chapter_id, { status: "done", message: "Saved offline.", progress: 100 });
+    } catch (error) {
+      updateChapterDownloadState(mangaKey, chapter.chapter_id, {
+        status: "error",
+        message: error instanceof Error ? error.message : "Chapter download failed.",
+      });
+    }
+  };
 
   const loadHome = async () => {
     setHomeLoading(true);
@@ -273,6 +578,10 @@ export default function MangaPage() {
   };
 
   useEffect(() => { void loadHome(); }, []);
+
+  useEffect(() => {
+    void hydrateOfflineFlags(visibleLibraryItems);
+  }, [visibleLibraryItems]);
 
   useEffect(() => {
     if (!query.trim()) {
@@ -315,6 +624,16 @@ export default function MangaPage() {
     if (!selectedItem?.anilist_id && !selectedItem?.mangadex_id) {
       setDetailData(null);
       setChapters([]);
+      setOfflineRecord(null);
+      return;
+    }
+    const selectedKey = selectedItem ? getOfflineMangaKey(selectedItem) : "";
+    if (offlineRecord && offlineRecord.key === selectedKey) {
+      setDetailLoading(false);
+      setDetailError(null);
+      setDetailData(offlineRecord.detailData);
+      setChapters(offlineRecord.chapters);
+      setResolvedChapterSource(offlineRecord.chapterSource);
       return;
     }
     let cancelled = false;
@@ -323,9 +642,7 @@ export default function MangaPage() {
       setDetailError(null);
       setReader(null);
       try {
-        const details = selectedItem.anilist_id
-          ? await fetchMangaDetails(selectedItem.anilist_id, "anilist_id")
-          : await fetchMangaDetails(selectedItem.mangadex_id!, "mangadex_id");
+        const details = await resolveDetailsForItem(selectedItem);
         if (!cancelled) setDetailData(details);
       } catch (error) {
         if (!cancelled) {
@@ -338,7 +655,7 @@ export default function MangaPage() {
     };
     void run();
     return () => { cancelled = true; };
-  }, [selectedItem]);
+  }, [offlineRecord, selectedItem]);
 
   useEffect(() => {
     setReader(null);
@@ -352,60 +669,23 @@ export default function MangaPage() {
       setChaptersError(null);
       return;
     }
+    const selectedKey = getOfflineMangaKey(selectedItem);
+    if (offlineRecord && offlineRecord.key === selectedKey) {
+      setChaptersLoading(false);
+      setChaptersError(null);
+      setChapters(offlineRecord.chapters);
+      setResolvedChapterSource(offlineRecord.chapterSource);
+      return;
+    }
     let cancelled = false;
     const run = async () => {
       setChaptersLoading(true);
       setChaptersError(null);
       try {
-        const mangadexId = detailData?.mangadex?.mangadex_id || selectedItem?.mangadex_id;
-        const wantsMangadex = chapterSource !== "comick" && chapterSource !== "consumet" && !!mangadexId;
-        const wantsConsumet = chapterSource !== "comick" && !!mangadexId;
-        const wantsComick = chapterSource !== "mangadex";
-        const [mdxResult, consumetResult, comickResult] = await Promise.allSettled([
-          wantsMangadex ? fetchMangaChapters(mangadexId!, chapterLanguage) : Promise.resolve([] as MangaChapter[]),
-          wantsConsumet ? fetchConsumetMangaChapters(mangadexId!, "mangadex") : Promise.resolve([] as ConsumetChapter[]),
-          wantsComick ? fetchComickChapters(selectedItem.title) : Promise.resolve({ match: null, items: [] as MangaChapter[], total: 0 }),
-        ]);
+        const chapterData = await resolveChaptersForItem(selectedItem, detailData, chapterLanguage, chapterSource);
         if (cancelled) return;
-
-        const mdxItems = mdxResult.status === "fulfilled"
-          ? [...mdxResult.value].map((item) => ({ ...item, provider: "mangadex" as const })).sort((a, b) => chapterNumber(a.chapter_number) - chapterNumber(b.chapter_number))
-          : [];
-        const consumetItems = consumetResult.status === "fulfilled"
-          ? [...consumetResult.value].map(mapConsumetChapter).sort((a, b) => chapterNumber(a.chapter_number) - chapterNumber(b.chapter_number))
-          : [];
-        const comickItems = comickResult.status === "fulfilled"
-          ? [...(comickResult.value.items ?? [])].map((item) => ({ ...item, provider: "comick" as const })).sort((a, b) => chapterNumber(a.chapter_number) - chapterNumber(b.chapter_number))
-          : [];
-
-        let chosen: MangaChapter[] = [];
-        let source: "mangadex" | "comick" | null = null;
-        if (chapterSource === "mangadex") {
-          chosen = mdxItems;
-          source = chosen.length ? "mangadex" : null;
-        } else if (chapterSource === "consumet") {
-          chosen = consumetItems;
-          source = chosen.length ? "mangadex" : null;
-        } else if (chapterSource === "comick") {
-          chosen = comickItems;
-          source = chosen.length ? "comick" : null;
-        } else {
-          chosen = mergeChapterSets(consumetItems, mdxItems, comickItems);
-          source = consumetItems.length || mdxItems.length ? "mangadex" : (comickItems.length ? "comick" : null);
-        }
-
-        if (!chosen.length && mdxItems.length) {
-          chosen = mdxItems;
-          source = "mangadex";
-        }
-        if (!chosen.length && comickItems.length) {
-          chosen = comickItems;
-          source = "comick";
-        }
-
-        if (!chosen.length) throw new Error("No chapters available from Consumet, MangaDex, or Comick for this title.");
-        setResolvedChapterSource(source);
-        setChapters(chosen);
+        setResolvedChapterSource(chapterData.resolvedSource);
+        setChapters(chapterData.chapters);
       } catch (error) {
         if (!cancelled) {
           setChaptersError(error instanceof Error ? error.message : "Could not load chapters.");
@@ -417,7 +697,7 @@ export default function MangaPage() {
     };
     void run();
     return () => { cancelled = true; };
-  }, [detailData?.mangadex?.mangadex_id, selectedItem?.title, chapterLanguage, chapterSource]);
+  }, [chapterLanguage, chapterSource, detailData, offlineRecord, selectedItem]);
 
   useEffect(() => {
     if (!reader) {
@@ -426,40 +706,24 @@ export default function MangaPage() {
       return;
     }
     let cancelled = false;
+    let objectUrls: string[] = [];
     const run = async () => {
       setReaderLoading(true);
       setReaderError(null);
       try {
-        const attempts: Array<() => Promise<string[]>> = [];
-        const consumetRead = async () => fetchConsumetMangaRead(reader.chapter.chapter_id, "mangadex");
-        const mangadexRead = async () => fetchMangaPages(reader.chapter.chapter_id);
-        const comickRead = async () => fetchComickPages(reader.chapter.chapter_url ?? reader.chapter.chapter_id);
-
-        if (reader.chapter.provider === "comick") {
-          attempts.push(comickRead);
-        } else {
-          attempts.push(mangadexRead);
-          attempts.push(consumetRead);
-          attempts.push(comickRead);
-        }
-
-        let pages: string[] = [];
-        let lastError: unknown = null;
-        for (const attempt of attempts) {
-          try {
-            const nextPages = await attempt();
-            if (nextPages.length > 0) {
-              pages = nextPages;
-              break;
+        if (selectedItem) {
+          const key = getOfflineMangaKey(selectedItem);
+          const localPages = await getOfflineChapterPages(key, reader.chapter.chapter_id);
+          if (localPages.length > 0) {
+            objectUrls = localPages.map((blob) => URL.createObjectURL(blob));
+            if (!cancelled) {
+              setReaderPages(objectUrls);
+              setReaderLoading(false);
             }
-          } catch (error) {
-            lastError = error;
+            return;
           }
         }
-
-        if (!pages.length && lastError) {
-          throw lastError;
-        }
+        const pages = await resolvePagesForChapter(reader.chapter);
         if (!cancelled) {
           setReaderPages(sortPageUrls(pages));
           if (!pages.length) {
@@ -476,8 +740,11 @@ export default function MangaPage() {
       }
     };
     void run();
-    return () => { cancelled = true; };
-  }, [reader]);
+    return () => {
+      cancelled = true;
+      objectUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [reader, selectedItem]);
 
   useEffect(() => {
     if (!detailData?.anilist?.anilist_id) {
@@ -509,11 +776,6 @@ export default function MangaPage() {
   const chapterGroups = Math.max(1, Math.ceil(chapters.length / 100));
   const activeChapter = reader?.chapter ?? null;
 
-  const openDetails = (item: MangaDiscoveryItem) => {
-    setSelectedItem(item);
-    setReader(null);
-  };
-
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <div style={{ padding: "14px 24px", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -534,17 +796,25 @@ export default function MangaPage() {
         {!selectedItem && !reader && !query && (
           homeLoading ? <LoadingGrid count={10} /> : homeError ? <ErrorState message={homeError} onRetry={() => void loadHome()} /> : (
             <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
-              <HorizontalRail title="Trending Now" subtitle="Powered by AniList discovery" items={filteredTrending} onOpen={openDetails} />
-              <HorizontalRail title={`${season.charAt(0)}${season.slice(1).toLowerCase()} Picks`} subtitle={`Seasonal manga for ${seasonYear}`} items={filteredSeasonal} onOpen={openDetails} />
-              {filteredConsumetHot.length > 0 && <HorizontalRail title="Consumet MangaDex" subtitle="Primary manga reader matches from Consumet" items={filteredConsumetHot} onOpen={openDetails} />}
-              {filteredComickHot.length > 0 && <HorizontalRail title="Comick Hot" subtitle="Backup reader picks for long series" items={filteredComickHot} onOpen={openDetails} />}
+              <HorizontalRail title="Trending Now" subtitle="Powered by AniList discovery" items={filteredTrending} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownload={(item) => void handleDownload(item)} />
+              <HorizontalRail title={`${season.charAt(0)}${season.slice(1).toLowerCase()} Picks`} subtitle={`Seasonal manga for ${seasonYear}`} items={filteredSeasonal} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownload={(item) => void handleDownload(item)} />
+              {filteredConsumetHot.length > 0 && <HorizontalRail title="Consumet MangaDex" subtitle="Primary manga reader matches from Consumet" items={filteredConsumetHot} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownload={(item) => void handleDownload(item)} />}
+              {filteredComickHot.length > 0 && <HorizontalRail title="Comick Hot" subtitle="Backup reader picks for long series" items={filteredComickHot} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownload={(item) => void handleDownload(item)} />}
             </div>
           )
         )}
         {!selectedItem && !reader && !!query && (
           searchLoading ? <LoadingGrid count={12} /> : searchError ? <ErrorState message={searchError} onRetry={() => setQuery((value) => value)} /> : filteredSearchResults.length === 0 ? <EmptyState label="No results found." /> : (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 14 }}>
-              {filteredSearchResults.map((item) => <MangaCard key={item.anilist_id ?? item.title} item={item} onClick={() => openDetails(item)} />)}
+              {filteredSearchResults.map((item) => (
+                <MangaCard
+                  key={item.anilist_id ?? item.title}
+                  item={item}
+                  onOpen={() => void openDetails(item)}
+                  onRead={() => void handleRead(item)}
+                  onDownload={() => void handleDownload(item)}
+                />
+              ))}
             </div>
           )
         )}
@@ -553,6 +823,9 @@ export default function MangaPage() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
               <button className="btn btn-ghost" onClick={() => setSelectedItem(null)}>Back to manga</button>
             </div>
+            <button className="btn btn-primary" style={{ position: "fixed", right: 24, bottom: 24, zIndex: 25, boxShadow: "var(--shadow-lg)" }} onClick={() => setSelectedItem(null)}>
+              Back
+            </button>
             {detailLoading ? <LoadingGrid count={4} /> : detailError ? <ErrorState message={detailError} onRetry={() => setSelectedItem({ ...selectedItem })} /> : detailData ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
                 <section className="card" style={{ padding: 18, display: "grid", gridTemplateColumns: "160px minmax(0, 1fr)", gap: 18 }}>
@@ -597,22 +870,52 @@ export default function MangaPage() {
                         </div>
                       )}
                       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        {visibleChapters.map((chapter, index) => (
-                          <button key={`${chapter.provider ?? "mangadex"}-${chapter.chapter_id}`} className="card" style={{ padding: "12px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", textAlign: "left", border: "1px solid var(--border)", background: "var(--bg-surface)", cursor: "pointer" }} onClick={() => setReader({ chapterIndex: chapterGroup * 100 + index, chapter })}>
-                            <div>
-                              <div style={{ fontSize: 13, fontWeight: 600 }}>Chapter {chapter.chapter_number}{chapter.title ? ` · ${chapter.title}` : ""}</div>
-                              <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>{(chapter.source_name || chapter.provider || resolvedChapterSource || "mangadex").toUpperCase()} · {chapter.language.toUpperCase()}</div>
+{visibleChapters.map((chapter, index) => {
+                          const mangaKey = getOfflineMangaKey(selectedItem);
+                          const stateKey = chapterDownloadKey(mangaKey, chapter.chapter_id);
+                          const downloadState = chapterDownloadStates[stateKey];
+                          const isDownloaded = downloadedChapterKeys.has(stateKey);
+                          return (
+                            <div key={`${chapter.provider ?? "mangadex"}-${chapter.chapter_id}`} className="card" style={{ padding: "12px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", textAlign: "left", gap: 12, border: "1px solid var(--border)", background: "var(--bg-surface)" }}>
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ fontSize: 13, fontWeight: 600 }}>Chapter {chapter.chapter_number}{chapter.title ? ` · ${chapter.title}` : ""}</div>
+                                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>{(chapter.source_name || chapter.provider || resolvedChapterSource || "mangadex").toUpperCase()} · {chapter.language.toUpperCase()}</div>
+                                {downloadState?.message ? <div style={{ fontSize: 11, color: downloadState.status === "error" ? "var(--text-danger)" : "var(--text-muted)", marginTop: 6 }}>{downloadState.message}</div> : null}
+                              </div>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                                <button className="btn btn-primary" style={{ height: 34 }} onClick={() => setReader({ chapterIndex: chapterGroup * 100 + index, chapter })}>Read</button>
+                                {isDownloaded && (
+                                  <button
+                                    className="btn btn-ghost"
+                                    style={{ width: 42, minWidth: 42, padding: 0, justifyContent: "center", height: 34 }}
+                                    onClick={() => void revealDownloadedChapter(chapter)}
+                                    title="Reveal downloads folder"
+                                  >
+                                    <IconFolder size={14} />
+                                  </button>
+                                )}
+                                <button className="btn btn-ghost" style={{ width: 42, minWidth: 42, padding: 0, justifyContent: "center", height: 34, fontSize: 10 }} onClick={() => void handleChapterDownload(chapter)} disabled={downloadState?.status === "downloading"} title={isDownloaded ? "Downloaded" : "Download chapter"}>
+                                  {downloadState?.status === "downloading" ? `${Math.round(downloadState.progress || 0)}%` : isDownloaded ? "OK" : <IconDownload size={14} />}
+                                </button>
+                              </div>
                             </div>
-                            <span style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>Read</span>
-                          </button>
-                        ))}
+                          );
+                        })}
                       </div>
                     </>
                   )}
                 </section>
                 <section className="card" style={{ padding: 18 }}>
                   <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 12 }}>You Might Also Like</div>
-                  {recommendationsLoading ? <LoadingGrid count={4} /> : filteredRecommendations.length === 0 ? <EmptyState label="No recommendations available right now." /> : <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 14 }}>{filteredRecommendations.slice(0, 6).map((item) => <MangaCard key={item.anilist_id ?? item.title} item={item} onClick={() => openDetails(item)} />)}</div>}
+                  {recommendationsLoading ? <LoadingGrid count={4} /> : filteredRecommendations.length === 0 ? <EmptyState label="No recommendations available right now." /> : <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 14 }}>{filteredRecommendations.slice(0, 6).map((item) => (
+                    <MangaCard
+                      key={item.anilist_id ?? item.title}
+                      item={item}
+                      onOpen={() => void openDetails(item)}
+                      onRead={() => void handleRead(item)}
+                      onDownload={() => void handleDownload(item)}
+                    />
+                  ))}</div>}
                 </section>
               </div>
             ) : null}
@@ -627,6 +930,9 @@ export default function MangaPage() {
                 <button className="btn btn-ghost" disabled={reader.chapterIndex >= chapters.length - 1} onClick={() => setReader({ chapterIndex: reader.chapterIndex + 1, chapter: chapters[reader.chapterIndex + 1] })}>Next</button>
               </div>
             </div>
+            <button className="btn btn-primary" style={{ position: "fixed", right: 24, bottom: 24, zIndex: 25, boxShadow: "var(--shadow-lg)" }} onClick={() => setReader(null)}>
+              Back
+            </button>
             <div className="card" style={{ padding: 16, marginBottom: 16 }}>
               <div style={{ fontSize: 18, fontWeight: 700 }}>{selectedItem.title} · Chapter {activeChapter.chapter_number}</div>
               {activeChapter.title ? <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 4 }}>{activeChapter.title}</div> : null}
@@ -635,10 +941,20 @@ export default function MangaPage() {
             {readerLoading ? <LoadingGrid count={6} /> : readerError ? <ErrorState message={readerError} onRetry={() => setReader({ ...reader })} /> : readerPages.length === 0 ? <EmptyState label="Chapter unavailable - try another chapter or switch reader source." /> : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "center" }}>
                 {readerPages.map((pageUrl, index) => (
-                  <div key={`${pageUrl}-${index}`} style={{ width: "100%", maxWidth: 900 }}>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>Page {index + 1} / {readerPages.length}</div>
-                    <img src={pageUrl} alt={`Page ${index + 1}`} loading="lazy" decoding="async" style={{ width: "100%", display: "block", borderRadius: 12, border: "1px solid var(--border)", background: "var(--bg-surface2)" }} onError={(event) => { (event.target as HTMLImageElement).style.opacity = "0.35"; }} />
-                  </div>
+                  <MangaReaderImage
+                    key={`${pageUrl}-${index}`}
+                    src={pageUrl}
+                    alt={`Page ${index + 1}`}
+                    index={index}
+                    total={readerPages.length}
+                    onLoadNext={() => {
+                      const next = readerPages[index + 1];
+                      if (!next || next.startsWith("blob:")) return;
+                      const preloader = new Image();
+                      preloader.referrerPolicy = "no-referrer";
+                      preloader.src = next;
+                    }}
+                  />
                 ))}
               </div>
             )}

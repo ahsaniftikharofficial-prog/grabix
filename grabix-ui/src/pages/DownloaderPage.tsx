@@ -7,8 +7,8 @@ import {
   IconFolder, IconInfo,
 } from "../components/Icons";
 import TrimSlider from "../components/TrimSlider";
-
-const API = "http://127.0.0.1:8000";
+import { BACKEND_API } from "../lib/api";
+const API = BACKEND_API;
 
 type FileType = "video" | "audio" | "thumbnail" | "subtitle";
 type Status = "idle" | "loading" | "ok" | "error";

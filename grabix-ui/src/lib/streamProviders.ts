@@ -1,3 +1,6 @@
+import { BACKEND_API } from "./api";
+export { BACKEND_API } from "./api";
+
 export type StreamKind = "embed" | "direct" | "hls" | "local";
 
 export interface SubtitleTrack {
@@ -50,6 +53,9 @@ interface MovieBoxSourceResponse {
   url: string;
   original_url?: string;
   quality?: string;
+  server?: string;
+  size_bytes?: number;
+  size_label?: string;
   mime_type?: string;
   kind?: StreamKind;
   subtitles?: SubtitleTrack[];
@@ -120,9 +126,8 @@ interface MovieBoxSourcesResponse {
 export interface StreamVariant {
   label: string;
   url: string;
+  bandwidth?: string;
 }
-
-export const BACKEND_API = "http://127.0.0.1:8000";
 
 const EMBED_PROVIDERS: ProviderDef[] = [
   {
@@ -143,8 +148,8 @@ const EMBED_PROVIDERS: ProviderDef[] = [
     movie: "https://vidsrc.to/embed/movie/{id}",
     tv: "https://vidsrc.to/embed/tv/{id}/1/1",
     episode: "https://vidsrc.to/embed/tv/{id}/{season}/{episode}",
-    movieIdType: "imdb",
-    tvIdType: "imdb",
+    movieIdType: "tmdb",
+    tvIdType: "tmdb",
     canExtract: true,
   },
   {
@@ -201,6 +206,8 @@ function mapMovieBoxSource(
     quality: source.quality ?? "Auto",
     mimeType: source.mime_type,
     externalUrl: source.original_url ?? source.url,
+    language: source.server,
+    fileName: source.size_label,
     canExtract: false,
     subtitles: source.subtitles ?? [],
   });

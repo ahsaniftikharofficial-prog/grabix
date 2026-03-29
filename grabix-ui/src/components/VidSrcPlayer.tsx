@@ -14,7 +14,8 @@ import {
   IconSubtitle,
 } from "./Icons";
 import SubtitlePanel from "./SubtitlePanel";
-import { inferStreamKind } from "../lib/streamProviders";
+import { BACKEND_API } from "../lib/api";
+import { fetchStreamVariants, inferStreamKind } from "../lib/streamProviders";
 import type { StreamSource } from "../lib/streamProviders";
 
 // ---------------------------------------------------------------------------
@@ -148,10 +149,54 @@ function parseSubtitleText(content: string): SubtitleCue[] {
   return cues;
 }
 
+function qualityScore(label: string): number {
+  const normalized = String(label || "").trim().toLowerCase();
+  const numeric = normalized.match(/(\d{3,4})p/);
+  if (numeric) return Number(numeric[1]);
+  if (normalized === "4k") return 2160;
+  if (normalized === "2k") return 1440;
+  return 0;
+}
+
+function pickBestVariant(
+  variants: Array<{ label: string; url: string; bandwidth?: string }>
+): { label: string; url: string; bandwidth?: string } | null {
+  if (!variants.length) return null;
+  return [...variants].sort((left, right) => {
+    const qualityDiff = qualityScore(right.label) - qualityScore(left.label);
+    if (qualityDiff !== 0) return qualityDiff;
+    return Number(right.bandwidth || 0) - Number(left.bandwidth || 0);
+  })[0];
+}
+
+function buildStreamProxyUrl(api: string, url: string, headers?: Record<string, string>): string {
+  if (!url) return url;
+  if (url.startsWith(`${api}/stream/proxy?`)) return url;
+  if (url.startsWith("/stream/proxy?")) return `${api}${url}`;
+
+  const params = new URLSearchParams({ url });
+  if (headers && Object.keys(headers).length > 0) {
+    params.set("headers_json", JSON.stringify(headers));
+  }
+  return `${api}/stream/proxy?${params.toString()}`;
+}
+
+function shouldKeepHlsProxied(source: StreamSource): boolean {
+  return (
+    Boolean(source.requestHeaders && Object.keys(source.requestHeaders).length > 0) ||
+    source.url.includes("/stream/proxy?")
+  );
+}
+
 async function resolveEmbedUrl(api: string, url: string): Promise<string> {
   if (!url) return url;
   try {
-    const response = await fetch(`${api}/resolve-embed?url=${encodeURIComponent(url)}`);
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 12000);
+    const response = await fetch(`${api}/resolve-embed?url=${encodeURIComponent(url)}`, {
+      signal: controller.signal,
+    });
+    window.clearTimeout(timeoutId);
     if (!response.ok) return url;
     const payload = (await response.json()) as { url?: string };
     return payload.url || url;
@@ -182,7 +227,7 @@ export default function VidSrcPlayer({
   onDownload,
   onDownloadSource,
 }: Props) {
-  const API = "http://127.0.0.1:8000";
+  const API = BACKEND_API;
 
   // Refs
   const rootRef = useRef<HTMLDivElement>(null);
@@ -200,7 +245,7 @@ export default function VidSrcPlayer({
   const embedLoadedRef = useRef(false);
 
   const [activeSubtitleText, setActiveSubtitleText] = useState(subtitle || "");
-  const [activeSearchTitle, setActiveSearchTitle] = useState(subtitleSearchTitle || subtitle || title);
+  const [activeSearchTitle, setActiveSearchTitle] = useState(subtitleSearchTitle || title);
   const [activeEpisode, setActiveEpisode] = useState<number | null>(currentEpisode ?? null);
   const [runtimeSources, setRuntimeSources] = useState<StreamSource[]>(sources ?? []);
   const [episodeLoading, setEpisodeLoading] = useState(false);
@@ -256,6 +301,7 @@ export default function VidSrcPlayer({
   const [errorText, setErrorText] = useState("");
   const [fallbackNotice, setFallbackNotice] = useState("");
   const [resolvedEmbedUrl, setResolvedEmbedUrl] = useState("");
+  const [resolvedPlaybackUrl, setResolvedPlaybackUrl] = useState("");
   const [showChrome, setShowChrome] = useState(true);
   const [episodeMenuOpen, setEpisodeMenuOpen] = useState(false);
   const [serverMenuOpen, setServerMenuOpen] = useState(false);
@@ -295,7 +341,7 @@ export default function VidSrcPlayer({
   useEffect(() => {
     setRuntimeSources(sources ?? []);
     setActiveSubtitleText(subtitle || "");
-    setActiveSearchTitle(subtitleSearchTitle || subtitle || title);
+    setActiveSearchTitle(subtitleSearchTitle || title);
     setActiveEpisode(currentEpisode ?? null);
   }, [sources, subtitle, subtitleSearchTitle, currentEpisode, title]);
 
@@ -465,6 +511,44 @@ export default function VidSrcPlayer({
     };
   }, [API, activeSource]);
 
+  useEffect(() => {
+    if (!activeSource || activeSource.kind !== "hls") {
+      setResolvedPlaybackUrl("");
+      return;
+    }
+
+    let cancelled = false;
+    setResolvedPlaybackUrl("");
+
+    const resolveBestVariant = async () => {
+      try {
+        const variants = await fetchStreamVariants(
+          activeSource.externalUrl || activeSource.url,
+          activeSource.requestHeaders
+        );
+        if (cancelled || variants.length === 0) return;
+        const best = pickBestVariant(variants);
+        if (!best?.url || best.url === activeSource.url) return;
+        const nextUrl = shouldKeepHlsProxied(activeSource)
+          ? buildStreamProxyUrl(API, best.url, activeSource.requestHeaders)
+          : best.url;
+        setResolvedPlaybackUrl(nextUrl);
+        setFallbackNotice(
+          `Using the strongest ${best.label || "HLS"} variant${best.bandwidth ? ` (${Math.round(Number(best.bandwidth) / 1000)} kbps)` : ""}.`
+        );
+      } catch {
+        if (!cancelled) {
+          setResolvedPlaybackUrl("");
+        }
+      }
+    };
+
+    void resolveBestVariant();
+    return () => {
+      cancelled = true;
+    };
+  }, [API, activeSource]);
+
   // ---------------------------------------------------------------------------
   // Direct / HLS playback effect
   // ---------------------------------------------------------------------------
@@ -527,6 +611,7 @@ export default function VidSrcPlayer({
     video.addEventListener("durationchange", handleDurationChange);
 
     if (activeSource.kind === "hls") {
+      const playbackUrl = resolvedPlaybackUrl || activeSource.url;
       if (Hls.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
@@ -537,10 +622,9 @@ export default function VidSrcPlayer({
         hlsRef.current = hls;
         hls.attachMedia(video);
         hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-          hls.loadSource(activeSource.url);
+          hls.loadSource(playbackUrl);
         });
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          sourceReady = true;
           setStatusText("Buffering");
           void video.play().catch(() => {});
         });
@@ -548,7 +632,7 @@ export default function VidSrcPlayer({
           if (data.fatal) goToNextSource("media_error");
         });
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        video.src = activeSource.url;
+        video.src = playbackUrl;
         void video.play().catch(() => {});
       } else {
         goToNextSource("unsupported_source");
@@ -572,7 +656,7 @@ export default function VidSrcPlayer({
         hlsRef.current = null;
       }
     };
-  }, [activeSource, isDirectEngine, reloadKey]);
+  }, [activeSource, isDirectEngine, reloadKey, resolvedPlaybackUrl]);
 
   // ---------------------------------------------------------------------------
   // Audio boost effect
@@ -754,7 +838,7 @@ export default function VidSrcPlayer({
       setExtractedSources([]);
       setRuntimeSources(next.sources);
       setActiveSubtitleText(next.subtitle || "");
-      setActiveSearchTitle(next.subtitleSearchTitle || next.subtitle || `${title} ${episodeLabel} ${episode}`);
+      setActiveSearchTitle(next.subtitleSearchTitle || `${title} ${episodeLabel} ${episode}`);
       setActiveEpisode(episode);
       setActiveIndex(matchedIndex >= 0 ? matchedIndex : 0);
       setReloadKey((key) => key + 1);
@@ -777,7 +861,7 @@ export default function VidSrcPlayer({
       setExtractedSources([]);
       setRuntimeSources(next.sources);
       setActiveSubtitleText(next.subtitle || "");
-      setActiveSearchTitle(next.subtitleSearchTitle || next.subtitle || title);
+      setActiveSearchTitle(next.subtitleSearchTitle || title);
       setActiveSourceOptionId(optionId);
       setActiveIndex(0);
       setReloadKey((key) => key + 1);
@@ -879,7 +963,14 @@ export default function VidSrcPlayer({
 
   const handleShellClick = (event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
+    if (showSubtitlePanel && !target.closest("[data-subtitle-panel='true']")) {
+      setShowSubtitlePanel(false);
+    }
     if (target.closest("button, input, select, textarea, a")) {
+      showControls();
+      return;
+    }
+    if (target.closest("[data-subtitle-panel='true']")) {
       showControls();
       return;
     }
@@ -916,9 +1007,12 @@ export default function VidSrcPlayer({
     targetUrl: string
   ): Promise<{ url: string; quality?: string; format?: string }> => {
     const resolvedUrl = await resolveEmbedUrl(API, targetUrl);
-    const res = await fetch(
-      `${API}/extract-stream?url=${encodeURIComponent(resolvedUrl)}`
-    );
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 25000);
+    const res = await fetch(`${API}/extract-stream?url=${encodeURIComponent(resolvedUrl)}`, {
+      signal: controller.signal,
+    });
+    window.clearTimeout(timeoutId);
     if (!res.ok) {
       throw new Error(`Server returned ${res.status}`);
     }
@@ -1157,7 +1251,7 @@ export default function VidSrcPlayer({
         setFallbackNotice("Switched to an internal stream so volume boost can be applied.");
       } catch {
         if (cancelled) return;
-        setFallbackNotice("Volume boost could not be enabled for this embedded source.");
+        setFallbackNotice("Volume boost is unavailable for this embedded source.");
         setVolumeBoost(100);
       }
     };
@@ -1346,6 +1440,10 @@ export default function VidSrcPlayer({
         className={`player-hover-ui${showChrome ? " visible" : ""}${
           compactControls ? " compact" : ""
         }`}
+        style={{
+          transform: showChrome ? "translateY(0)" : "translateY(10px)",
+          transition: "opacity 220ms ease, transform 220ms ease",
+        }}
       >
         <div className="player-top-fade" />
         {!compactControls && <div className="player-bottom-fade" />}
@@ -1462,7 +1560,7 @@ export default function VidSrcPlayer({
                 </button>
 
                 {serverMenuOpen && (
-                  <div className="player-popover">
+                  <div className="player-popover player-popover-animated">
                     {sourceOptions && sourceOptions.length > 0
                       ? sourceOptions.map((option) => (
                           <button
@@ -1557,7 +1655,7 @@ export default function VidSrcPlayer({
                   <IconAudio size={16} color="currentColor" />
                 </button>
                 {volumeMenuOpen && (
-                  <div className="player-popover narrow">
+                  <div className="player-popover narrow player-popover-animated">
                     <div className="player-popover-label">Volume boost</div>
                     <input
                       type="range"

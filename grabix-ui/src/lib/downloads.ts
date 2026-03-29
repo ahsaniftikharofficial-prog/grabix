@@ -20,6 +20,35 @@ export interface DownloadQualityOption {
   url: string;
   headers?: Record<string, string>;
   forceHls: boolean;
+  sizeBytes?: number;
+  sizeLabel?: string;
+  serverId?: string;
+  serverLabel?: string;
+}
+
+function normalizeBackendDetail(detail: unknown): string {
+  if (typeof detail === "string") return detail.trim();
+  if (!detail || typeof detail !== "object") return "";
+
+  const record = detail as Record<string, unknown>;
+  const directMessage = record.message;
+  if (typeof directMessage === "string" && directMessage.trim()) {
+    return directMessage.trim();
+  }
+
+  const pieces = Object.entries(record)
+    .map(([key, value]) => {
+      if (typeof value === "string" && value.trim()) {
+        return `${key}: ${value.trim()}`;
+      }
+      if (typeof value === "number" || typeof value === "boolean") {
+        return `${key}: ${String(value)}`;
+      }
+      return "";
+    })
+    .filter(Boolean);
+
+  return pieces.join(" | ");
 }
 
 function qualityWeight(label: string): number {
@@ -37,7 +66,7 @@ function dedupeQualityOptions(options: DownloadQualityOption[]): DownloadQuality
   const seen = new Set<string>();
   const ordered = [...options].sort((left, right) => qualityWeight(right.label) - qualityWeight(left.label));
   return ordered.filter((option) => {
-    const key = option.label.toLowerCase();
+    const key = `${option.serverLabel || "default"}:${option.label.toLowerCase()}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -51,6 +80,8 @@ export async function resolveSourceDownloadOptions(sources: StreamSource[]): Pro
     const preferredUrl = source.provider === "MovieBox" ? source.url : (source.externalUrl || source.url);
     const url = (preferredUrl || "").trim();
     if (!url) continue;
+    const serverLabel = (source.language || source.provider || "Server").trim();
+    const sizeLabel = (source.fileName || "").trim();
 
     if (source.kind === "hls") {
       try {
@@ -63,6 +94,9 @@ export async function resolveSourceDownloadOptions(sources: StreamSource[]): Pro
               url: variant.url,
               headers: source.requestHeaders,
               forceHls: true,
+              sizeLabel,
+              serverId: serverLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+              serverLabel,
             }))
           );
           continue;
@@ -78,6 +112,9 @@ export async function resolveSourceDownloadOptions(sources: StreamSource[]): Pro
       url,
       headers: source.requestHeaders,
       forceHls: source.kind === "hls",
+      sizeLabel,
+      serverId: serverLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+      serverLabel,
     });
   }
 
@@ -85,21 +122,25 @@ export async function resolveSourceDownloadOptions(sources: StreamSource[]): Pro
 }
 
 export async function queueVideoDownload(request: DownloadQueueRequest): Promise<void> {
-  const params = new URLSearchParams({
-    url: request.url,
-    dl_type: "video",
-  });
-
-  if (request.title?.trim()) params.set("title", request.title.trim());
-  if (request.thumbnail?.trim()) params.set("thumbnail", request.thumbnail.trim());
-  if (request.headers && Object.keys(request.headers).length > 0) {
-    params.set("headers_json", JSON.stringify(request.headers));
-  }
-  if (request.forceHls) params.set("force_hls", "true");
-
   let response: Response;
   try {
-    response = await fetch(`${BACKEND_API}/download?${params.toString()}`);
+    response = await fetch(`${BACKEND_API}/download`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        url: request.url,
+        title: request.title?.trim() || "",
+        thumbnail: request.thumbnail?.trim() || "",
+        dl_type: "video",
+        headers_json:
+          request.headers && Object.keys(request.headers).length > 0
+            ? JSON.stringify(request.headers)
+            : "",
+        force_hls: Boolean(request.forceHls),
+      }),
+    });
   } catch (error) {
     throw new Error(error instanceof Error ? error.message : "Downloader could not be reached.");
   }
@@ -107,8 +148,8 @@ export async function queueVideoDownload(request: DownloadQueueRequest): Promise
   if (!response.ok) {
     let detail = "";
     try {
-      const payload = (await response.json()) as { detail?: string };
-      detail = payload.detail || "";
+      const payload = (await response.json()) as { detail?: unknown };
+      detail = normalizeBackendDetail(payload.detail);
     } catch {
       detail = "";
     }
@@ -119,19 +160,23 @@ export async function queueVideoDownload(request: DownloadQueueRequest): Promise
 }
 
 export async function queueSubtitleDownload(request: SubtitleDownloadRequest): Promise<void> {
-  const params = new URLSearchParams({
-    url: request.url,
-    dl_type: "subtitle",
-  });
-
-  if (request.title?.trim()) params.set("title", request.title.trim());
-  if (request.headers && Object.keys(request.headers).length > 0) {
-    params.set("headers_json", JSON.stringify(request.headers));
-  }
-
   let response: Response;
   try {
-    response = await fetch(`${BACKEND_API}/download?${params.toString()}`);
+    response = await fetch(`${BACKEND_API}/download`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        url: request.url,
+        title: request.title?.trim() || "",
+        dl_type: "subtitle",
+        headers_json:
+          request.headers && Object.keys(request.headers).length > 0
+            ? JSON.stringify(request.headers)
+            : "",
+      }),
+    });
   } catch (error) {
     throw new Error(error instanceof Error ? error.message : "Subtitle downloader could not be reached.");
   }
@@ -139,8 +184,8 @@ export async function queueSubtitleDownload(request: SubtitleDownloadRequest): P
   if (!response.ok) {
     let detail = "";
     try {
-      const payload = (await response.json()) as { detail?: string };
-      detail = payload.detail || "";
+      const payload = (await response.json()) as { detail?: unknown };
+      detail = normalizeBackendDetail(payload.detail);
     } catch {
       detail = "";
     }

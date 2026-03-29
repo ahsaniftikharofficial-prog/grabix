@@ -403,20 +403,6 @@ async function fetchWatch(episodeId, server, category) {
   const requestedServer = mapServer(server);
   const requestedCategory = mapCategory(category);
 
-  try {
-    const direct = await scraper.getEpisodeSources(episodeId, requestedServer.request, requestedCategory);
-    const directSources = Array.isArray(direct?.sources) ? direct.sources : [];
-    const directTracks = Array.isArray(direct?.subtitles) ? direct.subtitles : Array.isArray(direct?.tracks) ? direct.tracks : [];
-    if (directSources.length > 0) {
-      return {
-        headers: direct?.headers || {},
-        sources: directSources,
-        subtitles: directTracks,
-        download: direct?.download || "",
-      };
-    }
-  } catch {}
-
   const fallback = await fetchServerPayload(episodeId, requestedServer, requestedCategory);
   const link = String(fallback?.link || "").trim();
   const tracks = Array.isArray(fallback?.tracks) ? fallback.tracks : [];
@@ -429,8 +415,25 @@ async function fetchWatch(episodeId, server, category) {
     if (link.includes("megacloud.blog")) {
       const extracted = await extractMegaCloud(link);
       if (Array.isArray(extracted.sources) && extracted.sources.length > 0) {
+        if ((!extracted.subtitles || extracted.subtitles.length === 0) && tracks.length > 0) {
+          extracted.subtitles = tracks;
+        }
         return extracted;
       }
+    }
+  } catch {}
+
+  try {
+    const direct = await scraper.getEpisodeSources(episodeId, requestedServer.request, requestedCategory);
+    const directSources = Array.isArray(direct?.sources) ? direct.sources : [];
+    const directTracks = Array.isArray(direct?.subtitles) ? direct.subtitles : Array.isArray(direct?.tracks) ? direct.tracks : [];
+    if (directSources.length > 0) {
+      return {
+        headers: direct?.headers || {},
+        sources: directSources,
+        subtitles: directTracks,
+        download: direct?.download || "",
+      };
     }
   } catch {}
 

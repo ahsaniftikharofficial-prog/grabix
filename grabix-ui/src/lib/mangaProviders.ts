@@ -1,3 +1,5 @@
+import { BACKEND_API } from "./api";
+
 export const MANGA_SOURCES = {
   ANILIST: "anilist",
   JIKAN: "jikan",
@@ -5,7 +7,7 @@ export const MANGA_SOURCES = {
   COMICK: "comick",
 } as const;
 
-export const BACKEND_BASE = "http://127.0.0.1:8000";
+export const BACKEND_BASE = BACKEND_API;
 
 export const MANGA_ENDPOINTS = {
   trending: (page = 1) => `${BACKEND_BASE}/manga/trending?page=${page}`,
@@ -25,6 +27,8 @@ export const MANGA_ENDPOINTS = {
     `${BACKEND_BASE}/manga/comick/chapters?title=${encodeURIComponent(title)}`,
   comickPages: (url: string) =>
     `${BACKEND_BASE}/manga/comick/pages?url=${encodeURIComponent(url)}`,
+  imageProxy: (url: string) =>
+    `${BACKEND_BASE}/manga/image-proxy?url=${encodeURIComponent(url)}`,
 } as const;
 
 export interface MangaDiscoveryItem {
@@ -108,14 +112,22 @@ async function getJson<T>(url: string): Promise<T> {
   if (!response.ok) {
     let detail = "";
     try {
-      const data = (await response.json()) as { detail?: string };
-      detail = typeof data?.detail === "string" ? data.detail : "";
+      const data = (await response.json()) as { detail?: string | { message?: string } };
+      detail = typeof data?.detail === "string"
+        ? data.detail
+        : typeof data?.detail === "object" && typeof data.detail?.message === "string"
+          ? data.detail.message
+          : "";
     } catch {
       detail = "";
     }
     throw new Error(detail || `Server error: ${response.status}`);
   }
   return (await response.json()) as T;
+}
+
+export function toMangaImageProxy(url: string): string {
+  return url ? MANGA_ENDPOINTS.imageProxy(url) : "";
 }
 
 export async function fetchTrendingManga(page = 1): Promise<MangaDiscoveryItem[]> {
@@ -144,7 +156,7 @@ export async function fetchMangaChapters(id: string, language = "en"): Promise<M
 
 export async function fetchMangaPages(chapterId: string): Promise<string[]> {
   const data = await getJson<{ pages: string[] }>(MANGA_ENDPOINTS.pages(chapterId));
-  return data.pages ?? [];
+  return (data.pages ?? []).map(toMangaImageProxy);
 }
 
 export async function fetchMangaRecommendations(id: string | number): Promise<MangaDiscoveryItem[]> {
@@ -163,5 +175,5 @@ export async function fetchComickChapters(title: string): Promise<{ match: Manga
 
 export async function fetchComickPages(url: string): Promise<string[]> {
   const data = await getJson<{ pages: string[] }>(MANGA_ENDPOINTS.comickPages(url));
-  return data.pages ?? [];
+  return (data.pages ?? []).map(toMangaImageProxy);
 }

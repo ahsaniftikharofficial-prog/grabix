@@ -1,9 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useTheme } from "../context/ThemeContext";
 import { useContentFilter } from "../context/ContentFilterContext";
+import { BACKEND_API } from "../lib/api";
 import { IconFolder, IconSun, IconMoon, IconInfo, IconCheck } from "../components/Icons";
-
-const API = "http://127.0.0.1:8000";
 
 interface SettingRowProps {
   label: string;
@@ -33,7 +32,7 @@ function Toggle({ value, onChange }: { value: boolean; onChange: (value: boolean
 
 export default function SettingsPage() {
   const { theme, toggle } = useTheme();
-  const { adultContentBlocked, unlockAdultContent } = useContentFilter();
+  const { adultContentBlocked, adultPasswordConfigured, unlockAdultContent, configureAdultContent } = useContentFilter();
   const [autoFetch, setAutoFetch] = useState(true);
   const [notifications, setNotifications] = useState(true);
   const [format, setFormat] = useState("mp4");
@@ -41,9 +40,12 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState(false);
   const [adultError, setAdultError] = useState("");
+  const [adultModalOpen, setAdultModalOpen] = useState(false);
+  const [adultPassword, setAdultPassword] = useState("");
+  const [adultSubmitting, setAdultSubmitting] = useState(false);
 
   useEffect(() => {
-    fetch(`${API}/settings`)
+    fetch(`${BACKEND_API}/settings`)
       .then((response) => response.json())
       .then((data: Record<string, unknown>) => {
         if (typeof data.auto_fetch === "boolean") setAutoFetch(data.auto_fetch);
@@ -58,7 +60,7 @@ export default function SettingsPage() {
 
   const save = () => {
     setSaveError(false);
-    fetch(`${API}/settings`, {
+    fetch(`${BACKEND_API}/settings`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -80,14 +82,31 @@ export default function SettingsPage() {
   };
 
   const handleAdultUnlock = async () => {
-    const password = window.prompt("Enter the adult content password");
-    if (!password) return;
+    setAdultPassword("");
+    setAdultError("");
+    setAdultModalOpen(true);
+  };
+
+  const submitAdultPassword = async () => {
+    if (!adultPassword.trim()) {
+      setAdultError("Enter a password to continue.");
+      return;
+    }
+    setAdultSubmitting(true);
     setAdultError("");
     try {
-      await unlockAdultContent(password);
+      if (adultPasswordConfigured) {
+        await unlockAdultContent(adultPassword);
+      } else {
+        await configureAdultContent(adultPassword);
+        await unlockAdultContent(adultPassword);
+      }
+      setAdultModalOpen(false);
+      setAdultPassword("");
     } catch (error) {
       setAdultError(error instanceof Error ? error.message : "Could not unlock adult content.");
-      window.setTimeout(() => setAdultError(""), 3000);
+    } finally {
+      setAdultSubmitting(false);
     }
   };
 
@@ -157,7 +176,7 @@ export default function SettingsPage() {
           >
             {adultContentBlocked ? (
               <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => void handleAdultUnlock()}>
-                Enable Adult Content
+                {adultPasswordConfigured ? "Enable Adult Content" : "Set Adult Password"}
               </button>
             ) : (
               <span style={{ fontSize: 12, color: "var(--text-success)", fontWeight: 600 }}>Unlocked for this session</span>
@@ -186,6 +205,38 @@ export default function SettingsPage() {
           </div>
         </div>
       </div>
+
+      {adultModalOpen && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.62)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 220 }} onClick={() => !adultSubmitting && setAdultModalOpen(false)}>
+          <div className="card card-padded" style={{ width: "100%", maxWidth: 420, border: "1px solid var(--border)" }} onClick={(event) => event.stopPropagation()}>
+            <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>{adultPasswordConfigured ? "Unlock Adult Content" : "Set Adult Content Password"}</div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 14 }}>
+              {adultPasswordConfigured ? "Enter the password to unlock adult content for this session." : "Create a password for adult-content access on this device."}
+            </div>
+            <input
+              className="input-base"
+              type="password"
+              autoFocus
+              value={adultPassword}
+              onChange={(event) => setAdultPassword(event.target.value)}
+              placeholder={adultPasswordConfigured ? "Enter password" : "Create password"}
+              style={{ width: "100%", marginBottom: 10 }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !adultSubmitting) {
+                  void submitAdultPassword();
+                }
+              }}
+            />
+            {adultError ? <div style={{ fontSize: 12, color: "var(--text-danger)", marginBottom: 12 }}>{adultError}</div> : null}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+              <button className="btn btn-ghost" onClick={() => setAdultModalOpen(false)} disabled={adultSubmitting}>Cancel</button>
+              <button className="btn btn-primary" onClick={() => void submitAdultPassword()} disabled={adultSubmitting || !adultPassword.trim()}>
+                {adultSubmitting ? "Please wait..." : adultPasswordConfigured ? "Unlock" : "Save & Unlock"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

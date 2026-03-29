@@ -65,12 +65,17 @@ export default function SubtitlePanel({
   const [loading, setLoading] = useState(false);
   const [loadingUrl, setLoadingUrl] = useState("");
   const [error, setError] = useState("");
+  const [mounted, setMounted] = useState(visible);
 
   useEffect(() => {
     if (visible) {
+      setMounted(true);
       setQuery(searchTitle || mediaTitle);
       setError("");
+      return;
     }
+    const timeoutId = window.setTimeout(() => setMounted(false), 180);
+    return () => window.clearTimeout(timeoutId);
   }, [mediaTitle, searchTitle, visible]);
 
   const handleSearch = async () => {
@@ -150,12 +155,14 @@ export default function SubtitlePanel({
     }
   };
 
-  if (!visible) {
+  if (!mounted) {
     return null;
   }
 
   return (
     <div
+      data-subtitle-panel="true"
+      onClick={(event) => event.stopPropagation()}
       style={{
         position: "absolute",
         left: 20,
@@ -168,6 +175,9 @@ export default function SubtitlePanel({
         boxShadow: "0 24px 60px rgba(0,0,0,0.45)",
         backdropFilter: "blur(18px)",
         overflow: "hidden",
+        opacity: visible ? 1 : 0,
+        transform: visible ? "translateY(0) scale(1)" : "translateY(12px) scale(0.98)",
+        transition: "opacity 180ms ease, transform 180ms ease",
       }}
     >
       <div

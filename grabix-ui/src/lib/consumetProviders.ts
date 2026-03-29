@@ -98,6 +98,10 @@ export interface ConsumetNewsArticle extends ConsumetNewsItem {
   content?: string;
 }
 
+export function toConsumetProxyUrl(url: string): string {
+  return url ? `${BACKEND_API}/consumet/proxy?url=${encodeURIComponent(url)}` : "";
+}
+
 function normalizeError(error: unknown): Error {
   return error instanceof Error ? error : new Error("Unknown request failure.");
 }

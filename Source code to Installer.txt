@@ -1,0 +1,1 @@
+powershell -ExecutionPolicy Bypass -File "H:\Code\Project 3\grabix\build-installer.ps1"

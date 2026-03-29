@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, HTTPException, Query, Response
 
 from app.services.subtitles import (
@@ -8,6 +10,7 @@ from app.services.subtitles import (
 )
 
 router = APIRouter()
+logger = logging.getLogger("grabix.subtitles")
 
 
 @router.get("/search")
@@ -47,7 +50,8 @@ async def subtitle_download(
 ):
     try:
         content = await download_subtitle(url)
-    except Exception as exc:
+    except (ValueError, OSError) as exc:
+        logger.error("Subtitle download failed for title=%s language=%s type=%s source=%s url=%s: %s", title, language, type, source, url, exc)
         raise HTTPException(status_code=502, detail=f"Subtitle download failed: {exc}") from exc
 
     await cache_subtitle_content(

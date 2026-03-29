@@ -65,8 +65,14 @@ export default function DownloadOptionsModal({
             className={`quality-chip${selected === option.id ? " active" : ""}`}
             onClick={() => onSelect(option.id)}
             type="button"
+            title={option.help || option.label}
           >
-            {option.label}
+            <span>{option.label}</span>
+            {option.help ? (
+              <span style={{ display: "block", fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
+                {option.help}
+              </span>
+            ) : null}
           </button>
         ))}
       </div>

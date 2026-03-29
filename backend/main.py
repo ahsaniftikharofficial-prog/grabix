@@ -1,17 +1,27 @@
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-import yt_dlp, os, uuid, sqlite3, shutil, threading, subprocess, time, json, re, hashlib
+import yt_dlp, os, uuid, sqlite3, shutil, threading, subprocess, time, json, re, hashlib, socket, ipaddress
 import ctypes
 from pathlib import Path
 from datetime import datetime
 from difflib import SequenceMatcher
-from urllib.parse import quote, urljoin, urlparse, urlencode
+from urllib.parse import parse_qs, quote, urljoin, urlparse, urlencode
 from urllib.request import Request as URLRequest, urlopen
 from pydantic import BaseModel
 from app.routes.consumet import router as consumet_router
+from app.routes.downloads import router as downloads_router
 from app.routes.manga import router as manga_router
+from app.routes.settings import router as settings_router
+from app.routes.streaming import router as streaming_router
 from app.routes.subtitles import router as subtitles_router
+
+try:
+    import bcrypt
+    BCRYPT_AVAILABLE = True
+except Exception:
+    bcrypt = None
+    BCRYPT_AVAILABLE = False
 
 try:
     from selenium import webdriver
@@ -49,9 +59,30 @@ except Exception as exc:
     MOVIEBOX_DOWNLOAD_REQUEST_HEADERS = {}
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+LOCAL_APP_ORIGINS = [
+    "http://127.0.0.1:1420",
+    "http://localhost:1420",
+    "http://127.0.0.1:1421",
+    "http://localhost:1421",
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+    "tauri://localhost",
+    "http://tauri.localhost",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=LOCAL_APP_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "Range"],
+)
 app.include_router(consumet_router, prefix="/consumet")
+app.include_router(downloads_router)
 app.include_router(manga_router, prefix="/manga")
+app.include_router(settings_router)
+app.include_router(streaming_router)
 app.include_router(subtitles_router, prefix="/subtitles")
 
 DOWNLOAD_DIR = str(Path.home() / "Downloads" / "GRABIX")
@@ -66,6 +97,37 @@ downloads: dict = {}
 download_controls: dict = {}
 FFMPEG_PATH = shutil.which("ffmpeg")
 HIANIME_LOCAL_BASE = os.getenv("CONSUMET_API_BASE", "http://127.0.0.1:3000").rstrip("/")
+SELF_BASE_URL = os.getenv("GRABIX_PUBLIC_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+STREAM_EXTRACT_CACHE_TTL_SECONDS = 900
+stream_extract_cache: dict[str, tuple[float, dict]] = {}
+ADULT_UNLOCK_WINDOW_SECONDS = 300
+ADULT_UNLOCK_MAX_ATTEMPTS = 5
+adult_unlock_attempts: dict[str, list[float]] = {}
+APPROVED_MEDIA_HOSTS = (
+    "youtube.com",
+    "youtu.be",
+    "googlevideo.com",
+    "ytimg.com",
+    "vimeo.com",
+    "archive.org",
+    "moviebox.ng",
+    "moviebox.ph",
+    "movieboxpro.app",
+    "hakunaymatata.com",
+    "bcdnxw.com",
+    "bunnycdn",
+    "cdn",
+    "vidsrc",
+    "2embed",
+    "multiembed",
+    "vsembed",
+    "hianime",
+    "aniwatch",
+    "mangadex",
+    "comick",
+    "opensubtitles",
+    "subdl",
+)
 EDGE_BINARY_PATH = next(
     (
         path
@@ -95,6 +157,10 @@ class AnimeResolveRequest(BaseModel):
 
 
 class AdultContentUnlockRequest(BaseModel):
+    password: str
+
+
+class AdultContentConfigureRequest(BaseModel):
     password: str
 
 
@@ -146,6 +212,104 @@ def _format_eta(seconds: float | int | None) -> str:
     if mins:
         return f"{mins}m {secs}s"
     return f"{secs}s"
+
+
+def _client_key(request: Request | None = None) -> str:
+    if request and request.client and request.client.host:
+        return request.client.host
+    return "local"
+
+
+def _normalize_unlock_attempts(client_key: str) -> list[float]:
+    cutoff = time.time() - ADULT_UNLOCK_WINDOW_SECONDS
+    attempts = [stamp for stamp in adult_unlock_attempts.get(client_key, []) if stamp >= cutoff]
+    adult_unlock_attempts[client_key] = attempts
+    return attempts
+
+
+def _record_unlock_failure(client_key: str) -> int:
+    attempts = _normalize_unlock_attempts(client_key)
+    attempts.append(time.time())
+    adult_unlock_attempts[client_key] = attempts
+    return len(attempts)
+
+
+def _ensure_unlock_not_throttled(client_key: str):
+    attempts = _normalize_unlock_attempts(client_key)
+    if len(attempts) >= ADULT_UNLOCK_MAX_ATTEMPTS:
+        retry_after = max(1, int(ADULT_UNLOCK_WINDOW_SECONDS - (time.time() - attempts[0])))
+        raise HTTPException(status_code=429, detail=f"Too many failed attempts. Try again in {retry_after} seconds.")
+
+
+def _hash_adult_password(password: str) -> str:
+    if not BCRYPT_AVAILABLE:
+        raise HTTPException(status_code=500, detail="bcrypt is required before configuring the adult-content password.")
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _verify_adult_password(password: str, hashed_value: str) -> bool:
+    if not password or not hashed_value or not BCRYPT_AVAILABLE:
+        return False
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), hashed_value.encode("utf-8"))
+    except ValueError:
+        return False
+
+
+def _is_private_or_loopback_host(hostname: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(hostname)
+        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return True
+
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return True
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return True
+    return False
+
+
+def _validate_outbound_url(url: str, *, allowed_hosts: tuple[str, ...] = APPROVED_MEDIA_HOSTS) -> str:
+    parsed = urlparse((url or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="Only http/https URLs are allowed.")
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        raise HTTPException(status_code=400, detail="URL is missing a hostname.")
+    if _is_private_or_loopback_host(hostname):
+        raise HTTPException(status_code=400, detail="Private, loopback, and local network hosts are blocked.")
+    if not any(token in hostname for token in allowed_hosts):
+        raise HTTPException(status_code=400, detail=f"Host '{hostname}' is not on the approved media allowlist.")
+    return parsed.geturl()
+
+
+def _normalize_download_target(url: str, headers_json: str = "") -> tuple[str, str]:
+    parsed = urlparse((url or "").strip())
+    self_parsed = urlparse(SELF_BASE_URL)
+    same_host = (parsed.hostname or "").lower() == (self_parsed.hostname or "").lower()
+    same_port = (parsed.port or (443 if parsed.scheme == "https" else 80)) == (
+        self_parsed.port or (443 if self_parsed.scheme == "https" else 80)
+    )
+
+    if same_host and same_port and parsed.path in {"/stream/proxy", "/moviebox/proxy-stream", "/moviebox/subtitle"}:
+        query = parse_qs(parsed.query)
+        nested_url = (query.get("url") or [""])[0].strip()
+        nested_headers_json = headers_json or (query.get("headers_json") or [""])[0].strip()
+        if not nested_headers_json and parsed.path.startswith("/moviebox/"):
+            nested_headers_json = json.dumps(dict(MOVIEBOX_DOWNLOAD_REQUEST_HEADERS or {}))
+        if nested_url:
+            return _validate_outbound_url(nested_url), nested_headers_json
+
+    return _validate_outbound_url(url), headers_json
 
 
 # ── DB Setup ──────────────────────────────────────────────────────────────────
@@ -234,7 +398,8 @@ DEFAULT_SETTINGS = {
     "default_quality": "1080p",
     "download_folder": DOWNLOAD_DIR,
     "adult_content_enabled": False,
-    "adult_password_hash": hashlib.sha256("grabix2024".encode("utf-8")).hexdigest(),
+    "adult_password_hash": "",
+    "adult_password_configured": False,
 }
 
 
@@ -243,6 +408,8 @@ def load_settings() -> dict:
         if os.path.exists(SETTINGS_PATH):
             with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
                 saved = json.load(f)
+                if saved.get("adult_password_hash") and not saved.get("adult_password_configured"):
+                    saved["adult_password_configured"] = True
                 # Merge with defaults so any new keys are always present
                 return {**DEFAULT_SETTINGS, **saved}
     except Exception as e:
@@ -264,6 +431,7 @@ def _settings_public_payload(data: dict) -> dict:
     payload = {**DEFAULT_SETTINGS, **(data or {})}
     payload.pop("adult_password_hash", None)
     payload["adult_content_enabled"] = False
+    payload["adult_password_configured"] = bool((data or {}).get("adult_password_hash"))
     return payload
 
 
@@ -287,7 +455,7 @@ def _extract_iframe_src(html: str) -> str:
 
 
 def _resolve_embed_target(url: str, max_depth: int = 3) -> str:
-    current = (url or "").strip()
+    current = _validate_outbound_url(url)
     if not current:
         return ""
 
@@ -298,6 +466,7 @@ def _resolve_embed_target(url: str, max_depth: int = 3) -> str:
     }
 
     for _ in range(max_depth):
+        current = _validate_outbound_url(current)
         req = URLRequest(current, headers=headers)
         with urlopen(req, timeout=12) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
@@ -307,6 +476,7 @@ def _resolve_embed_target(url: str, max_depth: int = 3) -> str:
             return current
 
         next_url = urljoin(current, iframe_src)
+        _validate_outbound_url(next_url)
         if next_url == current:
             return current
 
@@ -319,17 +489,17 @@ def _resolve_embed_target(url: str, max_depth: int = 3) -> str:
     return current
 
 
-@app.get("/resolve-embed")
 def resolve_embed(url: str):
     try:
+        _validate_outbound_url(url)
         resolved = _resolve_embed_target(url)
         return {"url": resolved or url}
     except Exception as e:
         return {"url": url, "error": str(e)}
 
 
-@app.get("/stream/proxy")
 def stream_proxy(url: str, request: Request, headers_json: str = ""):
+    _validate_outbound_url(url)
     parsed_headers: dict[str, str] = {}
     if headers_json:
         try:
@@ -370,11 +540,10 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
             media_type="application/vnd.apple.mpegurl",
             headers={
                 "Cache-Control": "no-store",
-                "Access-Control-Allow-Origin": "*",
             },
         )
 
-    response_headers = {"Access-Control-Allow-Origin": "*"}
+    response_headers = {}
     for header_name in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"):
         header_value = upstream_response.headers.get(header_name)
         if header_value:
@@ -412,8 +581,8 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
     )
 
 
-@app.get("/stream/variants")
 def stream_variants(url: str, headers_json: str = ""):
+    _validate_outbound_url(url)
     parsed_headers: dict[str, str] = {}
     if headers_json:
         try:
@@ -495,22 +664,27 @@ def _rewrite_hls_playlist(content: str, base_url: str, headers_json: str) -> str
 def _extract_hls_variants(content: str, base_url: str) -> list[dict[str, str]]:
     variants: list[dict[str, str]] = []
     pending_label = ""
+    pending_bandwidth = 0
     for raw_line in content.splitlines():
         line = raw_line.strip()
         if not line:
             continue
         if line.startswith("#EXT-X-STREAM-INF:"):
             resolution_match = re.search(r"RESOLUTION=\d+x(\d+)", line, re.IGNORECASE)
+            bandwidth_match = re.search(r"(?:AVERAGE-BANDWIDTH|BANDWIDTH)=(\d+)", line, re.IGNORECASE)
             height = resolution_match.group(1) if resolution_match else ""
             pending_label = f"{height}p" if height else "Auto"
+            pending_bandwidth = int(bandwidth_match.group(1)) if bandwidth_match else 0
             continue
         if line.startswith("#"):
             continue
         variants.append({
             "label": pending_label or "Auto",
             "url": urljoin(base_url, line),
+            "bandwidth": str(pending_bandwidth),
         })
         pending_label = ""
+        pending_bandwidth = 0
     return variants
 
 
@@ -558,6 +732,108 @@ def _extract_stream_url(url: str) -> tuple[str, str]:
     if not direct_url:
         raise RuntimeError(result.stderr.strip() or "No stream found")
     return direct_url, ("hls" if ".m3u8" in direct_url.lower() else "direct")
+
+
+def _looks_like_playable_media_url(url: str) -> bool:
+    lowered = str(url or "").lower()
+    return any(
+        token in lowered
+        for token in (
+            ".m3u8",
+            ".mp4",
+            ".m4v",
+            ".webm",
+            ".mpd",
+            "/master.m3u8",
+        )
+    )
+
+
+def _extract_stream_url_via_browser(url: str) -> tuple[str, str] | None:
+    if not SELENIUM_AVAILABLE or not EDGE_BINARY_PATH:
+        return None
+
+    options = EdgeOptions()
+    options.binary_location = EDGE_BINARY_PATH
+    options.page_load_strategy = "eager"
+    options.add_argument("--window-size=1280,720")
+    options.add_argument("--autoplay-policy=no-user-gesture-required")
+    options.add_argument("--disable-features=msEdgeSidebarV2")
+    options.add_argument("--mute-audio")
+    options.add_argument("--disable-gpu")
+    options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
+    options.set_capability("ms:loggingPrefs", {"performance": "ALL"})
+
+    driver = None
+    try:
+        driver = webdriver.Edge(options=options)
+        driver.set_page_load_timeout(20)
+        driver.set_script_timeout(10)
+        driver.set_window_position(-2000, 0)
+        try:
+            target_url = _resolve_embed_target(url)
+        except Exception:
+            target_url = url
+        driver.get(target_url or url)
+
+        deadline = time.time() + 12
+        seen_urls: set[str] = set()
+
+        while time.time() < deadline:
+            try:
+                entries = driver.execute_script(
+                    """
+                    return performance.getEntriesByType('resource')
+                      .map((entry) => entry.name)
+                      .filter(Boolean);
+                    """
+                ) or []
+            except Exception:
+                entries = []
+
+            for candidate in entries:
+                candidate_url = str(candidate or "").strip()
+                if not candidate_url or candidate_url in seen_urls:
+                    continue
+                seen_urls.add(candidate_url)
+                if _looks_like_playable_media_url(candidate_url):
+                    return candidate_url, ("hls" if ".m3u8" in candidate_url.lower() else "direct")
+
+            try:
+                performance_logs = driver.get_log("performance")
+            except Exception:
+                performance_logs = []
+
+            for entry in performance_logs:
+                try:
+                    message = json.loads(entry["message"]).get("message", {})
+                    method = message.get("method", "")
+                    params = message.get("params", {})
+                    request_url = (
+                        params.get("request", {}).get("url")
+                        or params.get("response", {}).get("url")
+                        or ""
+                    )
+                    request_url = str(request_url).strip()
+                    if not request_url or request_url in seen_urls:
+                        continue
+                    seen_urls.add(request_url)
+                    if method.startswith("Network.") and _looks_like_playable_media_url(request_url):
+                        return request_url, ("hls" if ".m3u8" in request_url.lower() else "direct")
+                except Exception:
+                    continue
+
+            time.sleep(0.6)
+    except Exception as exc:
+        print(f"[GRABIX] browser stream resolver error for {url[:180]}: {exc}")
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+    return None
 
 
 def _anime_server_order(server: str) -> list[str]:
@@ -878,10 +1154,27 @@ def _moviebox_media_type_from_item(item) -> str:
 
 
 def _moviebox_is_hindi(item) -> bool:
-    title = (getattr(item, "title", "") or "").lower()
-    corner = (getattr(item, "corner", "") or "").lower()
-    country = (getattr(item, "countryName", "") or "").lower()
-    return "hindi" in title or "hindi" in corner or country == "india"
+    haystack = " ".join(
+        [
+            str(getattr(item, "title", "") or ""),
+            str(getattr(item, "corner", "") or ""),
+            str(getattr(item, "countryName", "") or ""),
+            " ".join(str(value) for value in (getattr(item, "genre", None) or [])),
+            " ".join(str(value) for value in (getattr(item, "subtitles", None) or [])),
+            str(getattr(item, "description", "") or ""),
+        ]
+    ).lower()
+    return any(
+        token in haystack
+        for token in (
+            "hindi",
+            "hin",
+            "dubbed",
+            "dual audio",
+            "multi audio",
+            "bollywood",
+        )
+    ) or (getattr(item, "countryName", "") or "").lower() == "india"
 
 
 def _moviebox_is_anime(item) -> bool:
@@ -1026,15 +1319,15 @@ def _moviebox_pick_category(categories: dict[str, list], keywords: list[str]) ->
 
 
 def _moviebox_subtitle_proxy_url(url: str) -> str:
-    return f"http://127.0.0.1:8000/moviebox/subtitle?url={quote(url, safe='')}"
+    return f"{SELF_BASE_URL}/moviebox/subtitle?url={quote(url, safe='')}"
 
 
 def _moviebox_stream_proxy_url(url: str) -> str:
-    return f"http://127.0.0.1:8000/moviebox/proxy-stream?url={quote(url, safe='')}"
+    return f"{SELF_BASE_URL}/moviebox/proxy-stream?url={quote(url, safe='')}"
 
 
 def _moviebox_poster_proxy_url(url: str) -> str:
-    return f"http://127.0.0.1:8000/moviebox/poster?url={quote(url, safe='')}"
+    return f"{SELF_BASE_URL}/moviebox/poster?url={quote(url, safe='')}"
 
 
 def _moviebox_caption_payload(caption) -> dict:
@@ -1054,11 +1347,13 @@ def _moviebox_source_payload(media_file, captions: list[dict] | None = None) -> 
     size = int(getattr(media_file, "size", 0) or 0)
     quality = f"{resolution}p" if resolution > 0 else "Auto"
     raw_url = str(getattr(media_file, "url", "") or "")
+    server = urlparse(raw_url).netloc or "moviebox"
     return {
         "provider": "MovieBox",
         "label": f"MovieBox {quality}",
         "url": _moviebox_stream_proxy_url(raw_url) if raw_url else "",
         "original_url": raw_url,
+        "server": server,
         "quality": quality,
         "resolution": resolution,
         "size_bytes": size,
@@ -1127,16 +1422,16 @@ async def _moviebox_discover_payload():
             "items": [_moviebox_card_payload(item, "recent") for item in _moviebox_sort_items(hot_items, "recent")[:20]],
         },
         {
-            "id": "top-rated",
-            "title": "Top Rated",
-            "subtitle": "Highest IMDb-rated picks from Movie Box",
-            "items": [_moviebox_card_payload(item, "top-rated") for item in _moviebox_sort_items(combined, "rating")[:20]],
-        },
-        {
             "id": "most-popular",
             "title": "Most Popular",
             "subtitle": "What people are watching right now",
             "items": [_moviebox_card_payload(item, "most-popular") for item in trending_items[:20]],
+        },
+        {
+            "id": "top-rated",
+            "title": "Top Rated",
+            "subtitle": "Highest IMDb-rated picks from Movie Box",
+            "items": [_moviebox_card_payload(item, "top-rated") for item in _moviebox_sort_items(combined, "rating")[:20]],
         },
         {
             "id": "hindi",
@@ -1189,6 +1484,20 @@ async def _moviebox_discover_payload():
                     media_type="anime",
                 )[:20]
             ],
+        },
+        {
+            "id": "other",
+            "title": "Other",
+            "subtitle": "Everything else worth exploring",
+            "items": [
+                _moviebox_card_payload(item, "other")
+                for item in _moviebox_unique_items(
+                    _moviebox_pick_category(categories, ["indian", "drama"])
+                    + _moviebox_pick_category(categories, ["punjabi"])
+                    + combined
+                )
+                if not _moviebox_is_anime(item)
+            ][:20],
         },
     ]
 
@@ -1510,6 +1819,7 @@ def _moviebox_srt_to_vtt(content: str) -> str:
 @app.get("/moviebox/subtitle")
 def moviebox_subtitle(url: str):
     try:
+        _validate_outbound_url(url)
         request = URLRequest(
             url,
             headers={
@@ -1669,7 +1979,7 @@ def _build_video_format_selector(quality: str) -> str:
 def _is_direct_media_url(url: str) -> bool:
     lowered = (url or "").lower()
     parsed = urlparse(lowered)
-    if "127.0.0.1:8000/moviebox/proxy-stream" in lowered or "localhost:8000/moviebox/proxy-stream" in lowered:
+    if "/moviebox/proxy-stream" in lowered:
         return True
     return parsed.path.endswith((".mp4", ".m4v", ".mov", ".webm", ".mkv"))
 
@@ -1677,7 +1987,7 @@ def _is_direct_media_url(url: str) -> bool:
 def _is_direct_subtitle_url(url: str) -> bool:
     lowered = (url or "").lower()
     parsed = urlparse(lowered)
-    if "127.0.0.1:8000/moviebox/subtitle" in lowered or "localhost:8000/moviebox/subtitle" in lowered:
+    if "/moviebox/subtitle" in lowered:
         return True
     return parsed.path.endswith((".vtt", ".srt", ".ass", ".ssa", ".sub"))
 
@@ -2125,7 +2435,6 @@ def _start_download_thread(dl_id: str):
 
 
 # FIX 3: Changed from POST to GET — frontend calls this as a plain fetch() GET
-@app.get("/download")
 def start_download(
     url: str,
     title: str = "",
@@ -2143,10 +2452,11 @@ def start_download(
     headers_json: str = "",
     force_hls: bool = False,
 ):
+    safe_url, headers_json = _normalize_download_target(url, headers_json)
     dl_id = str(uuid.uuid4())
-    pause_supported = dl_type == "video" and (force_hls or _is_direct_media_url(url))
+    pause_supported = dl_type == "video" and (force_hls or _is_direct_media_url(safe_url))
     params = {
-        "url": url,
+        "url": safe_url,
         "title": title,
         "thumbnail": thumbnail,
         "dl_type": dl_type,
@@ -2166,11 +2476,11 @@ def start_download(
     _create_download_record(dl_id, title=title, params=params)
 
     # Quick metadata fetch for history DB — non-blocking, errors are swallowed
-    fallback_title = title.strip() or Path(urlparse(url).path).stem or f"grabix-{dl_id}"
+    fallback_title = title.strip() or Path(urlparse(safe_url).path).stem or f"grabix-{dl_id}"
     try:
-        if dl_type == "video" and (force_hls or ".m3u8" in url.lower() or _is_direct_media_url(url) or title.strip()):
+        if dl_type == "video" and (force_hls or ".m3u8" in safe_url.lower() or _is_direct_media_url(safe_url) or title.strip()):
             meta = {
-                "id": dl_id, "url": url,
+                "id": dl_id, "url": safe_url,
                 "title": fallback_title,
                 "thumbnail": thumbnail,
                 "channel": "",
@@ -2182,9 +2492,9 @@ def start_download(
             downloads[dl_id]["title"] = meta["title"]
             downloads[dl_id]["thumbnail"] = meta["thumbnail"]
             db_insert(meta)
-        elif dl_type == "subtitle" and (_is_direct_subtitle_url(url) or title.strip()):
+        elif dl_type == "subtitle" and (_is_direct_subtitle_url(safe_url) or title.strip()):
             meta = {
-                "id": dl_id, "url": url,
+                "id": dl_id, "url": safe_url,
                 "title": fallback_title,
                 "thumbnail": thumbnail,
                 "channel": "",
@@ -2198,9 +2508,9 @@ def start_download(
             db_insert(meta)
         else:
             with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True, "noplaylist": True}) as ydl:
-                info = ydl.extract_info(url, download=False)
+                info = ydl.extract_info(safe_url, download=False)
                 meta = {
-                    "id": dl_id, "url": url,
+                    "id": dl_id, "url": safe_url,
                     "title": info.get("title", fallback_title),
                     "thumbnail": info.get("thumbnail", ""),
                     "channel": info.get("channel") or info.get("uploader", ""),
@@ -2223,19 +2533,16 @@ def start_download(
 
 
 # FIX 1: This is the correct endpoint name the frontend polls
-@app.get("/download-status/{dl_id}")
 def download_status(dl_id: str):
     item = downloads.get(dl_id)
     return _public_download(item) if item else {"status": "not_found"}
 
 
 # Keep /progress/{dl_id} as an alias so nothing breaks
-@app.get("/progress/{dl_id}")
 def progress_alias(dl_id: str):
     return download_status(dl_id)
 
 
-@app.get("/downloads")
 def list_downloads():
     ordered = sorted(downloads.values(), key=lambda item: item.get("created_at", ""), reverse=True)
     return [_public_download(item) for item in ordered]
@@ -2256,7 +2563,6 @@ def get_history():
         return []
 
 
-@app.post("/open-download-folder")
 def open_download_folder(path: str = ""):
     # If the specific file doesn't exist, fall back to the DOWNLOAD_DIR folder
     target = Path(path) if path else Path(DOWNLOAD_DIR)
@@ -2281,7 +2587,6 @@ def open_download_folder(path: str = ""):
     return {"opened": str(target)}
 
 
-@app.post("/downloads/{dl_id}/action")
 def download_action(dl_id: str, action: str):
     if dl_id not in downloads:
         raise HTTPException(status_code=404, detail="Download not found")
@@ -2338,7 +2643,6 @@ def download_action(dl_id: str, action: str):
     return _public_download(item)
 
 
-@app.delete("/downloads/{dl_id}")
 def delete_download(dl_id: str):
     item = downloads.get(dl_id)
     controls = download_controls.get(dl_id)
@@ -2366,7 +2670,6 @@ def delete_download(dl_id: str):
     return {"deleted": True}
 
 
-@app.post("/downloads/stop-all")
 def stop_all_downloads():
     for dl_id, item in downloads.items():
         if item["status"] in {"queued", "downloading", "paused", "canceling"}:
@@ -2384,27 +2687,48 @@ def stop_all_downloads():
 
 
 # ── Settings routes ───────────────────────────────────────────────────────────
-@app.get("/settings")
 def get_settings():
     return _settings_public_payload(load_settings())
 
 
-@app.post("/settings")
 def update_settings(data: dict):
     sanitized = dict(data or {})
     sanitized.pop("adult_password_hash", None)
     sanitized["adult_content_enabled"] = False
+    sanitized.pop("adult_password_configured", None)
     save_settings_to_disk(sanitized)
     return _settings_public_payload(load_settings())
 
 
-@app.post("/settings/adult-content/unlock")
-def unlock_adult_content(data: AdultContentUnlockRequest):
+def configure_adult_content(data: AdultContentConfigureRequest):
+    password = (data.password or "").strip()
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
+
     settings = load_settings()
-    expected_hash = settings.get("adult_password_hash") or DEFAULT_SETTINGS["adult_password_hash"]
-    candidate_hash = hashlib.sha256((data.password or "").encode("utf-8")).hexdigest()
-    if candidate_hash != expected_hash:
-        raise HTTPException(status_code=403, detail="Incorrect password")
+    save_settings_to_disk({
+        **settings,
+        "adult_password_hash": _hash_adult_password(password),
+        "adult_password_configured": True,
+        "adult_content_enabled": False,
+    })
+    return {"configured": True}
+
+
+def unlock_adult_content(data: AdultContentUnlockRequest, request: Request):
+    settings = load_settings()
+    expected_hash = settings.get("adult_password_hash") or ""
+    if not expected_hash:
+        raise HTTPException(status_code=428, detail="Set an adult-content password first.")
+
+    client_key = _client_key(request)
+    _ensure_unlock_not_throttled(client_key)
+    if not _verify_adult_password(data.password or "", expected_hash):
+        attempts = _record_unlock_failure(client_key)
+        remaining = max(0, ADULT_UNLOCK_MAX_ATTEMPTS - attempts)
+        raise HTTPException(status_code=403, detail=f"Incorrect password. {remaining} attempt(s) remaining before a temporary lockout.")
+
+    adult_unlock_attempts.pop(client_key, None)
     return {"unlocked": True}
 
 
@@ -3068,27 +3392,43 @@ def storage_stats():
 # HISTORY MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/ffmpeg-status")
 def ffmpeg_status():
     """Check if FFmpeg is available."""
     return {"available": has_ffmpeg(), "path": FFMPEG_PATH or ""}
 
-@app.get("/extract-stream")
 async def extract_stream(url: str):
+    safe_url = _validate_outbound_url(url)
+    cached = stream_extract_cache.get(safe_url)
+    if cached and cached[0] > time.time():
+        return cached[1]
     try:
-        result = subprocess.run(
-            ["yt-dlp", "--get-url", "--no-playlist", url],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        direct_url, kind = _extract_stream_url(safe_url)
+        payload = {"url": direct_url, "quality": "Auto", "format": kind}
+        stream_extract_cache[safe_url] = (time.time() + STREAM_EXTRACT_CACHE_TTL_SECONDS, payload)
+        return payload
     except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=504, detail="Stream extraction timed out") from exc
+        ytdlp_error = "Stream extraction timed out"
+    except Exception as exc:
+        ytdlp_error = str(exc) or "No stream found"
 
-    output_lines = result.stdout.strip().splitlines()
-    direct_url = output_lines[0].strip() if output_lines else ""
-    if not direct_url:
-        detail = result.stderr.strip() or "No stream found"
-        print(f"[GRABIX] extract-stream failed for {url[:180]}: {detail}")
-        raise HTTPException(status_code=422, detail=detail)
-    return {"url": direct_url, "quality": "Auto"}
+    browser_result = _extract_stream_url_via_browser(safe_url)
+    if browser_result:
+        direct_url, kind = browser_result
+        print(f"[GRABIX] extract-stream browser fallback succeeded for {safe_url[:180]}")
+        payload = {"url": direct_url, "quality": "Auto", "format": kind}
+        stream_extract_cache[safe_url] = (time.time() + STREAM_EXTRACT_CACHE_TTL_SECONDS, payload)
+        return payload
+
+    print(f"[GRABIX] extract-stream failed for {safe_url[:180]}: {ytdlp_error}")
+    raise HTTPException(status_code=422, detail=ytdlp_error)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host="127.0.0.1",
+        port=int(os.getenv("GRABIX_BACKEND_PORT", "8000")),
+        log_level=os.getenv("GRABIX_BACKEND_LOG_LEVEL", "warning"),
+    )

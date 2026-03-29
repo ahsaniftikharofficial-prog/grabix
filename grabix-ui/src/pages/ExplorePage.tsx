@@ -7,6 +7,7 @@ import {
   fetchConsumetNews,
   fetchConsumetNewsArticle,
   searchConsumetDomain,
+  toConsumetProxyUrl,
   type ConsumetDomain,
   type ConsumetMediaDetail,
   type ConsumetMediaSummary,
@@ -91,7 +92,7 @@ function LoadingGrid({ count = 8 }: { count?: number }) {
 
 export default function ExplorePage() {
   const { adultContentBlocked } = useContentFilter();
-  const [tab, setTab] = useState<ExploreTab>("news");
+  const [tab, setTab] = useState<ExploreTab>("books");
   const [topic, setTopic] = useState("");
   const [searchText, setSearchText] = useState("");
   const [query, setQuery] = useState("");
@@ -210,10 +211,10 @@ export default function ExplorePage() {
   };
 
   const tabs: { id: ExploreTab; label: string }[] = [
-    { id: "news", label: "News" },
     { id: "books", label: "Books" },
+    { id: "news", label: "News" },
     { id: "comics", label: "Comics" },
-    { id: "light-novels", label: "Light Novels" },
+    { id: "light-novels", label: "Light Novel" },
   ];
 
   return (
@@ -261,7 +262,7 @@ export default function ExplorePage() {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 }}>
               {filteredNewsItems.map((item) => (
                 <button key={item.id} className="card" style={{ textAlign: "left", overflow: "hidden", cursor: "pointer", border: "1px solid var(--border)", background: "var(--bg-surface)" }} onClick={() => void openNews(item)}>
-                  {item.image ? <img src={item.image} alt={item.title} style={{ width: "100%", height: 160, objectFit: "cover" }} /> : <div style={{ width: "100%", height: 160, background: "var(--bg-surface2)" }} />}
+                  {item.image ? <img src={toConsumetProxyUrl(item.image)} alt={item.title} referrerPolicy="no-referrer" style={{ width: "100%", height: 160, objectFit: "cover" }} /> : <div style={{ width: "100%", height: 160, background: "var(--bg-surface2)" }} />}
                   <div style={{ padding: "12px 14px" }}>
                     <div style={{ fontSize: 14, fontWeight: 700, lineHeight: 1.35 }}>{item.title}</div>
                     <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 8 }}>{item.published_at || "Latest feed"}</div>

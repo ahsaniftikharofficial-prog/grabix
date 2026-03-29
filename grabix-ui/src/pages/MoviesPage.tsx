@@ -1,14 +1,15 @@
 // grabix-ui/src/pages/MoviesPage.tsx
 // Updated: Play (VidSrc), Download, Favorite buttons
 
-import { useState, useEffect } from "react";
-import { IconSearch, IconStar, IconPlay, IconDownload, IconX, IconRefresh } from "../components/Icons";
+import { useState, useEffect, useRef } from "react";
+import { IconSearch, IconStar, IconPlay, IconDownload, IconX } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import { useFavorites } from "../context/FavoritesContext";
 import { useContentFilter } from "../context/ContentFilterContext";
 import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
 import { filterAdultContent } from "../lib/contentFilter";
+import { BACKEND_API } from "../lib/api";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import { fetchMovieBoxSources, getArchiveMovieSources, getMovieSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
@@ -17,7 +18,7 @@ const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmN
 const TMDB     = "https://api.themoviedb.org/3";
 const IMG_BASE = "https://image.tmdb.org/t/p/w500";
 const IMG_LG   = "https://image.tmdb.org/t/p/w780";
-const GRABIX   = "http://127.0.0.1:8000";
+const GRABIX   = BACKEND_API;
 const HEADERS  = { "Authorization": `Bearer ${TMDB_TOKEN}`, "Content-Type": "application/json" };
 
 interface Movie {
@@ -45,6 +46,8 @@ export default function MoviesPage() {
   const [freeDetail, setFD] = useState<ArchiveItem | null>(null);
   const [player, setPlayer] = useState<{ title: string; subtitle?: string; poster?: string; sources: StreamSource[] } | null>(null);
   const [page, setPage]     = useState(1);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const tf = async (ep: string) => (await fetch(`${TMDB}${ep}`, { headers: HEADERS })).json();
 
@@ -79,6 +82,23 @@ export default function MoviesPage() {
     if (query) { searchMovies(query, 1); return; }
     if (tab === "free") fetchFree(); else fetchTMDB(tab, 1);
   }, [tab, query]);
+
+  useEffect(() => {
+    if (tab === "free") return;
+    const root = scrollRef.current;
+    const node = bottomRef.current;
+    if (!root || !node) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting) && !loading) {
+          loadMore();
+        }
+      },
+      { root, rootMargin: "240px 0px" }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [loading, page, query, tab]);
 
   const loadMore = () => { const n = page + 1; setPage(n); if (query) searchMovies(query, n); else if (tab !== "free") fetchTMDB(tab, n); };
 
@@ -119,7 +139,7 @@ export default function MoviesPage() {
         </div>
       )}
 
-      <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
+      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
         {loading && (tab === "free" ? filteredFree.length === 0 : filteredMovies.length === 0) ? <LoadingGrid /> :
          tab === "free" ? (
           <>
@@ -133,9 +153,7 @@ export default function MoviesPage() {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 }}>
               {filteredMovies.map(m => <MovieCard key={m.id} movie={m} onClick={() => setDetail(m)} />)}
             </div>
-            <div style={{ textAlign: "center", marginTop: 24 }}>
-              <button className="btn btn-ghost" style={{ gap: 6 }} onClick={loadMore} disabled={loading}><IconRefresh size={14} /> Load more</button>
-            </div>
+            <div ref={bottomRef} style={{ height: 24 }} />
           </>
          )}
       </div>

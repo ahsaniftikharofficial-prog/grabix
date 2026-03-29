@@ -14,26 +14,31 @@ import MovieBoxPage from "./pages/MovieBoxPage";
 import TVSeriesPage from "./pages/TVSeriesPage";
 import FavoritesPage from "./pages/FavoritesPage";
 import SettingsPage from "./pages/SettingsPage";
+import { BACKEND_API, checkBackendReady, waitForBackendReady } from "./lib/api";
 import "./index.css";
 
 function Inner() {
   const [page, setPage] = useState<Page>("downloader");
   const [backendOk, setBackendOk] = useState(false);
+  const [backendStarting, setBackendStarting] = useState(true);
   const [activeDownloads, setActiveDownloads] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
+
     const syncBackend = async () => {
-      try {
-        await fetch("http://127.0.0.1:8000/");
-        setBackendOk(true);
-      } catch {
-        setBackendOk(false);
+      const ready = await checkBackendReady();
+      if (!cancelled) {
+        setBackendOk(ready);
+        if (ready) {
+          setBackendStarting(false);
+        }
       }
     };
 
     const syncDownloads = async () => {
       try {
-        const response = await fetch("http://127.0.0.1:8000/downloads");
+        const response = await fetch(`${BACKEND_API}/downloads`);
         if (!response.ok) return;
         const downloads = (await response.json()) as Array<{ status?: string }>;
         setActiveDownloads(
@@ -46,6 +51,14 @@ function Inner() {
       }
     };
 
+    const bootstrapBackend = async () => {
+      const ready = await waitForBackendReady();
+      if (!cancelled) {
+        setBackendOk(ready);
+        setBackendStarting(false);
+      }
+    };
+
     const handleNavigate = (event: Event) => {
       const detail = (event as CustomEvent<{ page?: Page }>).detail;
       if (detail?.page) {
@@ -53,7 +66,7 @@ function Inner() {
       }
     };
 
-    void syncBackend();
+    void bootstrapBackend();
     void syncDownloads();
     const interval = window.setInterval(() => {
       void syncBackend();
@@ -63,6 +76,7 @@ function Inner() {
     window.addEventListener("grabix:navigate", handleNavigate as EventListener);
 
     return () => {
+      cancelled = true;
       window.clearInterval(interval);
       window.removeEventListener("grabix:navigate", handleNavigate as EventListener);
     };
@@ -86,7 +100,32 @@ function Inner() {
     <div style={{ display: "flex", height: "100vh", width: "100vw", overflow: "hidden" }}>
       <Sidebar page={page} setPage={setPage} activeDownloads={activeDownloads} backendOk={backendOk} />
       <main style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", background: "var(--bg-app)" }}>
-        {pages[page]}
+        {backendStarting ? (
+          <div className="empty-state" style={{ height: "100%" }}>
+            <div className="player-loader" />
+            <p>Starting GRABIX services...</p>
+            <span>Preparing the bundled backend and providers.</span>
+          </div>
+        ) : !backendOk ? (
+          <div className="empty-state" style={{ height: "100%" }}>
+            <p>GRABIX backend is offline.</p>
+            <span>The installed app is waiting for its local services to start.</span>
+            <button
+              className="btn btn-primary"
+              onClick={() => {
+                setBackendStarting(true);
+                void waitForBackendReady().then((ready) => {
+                  setBackendOk(ready);
+                  setBackendStarting(false);
+                });
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        ) : (
+          pages[page]
+        )}
       </main>
     </div>
   );
