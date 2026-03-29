@@ -989,6 +989,46 @@ export default function VidSrcPlayer({
     }
   };
 
+  const prepareInternalSource = async (
+    source: StreamSource,
+    options?: {
+      labelPrefix?: string;
+      notice?: string;
+    }
+  ): Promise<number> => {
+    const sourceKey = source.externalUrl || source.url;
+    const existingPreparedIndex = extractedSourcesRef.current.findIndex(
+      (item) => item.externalUrl === sourceKey
+    );
+    if (existingPreparedIndex >= 0) {
+      return baseSources.length + existingPreparedIndex;
+    }
+
+    const data = await extractDirectStreamUrl(sourceKey);
+    if (!data.url) {
+      throw new Error("No playable stream was returned.");
+    }
+
+    const extracted: StreamSource = {
+      id: `prepared-${Date.now()}`,
+      label: options?.labelPrefix ? `${options.labelPrefix} Direct` : `${source.label} Direct`,
+      provider: source.provider,
+      kind: inferStreamKind(data.url),
+      url: data.url,
+      quality: data.quality ?? source.quality ?? "Auto",
+      description:
+        options?.notice || "Prepared internal stream for playback, subtitles, and audio boost.",
+      externalUrl: sourceKey,
+      canExtract: false,
+      subtitles: source.subtitles,
+      language: source.language,
+    };
+
+    extractedSourcesRef.current = [...extractedSourcesRef.current, extracted];
+    setExtractedSources([...extractedSourcesRef.current]);
+    return baseSources.length + extractedSourcesRef.current.length - 1;
+  };
+
   const handleDownloadCurrent = async () => {
     if (!activeSource || (!onDownload && !onDownloadSource)) return;
     const downloadSource =
@@ -1036,8 +1076,20 @@ export default function VidSrcPlayer({
   };
 
   useEffect(() => {
-    if (!activeSource || activeSource.kind !== "embed" || !activeSource.canExtract) return;
-    const alreadyPrepared = extractedSourcesRef.current.some((source) => source.externalUrl === activeSource.url);
+    if (!activeSource || activeSource.kind !== "embed") return;
+    const isMovieBoxEmbed = activeSource.provider.toLowerCase().includes("moviebox");
+    if (!isMovieBoxEmbed) return;
+
+    const sourceKey = activeSource.externalUrl || activeSource.url;
+    const existingPreparedIndex = extractedSourcesRef.current.findIndex((source) => source.externalUrl === sourceKey);
+    if (existingPreparedIndex >= 0) {
+      if (isMovieBoxEmbed) {
+        setActiveIndex(baseSources.length + existingPreparedIndex);
+      }
+      return;
+    }
+
+    const alreadyPrepared = extractedSourcesRef.current.some((source) => source.externalUrl === sourceKey);
     if (alreadyPrepared) return;
 
     let cancelled = false;
@@ -1056,7 +1108,7 @@ export default function VidSrcPlayer({
           url: data.url,
           quality: data.quality ?? "Auto",
           description: "Auto-prepared direct stream for quieter servers and downloads",
-          externalUrl: activeSource.url,
+          externalUrl: sourceKey,
           canExtract: false,
           subtitles: activeSource.subtitles,
           language: activeSource.language,
@@ -1064,6 +1116,11 @@ export default function VidSrcPlayer({
 
         extractedSourcesRef.current = [...extractedSourcesRef.current, extracted];
         setExtractedSources([...extractedSourcesRef.current]);
+        if (isMovieBoxEmbed) {
+          const nextIndex = baseSources.length + extractedSourcesRef.current.length - 1;
+          setActiveIndex(nextIndex);
+          setFallbackNotice("Prepared an internal MovieBox stream so volume boost and subtitles work more reliably.");
+        }
       } catch {
         // Silent background preparation.
       }
@@ -1073,7 +1130,43 @@ export default function VidSrcPlayer({
     return () => {
       cancelled = true;
     };
-  }, [API, activeSource]);
+  }, [API, activeSource, baseSources.length]);
+
+  useEffect(() => {
+    if (!activeSource || activeSource.kind !== "embed" || volumeBoost <= 100) return;
+
+    const canPrepare =
+      activeSource.provider.toLowerCase().includes("moviebox") || Boolean(activeSource.canExtract);
+    if (!canPrepare) {
+      setFallbackNotice("Volume boost is unavailable for this embedded source.");
+      setVolumeBoost(100);
+      return;
+    }
+
+    let cancelled = false;
+    setFallbackNotice("Preparing an internal stream so volume boost can be applied...");
+
+    const prepareForBoost = async () => {
+      try {
+        const nextIndex = await prepareInternalSource(activeSource, {
+          notice: "Prepared internal stream for audio boost.",
+        });
+        if (cancelled) return;
+        setActiveIndex(nextIndex);
+        setReloadKey((value) => value + 1);
+        setFallbackNotice("Switched to an internal stream so volume boost can be applied.");
+      } catch {
+        if (cancelled) return;
+        setFallbackNotice("Volume boost could not be enabled for this embedded source.");
+        setVolumeBoost(100);
+      }
+    };
+
+    void prepareForBoost();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSource, baseSources.length, volumeBoost]);
 
   // ---------------------------------------------------------------------------
   // Render
@@ -1476,7 +1569,9 @@ export default function VidSrcPlayer({
                     />
                     <div className="player-mini-note">
                       {isEmbedEngine
-                        ? "Boost works only for direct/internal streams. Embed servers control their own audio."
+                        ? activeSource?.provider.toLowerCase().includes("moviebox")
+                          ? "GRABIX will try to swap MovieBox embeds to an internal stream so boost can apply."
+                          : "Boost works only for direct/internal streams. Embed servers control their own audio."
                         : "Audio boost can go up to 500% for quiet streams."}
                     </div>
                   </div>

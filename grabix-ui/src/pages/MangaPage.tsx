@@ -22,6 +22,8 @@ import {
   type MangaDetailsResponse,
   type MangaDiscoveryItem,
 } from "../lib/mangaProviders";
+import { useContentFilter } from "../context/ContentFilterContext";
+import { filterAdultContent } from "../lib/contentFilter";
 import { IconSearch, IconStar, IconX } from "../components/Icons";
 
 type ReaderState = { chapterIndex: number; chapter: MangaChapter };
@@ -197,6 +199,7 @@ function HorizontalRail({ title, subtitle, items, onOpen }: { title: string; sub
 }
 
 export default function MangaPage() {
+  const { adultContentBlocked } = useContentFilter();
   const [searchText, setSearchText] = useState("");
   const [query, setQuery] = useState("");
   const [trending, setTrending] = useState<MangaDiscoveryItem[]>([]);
@@ -228,6 +231,12 @@ export default function MangaPage() {
 
   const season = useMemo(() => currentSeason(), []);
   const seasonYear = useMemo(() => new Date().getFullYear(), []);
+  const filteredTrending = useMemo(() => filterAdultContent(trending, adultContentBlocked), [trending, adultContentBlocked]);
+  const filteredSeasonal = useMemo(() => filterAdultContent(seasonal, adultContentBlocked), [seasonal, adultContentBlocked]);
+  const filteredComickHot = useMemo(() => filterAdultContent(comickHot, adultContentBlocked), [comickHot, adultContentBlocked]);
+  const filteredConsumetHot = useMemo(() => filterAdultContent(consumetHot, adultContentBlocked), [consumetHot, adultContentBlocked]);
+  const filteredSearchResults = useMemo(() => filterAdultContent(searchResults, adultContentBlocked), [searchResults, adultContentBlocked]);
+  const filteredRecommendations = useMemo(() => filterAdultContent(recommendations, adultContentBlocked), [recommendations, adultContentBlocked]);
 
   const loadHome = async () => {
     setHomeLoading(true);
@@ -421,18 +430,45 @@ export default function MangaPage() {
       setReaderLoading(true);
       setReaderError(null);
       try {
-        const pages = reader.chapter.source_name === "consumet"
-          ? await fetchConsumetMangaRead(reader.chapter.chapter_id, "mangadex")
-          : reader.chapter.provider === "comick"
-          ? await fetchComickPages(reader.chapter.chapter_url ?? reader.chapter.chapter_id)
-          : await fetchMangaPages(reader.chapter.chapter_id);
+        const attempts: Array<() => Promise<string[]>> = [];
+        const consumetRead = async () => fetchConsumetMangaRead(reader.chapter.chapter_id, "mangadex");
+        const mangadexRead = async () => fetchMangaPages(reader.chapter.chapter_id);
+        const comickRead = async () => fetchComickPages(reader.chapter.chapter_url ?? reader.chapter.chapter_id);
+
+        if (reader.chapter.provider === "comick") {
+          attempts.push(comickRead);
+        } else {
+          attempts.push(mangadexRead);
+          attempts.push(consumetRead);
+          attempts.push(comickRead);
+        }
+
+        let pages: string[] = [];
+        let lastError: unknown = null;
+        for (const attempt of attempts) {
+          try {
+            const nextPages = await attempt();
+            if (nextPages.length > 0) {
+              pages = nextPages;
+              break;
+            }
+          } catch (error) {
+            lastError = error;
+          }
+        }
+
+        if (!pages.length && lastError) {
+          throw lastError;
+        }
         if (!cancelled) {
           setReaderPages(sortPageUrls(pages));
-          if (!pages.length) setReaderError("Chapter pages were empty for this source.");
+          if (!pages.length) {
+            setReaderError("No reader pages were returned from MangaDex or ComicK for this chapter.");
+          }
         }
       } catch (error) {
         if (!cancelled) {
-          setReaderError(error instanceof Error ? error.message : "Could not load chapter pages.");
+          setReaderError(error instanceof Error ? error.message : "Could not load chapter pages from MangaDex or ComicK.");
           setReaderPages([]);
         }
       } finally {
@@ -498,17 +534,17 @@ export default function MangaPage() {
         {!selectedItem && !reader && !query && (
           homeLoading ? <LoadingGrid count={10} /> : homeError ? <ErrorState message={homeError} onRetry={() => void loadHome()} /> : (
             <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
-              <HorizontalRail title="Trending Now" subtitle="Powered by AniList discovery" items={trending} onOpen={openDetails} />
-              <HorizontalRail title={`${season.charAt(0)}${season.slice(1).toLowerCase()} Picks`} subtitle={`Seasonal manga for ${seasonYear}`} items={seasonal} onOpen={openDetails} />
-              {consumetHot.length > 0 && <HorizontalRail title="Consumet MangaDex" subtitle="Primary manga reader matches from Consumet" items={consumetHot} onOpen={openDetails} />}
-              {comickHot.length > 0 && <HorizontalRail title="Comick Hot" subtitle="Backup reader picks for long series" items={comickHot} onOpen={openDetails} />}
+              <HorizontalRail title="Trending Now" subtitle="Powered by AniList discovery" items={filteredTrending} onOpen={openDetails} />
+              <HorizontalRail title={`${season.charAt(0)}${season.slice(1).toLowerCase()} Picks`} subtitle={`Seasonal manga for ${seasonYear}`} items={filteredSeasonal} onOpen={openDetails} />
+              {filteredConsumetHot.length > 0 && <HorizontalRail title="Consumet MangaDex" subtitle="Primary manga reader matches from Consumet" items={filteredConsumetHot} onOpen={openDetails} />}
+              {filteredComickHot.length > 0 && <HorizontalRail title="Comick Hot" subtitle="Backup reader picks for long series" items={filteredComickHot} onOpen={openDetails} />}
             </div>
           )
         )}
         {!selectedItem && !reader && !!query && (
-          searchLoading ? <LoadingGrid count={12} /> : searchError ? <ErrorState message={searchError} onRetry={() => setQuery((value) => value)} /> : searchResults.length === 0 ? <EmptyState label="No results found." /> : (
+          searchLoading ? <LoadingGrid count={12} /> : searchError ? <ErrorState message={searchError} onRetry={() => setQuery((value) => value)} /> : filteredSearchResults.length === 0 ? <EmptyState label="No results found." /> : (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 14 }}>
-              {searchResults.map((item) => <MangaCard key={item.anilist_id ?? item.title} item={item} onClick={() => openDetails(item)} />)}
+              {filteredSearchResults.map((item) => <MangaCard key={item.anilist_id ?? item.title} item={item} onClick={() => openDetails(item)} />)}
             </div>
           )
         )}
@@ -576,7 +612,7 @@ export default function MangaPage() {
                 </section>
                 <section className="card" style={{ padding: 18 }}>
                   <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 12 }}>You Might Also Like</div>
-                  {recommendationsLoading ? <LoadingGrid count={4} /> : recommendations.length === 0 ? <EmptyState label="No recommendations available right now." /> : <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 14 }}>{recommendations.slice(0, 6).map((item) => <MangaCard key={item.anilist_id ?? item.title} item={item} onClick={() => openDetails(item)} />)}</div>}
+                  {recommendationsLoading ? <LoadingGrid count={4} /> : filteredRecommendations.length === 0 ? <EmptyState label="No recommendations available right now." /> : <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 14 }}>{filteredRecommendations.slice(0, 6).map((item) => <MangaCard key={item.anilist_id ?? item.title} item={item} onClick={() => openDetails(item)} />)}</div>}
                 </section>
               </div>
             ) : null}

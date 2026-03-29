@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-import yt_dlp, os, uuid, sqlite3, shutil, threading, subprocess, time, json, re
+import yt_dlp, os, uuid, sqlite3, shutil, threading, subprocess, time, json, re, hashlib
 import ctypes
 from pathlib import Path
 from datetime import datetime
@@ -94,6 +94,10 @@ class AnimeResolveRequest(BaseModel):
     purpose: str = "play"
 
 
+class AdultContentUnlockRequest(BaseModel):
+    password: str
+
+
 if os.name == "nt":
     PROCESS_SUSPEND_RESUME = 0x0800
     PROCESS_TERMINATE = 0x0001
@@ -183,11 +187,28 @@ init_db()
 def db_insert(row: dict):
     try:
         con = get_db_connection()
-        con.execute("INSERT OR REPLACE INTO history VALUES (?,?,?,?,?,?,?,?,?,?)", (
-            row["id"], row["url"], row["title"], row["thumbnail"],
-            row["channel"], row["duration"], row["dl_type"],
-            row["file_path"], row["status"], row["created_at"]
-        ))
+        con.execute(
+            """
+            INSERT OR REPLACE INTO history
+            (id, url, title, thumbnail, channel, duration, dl_type, file_path, status, created_at, tags, category, file_size)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["id"],
+                row["url"],
+                row["title"],
+                row["thumbnail"],
+                row["channel"],
+                row["duration"],
+                row["dl_type"],
+                row["file_path"],
+                row["status"],
+                row["created_at"],
+                row.get("tags", ""),
+                row.get("category", ""),
+                row.get("file_size", 0),
+            ),
+        )
         con.commit()
         con.close()
     except Exception as e:
@@ -212,6 +233,8 @@ DEFAULT_SETTINGS = {
     "default_format": "mp4",
     "default_quality": "1080p",
     "download_folder": DOWNLOAD_DIR,
+    "adult_content_enabled": False,
+    "adult_password_hash": hashlib.sha256("grabix2024".encode("utf-8")).hexdigest(),
 }
 
 
@@ -235,6 +258,13 @@ def save_settings_to_disk(data: dict):
             json.dump(current, f, indent=2)
     except Exception as e:
         print(f"[GRABIX] save_settings error: {e}")
+
+
+def _settings_public_payload(data: dict) -> dict:
+    payload = {**DEFAULT_SETTINGS, **(data or {})}
+    payload.pop("adult_password_hash", None)
+    payload["adult_content_enabled"] = False
+    return payload
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -819,6 +849,12 @@ def _moviebox_get_registered_item(subject_id: str | None):
     return item
 
 
+def _moviebox_supports_downloadable_detail(item) -> bool:
+    if item is None:
+        return False
+    return item.__class__.__name__ in {"SearchResultsItem", "ItemJsonDetailsModel"}
+
+
 def _normalize_moviebox_title(value: str) -> str:
     cleaned = re.sub(r"\[[^\]]+\]", "", value or "")
     cleaned = re.sub(r"[^a-z0-9]+", " ", cleaned.lower())
@@ -1226,9 +1262,12 @@ async def _moviebox_resolve_item(
     title: str | None = None,
     media_type: str = "movie",
     year: int | None = None,
+    require_downloadable: bool = False,
 ):
     registered = _moviebox_get_registered_item(subject_id)
-    if registered is not None:
+    if registered is not None and (
+        not require_downloadable or _moviebox_supports_downloadable_detail(registered)
+    ):
         return MovieBoxSession(timeout=15), registered
 
     if not title:
@@ -1252,11 +1291,24 @@ def _moviebox_subject_payload(item, detail_model=None) -> dict:
     payload = _moviebox_card_payload(item)
     payload["description"] = description
     payload["duration_seconds"] = getattr(item, "duration", 0) or 0
+    season_episode_counts: dict[int, int] = {}
+    try:
+        resource = getattr(getattr(detail_model, "resData", None), "resource", None)
+        seasons = list(getattr(resource, "seasons", []) or [])
+        for season_info in seasons:
+            season_number = int(getattr(season_info, "se", 0) or 0)
+            max_episode = int(getattr(season_info, "maxEp", 0) or 0)
+            if season_number > 0 and max_episode > 0:
+                season_episode_counts[season_number] = max_episode
+    except Exception:
+        season_episode_counts = {}
+
     payload["available_seasons"] = (
-        _moviebox_guess_seasons(payload["title"])
+        sorted(season_episode_counts.keys()) or _moviebox_guess_seasons(payload["title"])
         if payload["moviebox_media_type"] == "series"
         else []
     )
+    payload["season_episode_counts"] = season_episode_counts
     return payload
 
 
@@ -1394,12 +1446,26 @@ async def moviebox_sources(
     if cached is not None:
         return cached
 
-    session, item = await _moviebox_resolve_item(subject_id, title, normalized_media_type, year)
+    session, item = await _moviebox_resolve_item(
+        subject_id,
+        title,
+        normalized_media_type,
+        year,
+        require_downloadable=True,
+    )
 
-    if normalized_media_type == "movie":
-        files = await DownloadableMovieFilesDetail(session, item).get_content_model()
-    else:
-        files = await DownloadableTVSeriesFilesDetail(session, item).get_content_model(season, episode)
+    try:
+        if normalized_media_type == "movie":
+            files = await DownloadableMovieFilesDetail(session, item).get_content_model()
+        else:
+            files = await DownloadableTVSeriesFilesDetail(session, item).get_content_model(season, episode)
+    except Exception as exc:
+        print(
+            f"[GRABIX] MovieBox source resolution failed: title={getattr(item, 'title', title or '')} "
+            f"subject_id={getattr(item, 'id', subject_id or '')} media_type={normalized_media_type} "
+            f"season={season} episode={episode} error={exc}"
+        )
+        raise HTTPException(status_code=502, detail="Movie Box could not resolve playable files for this title")
 
     downloads = sorted(
         list(getattr(files, "downloads", []) or []),
@@ -1608,6 +1674,14 @@ def _is_direct_media_url(url: str) -> bool:
     return parsed.path.endswith((".mp4", ".m4v", ".mov", ".webm", ".mkv"))
 
 
+def _is_direct_subtitle_url(url: str) -> bool:
+    lowered = (url or "").lower()
+    parsed = urlparse(lowered)
+    if "127.0.0.1:8000/moviebox/subtitle" in lowered or "localhost:8000/moviebox/subtitle" in lowered:
+        return True
+    return parsed.path.endswith((".vtt", ".srt", ".ass", ".ssa", ".sub"))
+
+
 def _guess_media_extension(url: str, content_type: str = "") -> str:
     lowered = (content_type or "").lower()
     if "mp4" in lowered:
@@ -1624,6 +1698,24 @@ def _guess_media_extension(url: str, content_type: str = "") -> str:
         if path.endswith(ext):
             return ext.lstrip(".")
     return "mp4"
+
+
+def _guess_subtitle_extension(url: str, content_type: str = "") -> str:
+    lowered = (content_type or "").lower()
+    if "vtt" in lowered:
+        return "vtt"
+    if "srt" in lowered:
+        return "srt"
+    if "ass" in lowered:
+        return "ass"
+    if "ssa" in lowered:
+        return "ssa"
+
+    path = urlparse(url).path.lower()
+    for ext in (".vtt", ".srt", ".ass", ".ssa", ".sub"):
+        if path.endswith(ext):
+            return ext.lstrip(".")
+    return "vtt"
 
 
 def _parse_timecode_to_seconds(value: str) -> float:
@@ -1757,6 +1849,52 @@ def _download_direct_media(dl_id: str, url: str, headers: dict[str, str] | None 
     if Path(output_path).exists():
         Path(output_path).unlink()
     Path(part_path).replace(output_path)
+    downloads[dl_id].update({
+        "percent": 100,
+        "downloaded": _format_bytes(total_bytes or downloaded_bytes),
+        "total": _format_bytes(total_bytes or downloaded_bytes),
+        "size": _format_bytes(total_bytes or downloaded_bytes),
+        "file_path": output_path,
+    })
+    return output_path
+
+
+def _download_direct_subtitle(dl_id: str, url: str, headers: dict[str, str] | None = None) -> str:
+    target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or f"grabix-{dl_id}"
+    safe_title = re.sub(r'[\\\\/:*?"<>|]+', " ", target_title).strip() or f"grabix-{dl_id}"
+
+    request_headers = {"User-Agent": "Mozilla/5.0"}
+    request_headers.update(headers or {})
+    request = URLRequest(url, headers=request_headers)
+    with urlopen(request, timeout=30) as response:
+        content_type = response.headers.get("Content-Type", "text/vtt")
+        total_bytes = int(response.headers.get("Content-Length", "0") or 0)
+        ext = _guess_subtitle_extension(url, content_type)
+        output_path = str(Path(DOWNLOAD_DIR) / f"{safe_title}.{ext}")
+        controls = download_controls[dl_id]
+        downloaded_bytes = 0
+
+        with open(output_path, "wb") as file_obj:
+            while True:
+                while controls["pause"].is_set() and not controls["cancel"].is_set():
+                    time.sleep(0.2)
+                if controls["cancel"].is_set():
+                    raise RuntimeError("Download canceled")
+
+                chunk = response.read(1024 * 64)
+                if not chunk:
+                    break
+                file_obj.write(chunk)
+                downloaded_bytes += len(chunk)
+                pct = round((downloaded_bytes / total_bytes) * 100, 1) if total_bytes else 0
+                downloads[dl_id].update({
+                    "percent": pct,
+                    "downloaded": _format_bytes(downloaded_bytes),
+                    "total": _format_bytes(total_bytes),
+                    "size": _format_bytes(total_bytes or downloaded_bytes),
+                    "file_path": output_path,
+                })
+
     downloads[dl_id].update({
         "percent": 100,
         "downloaded": _format_bytes(total_bytes or downloaded_bytes),
@@ -2044,6 +2182,20 @@ def start_download(
             downloads[dl_id]["title"] = meta["title"]
             downloads[dl_id]["thumbnail"] = meta["thumbnail"]
             db_insert(meta)
+        elif dl_type == "subtitle" and (_is_direct_subtitle_url(url) or title.strip()):
+            meta = {
+                "id": dl_id, "url": url,
+                "title": fallback_title,
+                "thumbnail": thumbnail,
+                "channel": "",
+                "duration": 0,
+                "dl_type": dl_type, "file_path": "",
+                "status": "queued",
+                "created_at": datetime.now().isoformat(),
+            }
+            downloads[dl_id]["title"] = meta["title"]
+            downloads[dl_id]["thumbnail"] = meta["thumbnail"]
+            db_insert(meta)
         else:
             with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True, "noplaylist": True}) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -2234,13 +2386,26 @@ def stop_all_downloads():
 # ── Settings routes ───────────────────────────────────────────────────────────
 @app.get("/settings")
 def get_settings():
-    return load_settings()
+    return _settings_public_payload(load_settings())
 
 
 @app.post("/settings")
 def update_settings(data: dict):
-    save_settings_to_disk(data)
-    return load_settings()
+    sanitized = dict(data or {})
+    sanitized.pop("adult_password_hash", None)
+    sanitized["adult_content_enabled"] = False
+    save_settings_to_disk(sanitized)
+    return _settings_public_payload(load_settings())
+
+
+@app.post("/settings/adult-content/unlock")
+def unlock_adult_content(data: AdultContentUnlockRequest):
+    settings = load_settings()
+    expected_hash = settings.get("adult_password_hash") or DEFAULT_SETTINGS["adult_password_hash"]
+    candidate_hash = hashlib.sha256((data.password or "").encode("utf-8")).hexdigest()
+    if candidate_hash != expected_hash:
+        raise HTTPException(status_code=403, detail="Incorrect password")
+    return {"unlocked": True}
 
 
 # ── Download Task ─────────────────────────────────────────────────────────────
@@ -2648,6 +2813,14 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
             db_update_status(dl_id, "done", output_path)
             return
 
+        if dl_type == "subtitle" and _is_direct_subtitle_url(url):
+            output_path = _download_direct_subtitle(dl_id, url, request_headers)
+            downloads[dl_id]["file_path"] = output_path
+            downloads[dl_id]["status"] = "done"
+            downloads[dl_id]["percent"] = 100
+            db_update_status(dl_id, "done", output_path)
+            return
+
         if dl_type == "video":
             opts["format"] = _build_video_format_selector(quality)
             if trim_enabled and trim_end > trim_start:
@@ -2916,5 +3089,6 @@ async def extract_stream(url: str):
     direct_url = output_lines[0].strip() if output_lines else ""
     if not direct_url:
         detail = result.stderr.strip() or "No stream found"
+        print(f"[GRABIX] extract-stream failed for {url[:180]}: {detail}")
         raise HTTPException(status_code=422, detail=detail)
     return {"url": direct_url, "quality": "Auto"}

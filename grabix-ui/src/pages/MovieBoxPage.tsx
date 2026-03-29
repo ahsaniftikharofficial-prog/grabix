@@ -12,7 +12,9 @@ import {
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import { useFavorites } from "../context/FavoritesContext";
+import { useContentFilter } from "../context/ContentFilterContext";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
+import { filterAdultContent } from "../lib/contentFilter";
 import {
   IconCheck,
   IconDownload,
@@ -31,9 +33,17 @@ type Filter = "all" | "movie" | "series" | "anime" | "hindi";
 interface PlayerState {
   title: string;
   subtitle?: string;
+  subtitleSearchTitle?: string;
   poster?: string;
   sources: StreamSource[];
   mediaType: "movie" | "tv";
+}
+
+function buildMovieBoxSubtitleSearchTitle(item: MovieBoxItem, season?: number, episode?: number): string {
+  if (item.moviebox_media_type === "movie") {
+    return `${item.title} subtitle English`.trim();
+  }
+  return `${item.title} season ${season ?? 1} episode ${episode ?? 1} subtitle English`.trim();
 }
 
 function wait(ms: number): Promise<void> {
@@ -41,6 +51,7 @@ function wait(ms: number): Promise<void> {
 }
 
 export default function MovieBoxPage() {
+  const { adultContentBlocked } = useContentFilter();
   const [discover, setDiscover] = useState<MovieBoxSection[]>([]);
   const [popularSearches, setPopularSearches] = useState<string[]>([]);
   const [results, setResults] = useState<MovieBoxItem[]>([]);
@@ -53,6 +64,7 @@ export default function MovieBoxPage() {
   const [player, setPlayer] = useState<PlayerState | null>(null);
 
   const isSearchMode = query.trim().length > 0;
+  const filteredResults = filterAdultContent(results, adultContentBlocked);
 
   const loadDiscover = async () => {
     setLoading(true);
@@ -116,7 +128,7 @@ export default function MovieBoxPage() {
     setQuery(next);
   };
 
-  const sectionsToRender = filter === "all"
+  const sectionsToRender = (filter === "all"
     ? discover
     : discover.filter((section) => {
         if (filter === "hindi") return section.id === "hindi";
@@ -124,7 +136,9 @@ export default function MovieBoxPage() {
         if (filter === "movie") return section.id === "movies" || section.id === "top-rated" || section.id === "recent";
         if (filter === "series") return section.id === "series" || section.id === "most-popular";
         return true;
-      });
+      }))
+    .map((section) => ({ ...section, items: filterAdultContent(section.items, adultContentBlocked) }))
+    .filter((section) => section.items.length > 0);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
@@ -199,10 +213,10 @@ export default function MovieBoxPage() {
       </div>
 
       <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
-        {loading && ((isSearchMode && results.length === 0) || (!isSearchMode && sectionsToRender.length === 0)) ? (
+        {loading && ((isSearchMode && filteredResults.length === 0) || (!isSearchMode && sectionsToRender.length === 0)) ? (
           <LoadingGrid />
         ) : isSearchMode ? (
-          results.length === 0 ? (
+          filteredResults.length === 0 ? (
             <div className="empty-state">
               <IconSearch size={36} />
               <p>No Movie Box results</p>
@@ -213,9 +227,9 @@ export default function MovieBoxPage() {
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
                 Searching Movie Box with Hindi priority and direct-source playback.
               </div>
-              <MediaGrid items={results} onOpen={setDetail} />
+              <MediaGrid items={filteredResults} onOpen={setDetail} />
               <div style={{ textAlign: "center", marginTop: 24 }}>
-                <button className="btn btn-ghost" style={{ gap: 6 }} onClick={loadMore} disabled={loading || results.length < 24}>
+                <button className="btn btn-ghost" style={{ gap: 6 }} onClick={loadMore} disabled={loading || filteredResults.length < 24}>
                   <IconRefresh size={14} /> Load more
                 </button>
               </div>
@@ -254,7 +268,7 @@ export default function MovieBoxPage() {
       </div>
 
       {detail && !player && <MovieBoxDetail item={detail} onClose={() => setDetail(null)} onPlay={setPlayer} />}
-      {player && <VidSrcPlayer title={player.title} subtitle={player.subtitle} poster={player.poster} sources={player.sources} mediaType={player.mediaType} onClose={() => setPlayer(null)} />}
+      {player && <VidSrcPlayer title={player.title} subtitle={player.subtitle} subtitleSearchTitle={player.subtitleSearchTitle} poster={player.poster} sources={player.sources} mediaType={player.mediaType} onClose={() => setPlayer(null)} />}
     </div>
   );
 }
@@ -326,6 +340,10 @@ function MovieBoxDetail({
   const [downloadQuality, setDownloadQuality] = useState("");
   const [downloadOptions, setDownloadOptions] = useState<DownloadQualityOption[]>([]);
   const [downloadError, setDownloadError] = useState("");
+  const [playOptions, setPlayOptions] = useState<DownloadQualityOption[]>([]);
+  const [playQuality, setPlayQuality] = useState("");
+  const [playOptionsLoading, setPlayOptionsLoading] = useState(false);
+  const [playOptionsError, setPlayOptionsError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -342,6 +360,7 @@ function MovieBoxDetail({
         if (nextItem.available_seasons?.[0]) {
           setSeason(nextItem.available_seasons[0]);
         }
+        setEpisode(1);
       })
       .catch(() => {
         if (!cancelled) setDetails(item);
@@ -402,6 +421,15 @@ function MovieBoxDetail({
           }
         } catch (error) {
           lastError = error;
+          console.error("[GRABIX] MovieBox source resolve failed", {
+            title: target.title,
+            subjectId: target.id,
+            mediaType: target.media_type,
+            season,
+            episode,
+            attempt: attempt + 1,
+            reason: error instanceof Error ? error.message : error,
+          });
           if (attempt === 0) {
             await wait(350);
             continue;
@@ -488,6 +516,41 @@ function MovieBoxDetail({
     void loadDownloadOptions(downloadLanguage);
   }, [downloadDialogOpen, downloadLanguage, details.id, season, episode]);
 
+  useEffect(() => {
+    if (details.moviebox_media_type === "movie") {
+      setPlayOptions([]);
+      setPlayQuality("");
+      setPlayOptionsError("");
+      return;
+    }
+    let cancelled = false;
+    const run = async () => {
+      setPlayOptionsLoading(true);
+      setPlayOptionsError("");
+      try {
+        const sources = await loadSources();
+        const options = await resolveSourceDownloadOptions(sources);
+        if (cancelled) return;
+        setPlayOptions(options);
+        setPlayQuality((current) => current && options.some((option) => option.id === current) ? current : (options[0]?.id || ""));
+        if (!options.length) {
+          setPlayOptionsError("No playable qualities were returned for this episode.");
+        }
+      } catch (error) {
+        if (cancelled) return;
+        setPlayOptions([]);
+        setPlayQuality("");
+        setPlayOptionsError(error instanceof Error ? error.message : "Could not load episode qualities.");
+      } finally {
+        if (!cancelled) setPlayOptionsLoading(false);
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [details.id, details.moviebox_media_type, season, episode]);
+
   const handlePlay = async () => {
     try {
       const sources = await loadSources();
@@ -496,17 +559,31 @@ function MovieBoxDetail({
         return;
       }
 
+      const selectedOption = playQuality ? playOptions.find((option) => option.id === playQuality) : null;
+      const playableSources = selectedOption
+        ? sources.filter((source) => source.url === selectedOption.url || source.quality === selectedOption.label)
+        : sources;
+
       onPlay({
         title: details.title,
         subtitle: details.media_type === "movie"
           ? "Movie Box direct playback with subtitle-aware links"
           : `Movie Box direct playback · Season ${season} · Episode ${episode}`,
+        subtitleSearchTitle: buildMovieBoxSubtitleSearchTitle(details, season, episode),
         poster: details.poster_proxy || details.poster,
-        sources,
+        sources: playableSources.length > 0 ? playableSources : sources,
         mediaType: details.media_type === "movie" ? "movie" : "tv",
       });
       onClose();
-    } catch {
+    } catch (error) {
+      console.error("[GRABIX] MovieBox playback failed", {
+        title: details.title,
+        subjectId: details.id,
+        mediaType: details.media_type,
+        season,
+        episode,
+        reason: error instanceof Error ? error.message : error,
+      });
       alert("Movie Box playback failed for this title. Try another title or try again in a moment.");
     }
   };
@@ -578,6 +655,10 @@ function MovieBoxDetail({
     }
   };
 
+  const seasonNumbers = details.available_seasons?.length ? details.available_seasons : [1];
+  const totalEpisodes = details.season_episode_counts?.[season] || Math.max(1, Math.min(100, episode));
+  const episodeOptions = Array.from({ length: totalEpisodes }, (_, index) => index + 1);
+
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
       <div style={{ background: "var(--bg-surface)", borderRadius: 16, width: "100%", maxWidth: 760, maxHeight: "90vh", overflow: "hidden", display: "flex", flexDirection: "column", boxShadow: "var(--shadow-lg)", border: "1px solid var(--border)" }} onClick={(event) => event.stopPropagation()}>
@@ -618,20 +699,50 @@ function MovieBoxDetail({
           </div>
 
           {details.moviebox_media_type !== "movie" && (
-            <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 14, marginBottom: 16 }}>
               <div style={{ minWidth: 130 }}>
                 <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>Season</div>
                 <select className="input-base" value={season} onChange={(event) => setSeason(Number(event.target.value))}>
-                  {(details.available_seasons?.length ? details.available_seasons : [1]).map((value) => (
+                  {seasonNumbers.map((value) => (
                     <option key={value} value={value}>
                       Season {value}
                     </option>
                   ))}
                 </select>
               </div>
-              <div style={{ minWidth: 130 }}>
-                <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>Episode</div>
-                <input className="input-base" type="number" min={1} value={episode} onChange={(event) => setEpisode(Math.max(1, Number(event.target.value) || 1))} />
+              <div>
+                <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>Episodes</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", maxHeight: 180, overflowY: "auto", paddingRight: 4 }}>
+                  {episodeOptions.map((value) => (
+                    <button
+                      key={value}
+                      className={`quality-chip${episode === value ? " active" : ""}`}
+                      onClick={() => setEpisode(value)}
+                    >
+                      {value}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>Qualities</div>
+                {playOptionsLoading ? (
+                  <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Loading available qualities...</div>
+                ) : playOptionsError ? (
+                  <div style={{ fontSize: 12, color: "var(--text-danger)" }}>{playOptionsError}</div>
+                ) : (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {playOptions.map((option) => (
+                      <button
+                        key={option.id}
+                        className={`quality-chip${playQuality === option.id ? " active" : ""}`}
+                        onClick={() => setPlayQuality(option.id)}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}

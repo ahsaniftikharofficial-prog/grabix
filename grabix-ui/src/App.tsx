@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ThemeProvider } from "./context/ThemeContext";
 import { FavoritesProvider } from "./context/FavoritesContext";
+import { ContentFilterProvider } from "./context/ContentFilterContext";
 import Sidebar, { type Page } from "./components/Sidebar";
 import ConverterPage from "./pages/ConverterPage";
 import DownloaderPage from "./pages/DownloaderPage";
@@ -94,9 +95,11 @@ function Inner() {
 export default function App() {
   return (
     <ThemeProvider>
-      <FavoritesProvider>
-        <Inner />
-      </FavoritesProvider>
+      <ContentFilterProvider>
+        <FavoritesProvider>
+          <Inner />
+        </FavoritesProvider>
+      </ContentFilterProvider>
     </ThemeProvider>
   );
 }
