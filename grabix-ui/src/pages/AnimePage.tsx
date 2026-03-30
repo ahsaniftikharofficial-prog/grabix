@@ -3,6 +3,8 @@ import { IconDownload, IconPlay, IconSearch, IconStar, IconX } from "../componen
 import { IconHeart } from "../components/Icons";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
+import AppToast from "../components/AppToast";
+import { PageEmptyState, PageErrorState } from "../components/PageStates";
 import { useFavorites } from "../context/FavoritesContext";
 import { useContentFilter } from "../context/ContentFilterContext";
 import { queueSubtitleDownload, queueVideoDownload, resolveSourceDownloadOptions } from "../lib/downloads";
@@ -11,7 +13,6 @@ import { filterAdultContent } from "../lib/contentFilter";
 import {
   fetchConsumetAnimeDiscover,
   fetchConsumetAnimeEpisodes,
-  fetchConsumetAnimeWatch,
   fetchConsumetDomainInfo,
   fetchConsumetHealth,
   normalizeAudioPreference,
@@ -21,7 +22,7 @@ import {
   type ConsumetHealth,
   type ConsumetMediaSummary,
 } from "../lib/consumetProviders";
-import { fetchMovieBoxSources, getAnimeEpisodeSources, getAnimeSources, searchMovieBox, type StreamSource } from "../lib/streamProviders";
+import { fetchMovieBoxSources, resolveAnimePlaybackSources, searchMovieBox, type StreamSource } from "../lib/streamProviders";
 
 const JIKAN = "https://api.jikan.moe/v4";
 const TMDB = "https://api.themoviedb.org/3";
@@ -275,6 +276,7 @@ export default function AnimePage() {
   const [trendingPeriod, setTrendingPeriod] = useState<TrendingPeriod>("daily");
   const [items, setItems] = useState<AnimeCardItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [browseError, setBrowseError] = useState("");
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   const [detail, setDetail] = useState<AnimeCardItem | null>(null);
@@ -317,6 +319,7 @@ export default function AnimePage() {
 
   const loadDiscover = async (nextTab: Tab, nextPage = 1, nextPeriod: TrendingPeriod = trendingPeriod) => {
     setLoading(true);
+    setBrowseError("");
     try {
       const nextItems = (await fetchConsumetAnimeDiscover(nextTab, nextPage, nextPeriod)).map(toCardItem);
       setHasMore(nextItems.length > 0);
@@ -329,6 +332,7 @@ export default function AnimePage() {
       } catch {
         setItems([]);
         setHasMore(false);
+        setBrowseError("Anime results could not be loaded right now.");
       }
     } finally {
       setLoading(false);
@@ -337,6 +341,7 @@ export default function AnimePage() {
 
   const loadSearch = async (nextQuery: string, nextPage = 1) => {
     setLoading(true);
+    setBrowseError("");
     try {
       const nextItems = (await searchConsumetAnime(nextQuery, nextPage)).map(toCardItem);
       setHasMore(nextItems.length > 0);
@@ -349,10 +354,20 @@ export default function AnimePage() {
       } catch {
         setItems([]);
         setHasMore(false);
+        setBrowseError("Anime search could not be completed right now.");
       }
     } finally {
       setLoading(false);
     }
+  };
+
+  const retryCurrentView = () => {
+    setPage(1);
+    if (query) {
+      void loadSearch(query, 1);
+      return;
+    }
+    void loadDiscover(tab, 1, trendingPeriod);
   };
 
   const loadMore = () => {
@@ -373,7 +388,7 @@ export default function AnimePage() {
           setHealth({
             configured: false,
             healthy: false,
-            message: "Consumet is unavailable, so anime playback will use the fallback providers.",
+            message: "Anime fallback playback is ready.",
             default_audio_priority: ["en", "original", "hi"],
             default_subtitle_priority: ["en", "hi"],
           });
@@ -447,12 +462,6 @@ export default function AnimePage() {
         </div>
       </div>
 
-      {health?.configured && !health.healthy && (
-        <div style={{ padding: "10px 24px", borderBottom: "1px solid var(--border)", background: "rgba(245, 158, 11, 0.08)", fontSize: 12, color: "var(--text-warning)" }}>
-          {health.message}
-        </div>
-      )}
-
       {!query && (
         <div style={{ display: "flex", gap: 4, padding: "10px 24px 0", background: "var(--bg-surface)", borderBottom: "1px solid var(--border)" }}>
           {tabs.map((nextTab) => (
@@ -482,8 +491,17 @@ export default function AnimePage() {
       )}
 
       <div ref={scrollRef} onScroll={handleScroll} style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
-        {loading && filteredItems.length === 0 ? <LoadingGrid /> : filteredItems.length === 0 ? (
-          <div className="empty-state"><IconSearch size={36} /><p>No results</p></div>
+        {loading && filteredItems.length === 0 ? <LoadingGrid /> : browseError ? (
+          <PageErrorState
+            title="Anime is unavailable right now"
+            subtitle={browseError}
+            onRetry={retryCurrentView}
+          />
+        ) : filteredItems.length === 0 ? (
+          <PageEmptyState
+            title={query ? "No anime matched that search" : "No anime is available here yet"}
+            subtitle={query ? "Try another title, season, or spelling." : "Try a different tab or refresh this page."}
+          />
         ) : (
           <>
             <div style={{ display: "grid", gridTemplateColumns: tab === "trending" ? "repeat(auto-fit, minmax(190px, 1fr))" : "repeat(auto-fill, minmax(150px, 1fr))", gap: tab === "trending" ? 16 : 14 }}>
@@ -627,6 +645,7 @@ function AnimeDetail({
   const [trailerUrl, setTrailerUrl] = useState(anime.trailer_url || "");
   const [downloading, setDownloading] = useState(false);
   const [downloadDialogOpen, setDownloadDialogOpen] = useState(false);
+  const [toast, setToast] = useState<{ message: string; variant: "success" | "error" | "info" } | null>(null);
   const [downloadLanguage, setDownloadLanguage] = useState<"sub" | "dub" | "hindi">("dub");
   const [downloadServer, setDownloadServer] = useState<AnimeServerOption>("hd-1");
   const [downloadQuality, setDownloadQuality] = useState("source");
@@ -717,7 +736,7 @@ function AnimeDetail({
       if (!consumetHealthy) {
         setResolvedAnime(null);
         setEpisodes([]);
-        setDetailHint("Using the built-in fallback playback providers for this title because Hianime is not returning usable anime data right now.");
+        setDetailHint("Ready to play with GRABIX fallback providers.");
         setFinding(false);
         return;
       }
@@ -727,7 +746,7 @@ function AnimeDetail({
       if (nextCandidates.length > 0) {
         setDetailHint(`Ready to play. Using ${nextCandidates[0].provider.toUpperCase()} first.`);
       } else {
-        setDetailHint("Hianime could not match this title, so playback will use the fallback providers.");
+        setDetailHint("Ready to play with GRABIX fallback providers.");
       }
 
       void (async () => {
@@ -1016,15 +1035,6 @@ function AnimeDetail({
     }
   };
 
-  const buildFallbackSources = async (targetEpisode = episode): Promise<StreamSource[]> => {
-    const tmdbEpisode = await resolveTmdbEpisodeNumber(tmdbId, targetEpisode);
-    return tmdbEpisode
-      ? getAnimeEpisodeSources(tmdbId, tmdbEpisode.season, tmdbEpisode.episode)
-      : targetEpisode > 1
-        ? getAnimeEpisodeSources(tmdbId, 1, targetEpisode)
-        : getAnimeSources(tmdbId);
-  };
-
   const resolveMovieBoxAnimeSources = async (
     targetEpisode = episode,
     options?: { preferHindi?: boolean }
@@ -1108,45 +1118,26 @@ function AnimeDetail({
 
   const resolvePlayableSources = async (targetEpisode = episode): Promise<StreamSource[]> => {
     const normalizedAudio = normalizeAudioPreference(audio);
-
-    if (normalizedAudio === "hi") {
-      return await resolveHindiMovieBoxSources(targetEpisode);
-    }
-
-    const resolvedSource = await resolveAnimeSourceViaBackend(targetEpisode, "play");
-    if (resolvedSource) {
-      return [resolvedSource];
-    }
-
-    const movieBoxSources = await resolveMovieBoxAnimeSources(targetEpisode);
-    if (movieBoxSources.length > 0) {
-      return movieBoxSources;
-    }
-
-    const fallbackSources = await buildFallbackSources(targetEpisode);
-    const watchCandidates = getWatchCandidates();
-
-    for (const candidate of watchCandidates) {
-      try {
-        const episodeList = await getEpisodeListForCandidate(candidate);
-        const match = episodeList.find((item) => item.number === targetEpisode) || episodeList[0];
-        if (!match) continue;
-
-        const playback = await fetchConsumetAnimeWatch(
-          match.id,
-          candidate.provider,
-          normalizedAudio,
-          server === "auto" ? undefined : server
-        );
-        if (playback.sources.length > 0) {
-          return server === "auto" ? [...playback.sources, ...fallbackSources] : playback.sources;
-        }
-      } catch {
-        continue;
-      }
-    }
-
-    return fallbackSources;
+    const tmdbEpisode = await resolveTmdbEpisodeNumber(tmdbId, targetEpisode);
+    return await resolveAnimePlaybackSources({
+      title: anime.title,
+      altTitle: anime.alt_title || "",
+      altTitles: expandAnimeTitles(anime.title, anime.alt_title).slice(1),
+      tmdbId,
+      fallbackSeason: tmdbEpisode?.season ?? 1,
+      fallbackEpisode: tmdbEpisode?.episode ?? targetEpisode,
+      episodeNumber: targetEpisode,
+      audio: normalizedAudio,
+      server,
+      isMovie,
+      purpose: "play",
+      candidates: getWatchCandidates().map((candidate) => ({
+        provider: candidate.provider,
+        animeId: candidate.id,
+        title: candidate.title,
+        altTitle: candidate.alt_title || "",
+      })),
+    });
   };
 
   const buildSubtitleText = (targetEpisode = episode) => {
@@ -1302,7 +1293,10 @@ function AnimeDetail({
       });
       return;
     } catch (error) {
-      alert(error instanceof Error ? error.message : "No playable anime sources were found for this episode.");
+      setToast({
+        message: error instanceof Error ? error.message : "No playable anime sources were found for this episode.",
+        variant: "error",
+      });
     } finally {
       setPlaying(false);
     }
@@ -1395,7 +1389,7 @@ function AnimeDetail({
 
   const handleTrailer = () => {
     if (!trailerUrl) {
-      alert("Trailer is not available for this title.");
+      setToast({ message: "Trailer is not available for this title.", variant: "info" });
       return;
     }
     onPlay({
@@ -1587,6 +1581,7 @@ function AnimeDetail({
         onClose={() => setDownloadDialogOpen(false)}
         onConfirm={() => void confirmDownloadSelection()}
       />
+      {toast ? <AppToast message={toast.message} variant={toast.variant} onClose={() => setToast(null)} /> : null}
     </div>
   );
 }

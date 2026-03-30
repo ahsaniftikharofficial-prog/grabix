@@ -230,7 +230,7 @@ export async function fetchConsumetHealth(): Promise<ConsumetHealth> {
   if (!health.healthy && /all connection attempts failed|consumet request failed/i.test(health.message || "")) {
     return {
       ...health,
-      message: "Consumet is unavailable right now, so GRABIX will use its built-in anime fallbacks.",
+      message: "Consumet is still warming up. GRABIX can already use its built-in anime fallbacks.",
     };
   }
   return health;
@@ -252,13 +252,21 @@ export async function fetchConsumetAnimeDiscover(
 }
 
 export async function fetchConsumetMangaDiscover(section: "trending" | "seasonal" | "hot", page = 1): Promise<ConsumetMediaSummary[]> {
-  const data = await getJson<{ items: ConsumetMediaSummary[] }>(`/consumet/discover/manga?section=${encodeURIComponent(section)}&page=${page}`);
+  const data = await getCachedJson<{ items: ConsumetMediaSummary[] }>(
+    `consumet:discover:manga:${section}:${page}`,
+    `/consumet/discover/manga?section=${encodeURIComponent(section)}&page=${page}`,
+    300_000,
+    true
+  );
   return data.items ?? [];
 }
 
 export async function searchConsumetDomain(domain: ConsumetDomain, query: string, provider: string, page = 1): Promise<ConsumetMediaSummary[]> {
-  const data = await getJson<{ items: ConsumetMediaSummary[] }>(
-    `/consumet/search/${domain}?query=${encodeURIComponent(query)}&provider=${encodeURIComponent(provider)}&page=${page}`
+  const data = await getCachedJson<{ items: ConsumetMediaSummary[] }>(
+    `consumet:search:${domain}:${provider}:${page}:${query.trim().toLowerCase()}`,
+    `/consumet/search/${domain}?query=${encodeURIComponent(query)}&provider=${encodeURIComponent(provider)}&page=${page}`,
+    180_000,
+    true
   );
   return data.items ?? [];
 }
@@ -281,8 +289,10 @@ export async function fetchConsumetAnimeEpisodes(id: string, provider: string): 
 }
 
 export async function fetchConsumetMangaChapters(id: string, provider = "mangadex"): Promise<ConsumetChapter[]> {
-  const data = await getJson<{ items: ConsumetChapter[] }>(
-    `/consumet/chapters/manga?id=${encodeURIComponent(id)}&provider=${encodeURIComponent(provider)}`
+  const data = await getCachedJson<{ items: ConsumetChapter[] }>(
+    `consumet:manga:chapters:${provider}:${id}`,
+    `/consumet/chapters/manga?id=${encodeURIComponent(id)}&provider=${encodeURIComponent(provider)}`,
+    300_000
   );
   return data.items ?? [];
 }
@@ -312,39 +322,60 @@ export async function fetchConsumetAnimeWatch(
 }
 
 export async function fetchConsumetMangaRead(chapterId: string, provider = "mangadex"): Promise<string[]> {
-  const data = await getJson<{ pages: string[] }>(
-    `/consumet/read/manga?chapter_id=${encodeURIComponent(chapterId)}&provider=${encodeURIComponent(provider)}`
+  const data = await getCachedJson<{ pages: string[] }>(
+    `consumet:manga:read:${provider}:${chapterId}`,
+    `/consumet/read/manga?chapter_id=${encodeURIComponent(chapterId)}&provider=${encodeURIComponent(provider)}`,
+    600_000
   );
   return data.pages ?? [];
 }
 
 export async function fetchConsumetGenericRead(domain: Exclude<ConsumetDomain, "anime" | "manga">, id: string, provider: string): Promise<unknown> {
-  const data = await getJson<{ content: unknown }>(
-    `/consumet/read/${domain}?id=${encodeURIComponent(id)}&provider=${encodeURIComponent(provider)}`
+  const data = await getCachedJson<{ content: unknown }>(
+    `consumet:read:${domain}:${provider}:${id}`,
+    `/consumet/read/${domain}?id=${encodeURIComponent(id)}&provider=${encodeURIComponent(provider)}`,
+    600_000,
+    true
   );
   return data.content;
 }
 
 export async function fetchConsumetNews(topic?: string): Promise<ConsumetNewsItem[]> {
   const suffix = topic ? `?topic=${encodeURIComponent(topic)}` : "";
-  const data = await getJson<{ items: ConsumetNewsItem[] }>(`/consumet/news/feed${suffix}`);
+  const data = await getCachedJson<{ items: ConsumetNewsItem[] }>(
+    `consumet:news:feed:${topic || "all"}`,
+    `/consumet/news/feed${suffix}`,
+    300_000,
+    true
+  );
   return data.items ?? [];
 }
 
 export async function fetchConsumetNewsArticle(id: string): Promise<ConsumetNewsArticle> {
-  return await getJson<ConsumetNewsArticle>(`/consumet/news/article?id=${encodeURIComponent(id)}`);
+  return await getCachedJson<ConsumetNewsArticle>(
+    `consumet:news:article:${id}`,
+    `/consumet/news/article?id=${encodeURIComponent(id)}`,
+    600_000,
+    true
+  );
 }
 
 export async function fetchConsumetMetaSearch(query: string, type: "movie" | "tv"): Promise<ConsumetMediaSummary[]> {
-  const data = await getJson<{ items: ConsumetMediaSummary[] }>(
-    `/consumet/meta/search?query=${encodeURIComponent(query)}&type=${encodeURIComponent(type)}`
+  const data = await getCachedJson<{ items: ConsumetMediaSummary[] }>(
+    `consumet:meta:search:${type}:${query.trim().toLowerCase()}`,
+    `/consumet/meta/search?query=${encodeURIComponent(query)}&type=${encodeURIComponent(type)}`,
+    180_000,
+    true
   );
   return data.items ?? [];
 }
 
 export async function fetchConsumetMetaInfo(id: string, type: "movie" | "tv"): Promise<{ id: string; type: string; item: ConsumetMediaSummary }> {
-  return await getJson<{ id: string; type: string; item: ConsumetMediaSummary }>(
-    `/consumet/meta/info?id=${encodeURIComponent(id)}&type=${encodeURIComponent(type)}`
+  return await getCachedJson<{ id: string; type: string; item: ConsumetMediaSummary }>(
+    `consumet:meta:info:${type}:${id}`,
+    `/consumet/meta/info?id=${encodeURIComponent(id)}&type=${encodeURIComponent(type)}`,
+    300_000,
+    true
   );
 }
 

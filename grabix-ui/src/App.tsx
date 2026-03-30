@@ -1,37 +1,74 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { Suspense, lazy, useEffect, useState, type ReactNode } from "react";
 import { ThemeProvider } from "./context/ThemeContext";
 import { FavoritesProvider } from "./context/FavoritesContext";
 import { ContentFilterProvider } from "./context/ContentFilterContext";
+import { RuntimeHealthProvider } from "./context/RuntimeHealthContext";
 import Sidebar, { type Page } from "./components/Sidebar";
-import ConverterPage from "./pages/ConverterPage";
-import DownloaderPage from "./pages/DownloaderPage";
-import LibraryPage from "./pages/LibraryPage";
-import AnimePage from "./pages/AnimePage";
-import MangaPage from "./pages/MangaPage";
-import ExplorePage from "./pages/ExplorePage";
-import MoviesPage from "./pages/MoviesPage";
-import MovieBoxPage from "./pages/MovieBoxPage";
-import TVSeriesPage from "./pages/TVSeriesPage";
-import FavoritesPage from "./pages/FavoritesPage";
-import SettingsPage from "./pages/SettingsPage";
-import { BACKEND_API, checkBackendReady, waitForBackendReady } from "./lib/api";
+import {
+  BACKEND_API,
+  deriveRuntimeState,
+  fetchBackendPing,
+  fetchRuntimeHealth,
+  fetchStartupDiagnostics,
+  type RuntimeHealthPayload,
+  type RuntimeState,
+  type StartupDiagnosticsPayload,
+  waitForBackendCoreReady,
+} from "./lib/api";
+import { fetchConsumetHealth } from "./lib/consumetProviders";
+import { fetchTrendingManga } from "./lib/mangaProviders";
+import { markPerf, measurePerf } from "./lib/performance";
+import { fetchMovieBoxDiscover } from "./lib/streamProviders";
 import "./index.css";
+
+const DownloaderPage = lazy(() => import("./pages/DownloaderPage"));
+const ConverterPage = lazy(() => import("./pages/ConverterPage"));
+const LibraryPage = lazy(() => import("./pages/LibraryPage"));
+const AnimePage = lazy(() => import("./pages/AnimePage"));
+const MangaPage = lazy(() => import("./pages/MangaPage"));
+const ExplorePage = lazy(() => import("./pages/ExplorePage"));
+const MoviesPage = lazy(() => import("./pages/MoviesPage"));
+const MovieBoxPage = lazy(() => import("./pages/MovieBoxPage"));
+const TVSeriesPage = lazy(() => import("./pages/TVSeriesPage"));
+const FavoritesPage = lazy(() => import("./pages/FavoritesPage"));
+const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 
 function Inner() {
   const [page, setPage] = useState<Page>("downloader");
-  const [backendOk, setBackendOk] = useState(false);
-  const [backendStarting, setBackendStarting] = useState(true);
+  const [runtimeState, setRuntimeState] = useState<RuntimeState>("starting");
+  const [bootstrapping, setBootstrapping] = useState(true);
+  const [backendCoreReady, setBackendCoreReady] = useState(false);
   const [activeDownloads, setActiveDownloads] = useState(0);
+  const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealthPayload | null>(null);
+  const [startupDiagnostics, setStartupDiagnostics] = useState<StartupDiagnosticsPayload | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    markPerf("app-shell-bootstrap");
+    markPerf("backend-ready");
 
-    const syncBackend = async () => {
-      const ready = await checkBackendReady();
-      if (!cancelled) {
-        setBackendOk(ready);
-        if (ready) {
-          setBackendStarting(false);
+    const applyRuntimeSnapshot = (
+      health: RuntimeHealthPayload | null,
+      nextBootstrapping: boolean
+    ) => {
+      if (cancelled) return;
+      setRuntimeHealth(health);
+      setBootstrapping(nextBootstrapping);
+    };
+
+    const syncRuntimeHealth = async () => {
+      try {
+        const ping = await fetchBackendPing();
+        if (!cancelled) {
+          setBackendCoreReady(Boolean(ping.core_ready));
+        }
+        const payload = await fetchRuntimeHealth();
+        if (!cancelled) {
+          applyRuntimeSnapshot(payload, false);
+        }
+      } catch {
+        if (!cancelled) {
+          applyRuntimeSnapshot(null, false);
         }
       }
     };
@@ -52,10 +89,33 @@ function Inner() {
     };
 
     const bootstrapBackend = async () => {
-      const ready = await waitForBackendReady();
+      const coreReady = await waitForBackendCoreReady(14000, 350);
+      if (cancelled) return;
+
+      setBackendCoreReady(coreReady);
+      setBootstrapping(false);
+      const diagnostics = await fetchStartupDiagnostics();
       if (!cancelled) {
-        setBackendOk(ready);
-        setBackendStarting(false);
+        setStartupDiagnostics(diagnostics);
+      }
+
+      if (!coreReady) {
+        applyRuntimeSnapshot(null, false);
+        return;
+      }
+
+      measurePerf("app-shell-bootstrap");
+      measurePerf("backend-ready");
+
+      try {
+        const payload = await fetchRuntimeHealth();
+        if (!cancelled) {
+          applyRuntimeSnapshot(payload, false);
+        }
+      } catch {
+        if (!cancelled) {
+          applyRuntimeSnapshot(null, false);
+        }
       }
     };
 
@@ -67,11 +127,19 @@ function Inner() {
     };
 
     void bootstrapBackend();
+    void fetchStartupDiagnostics().then((payload) => {
+      if (!cancelled) {
+        setStartupDiagnostics(payload);
+      }
+    });
     void syncDownloads();
     const interval = window.setInterval(() => {
-      void syncBackend();
+      void syncRuntimeHealth();
       void syncDownloads();
-    }, 1500);
+      void fetchStartupDiagnostics().then((payload) => {
+        if (!cancelled && payload) setStartupDiagnostics(payload);
+      });
+    }, 2500);
 
     window.addEventListener("grabix:navigate", handleNavigate as EventListener);
 
@@ -81,6 +149,33 @@ function Inner() {
       window.removeEventListener("grabix:navigate", handleNavigate as EventListener);
     };
   }, []);
+
+  useEffect(() => {
+    setRuntimeState(
+      deriveRuntimeState({
+        health: runtimeHealth,
+        startupDiagnostics,
+        bootstrapping,
+        backendCoreReady,
+      })
+    );
+  }, [runtimeHealth, startupDiagnostics, bootstrapping, backendCoreReady]);
+
+  useEffect(() => {
+    const backendOk = Boolean(runtimeHealth?.summary.backend_reachable);
+    if (!backendOk) return;
+
+    const timeoutId = window.setTimeout(() => {
+      void Promise.allSettled([
+        fetch(`${BACKEND_API}/providers/status`).catch(() => null),
+        fetchMovieBoxDiscover().catch(() => null),
+        fetchConsumetHealth().catch(() => null),
+        fetchTrendingManga(1).catch(() => null),
+      ]);
+    }, 900);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [runtimeHealth]);
 
   const pages: Record<Page, ReactNode> = {
     downloader: <DownloaderPage />,
@@ -96,37 +191,37 @@ function Inner() {
     settings: <SettingsPage />,
   };
 
+  const refreshRuntimeHealth = async () => {
+    try {
+      const payload = await fetchRuntimeHealth();
+      setRuntimeHealth(payload);
+      setBootstrapping(false);
+    } catch {
+      setRuntimeHealth(null);
+      setBootstrapping(false);
+    }
+  };
+
   return (
     <div style={{ display: "flex", height: "100vh", width: "100vw", overflow: "hidden" }}>
-      <Sidebar page={page} setPage={setPage} activeDownloads={activeDownloads} backendOk={backendOk} />
+      <Sidebar page={page} setPage={setPage} activeDownloads={activeDownloads} runtimeState={runtimeState} runtimeHealth={runtimeHealth} />
       <main style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", background: "var(--bg-app)" }}>
-        {backendStarting ? (
-          <div className="empty-state" style={{ height: "100%" }}>
-            <div className="player-loader" />
-            <p>Starting GRABIX services...</p>
-            <span>Preparing the bundled backend and providers.</span>
-          </div>
-        ) : !backendOk ? (
-          <div className="empty-state" style={{ height: "100%" }}>
-            <p>GRABIX backend is offline.</p>
-            <span>The installed app is waiting for its local services to start.</span>
-            <button
-              className="btn btn-primary"
-              onClick={() => {
-                setBackendStarting(true);
-                void waitForBackendReady().then((ready) => {
-                  setBackendOk(ready);
-                  setBackendStarting(false);
-                });
-              }}
-            >
-              Retry
-            </button>
-          </div>
-        ) : (
-          pages[page]
-        )}
+        <RuntimeHealthProvider value={{ health: runtimeHealth, runtimeState, refreshHealth: refreshRuntimeHealth }}>
+          <Suspense fallback={<PageLoadingState page={page} />}>
+            {pages[page]}
+          </Suspense>
+        </RuntimeHealthProvider>
       </main>
+    </div>
+  );
+}
+
+function PageLoadingState({ page }: { page: Page }) {
+  return (
+    <div className="empty-state" style={{ height: "100%" }}>
+      <div className="player-loader" />
+      <p>Loading {page}...</p>
+      <span>Preparing this part of GRABIX on demand for a faster startup.</span>
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchConsumetMangaChapters,
   fetchConsumetMangaDiscover,
@@ -25,10 +25,12 @@ import {
 } from "../lib/mangaProviders";
 import { useContentFilter } from "../context/ContentFilterContext";
 import { filterAdultContent } from "../lib/contentFilter";
-import { IconDownload, IconFolder, IconSearch, IconStar, IconX } from "../components/Icons";
+import { IconDownload, IconFolder, IconPause, IconPlay, IconSearch, IconStar, IconStop, IconX } from "../components/Icons";
+import { PageEmptyState, PageErrorState } from "../components/PageStates";
 import { BACKEND_API } from "../lib/api";
 import {
   getOfflineChapterPages,
+  listOfflineChapterPageKeys,
   getOfflineMangaKey,
   getOfflineMangaRecord,
   saveOfflineChapterPages,
@@ -39,9 +41,17 @@ import {
 type ReaderState = { chapterIndex: number; chapter: MangaChapter };
 type ChapterSource = "auto" | "mangadex" | "consumet" | "comick";
 type DownloadState = {
-  status: "idle" | "downloading" | "done" | "error";
+  status: "idle" | "downloading" | "paused" | "done" | "error";
   message?: string;
   progress?: number;
+};
+
+type ChapterDownloadSession = {
+  pageUrls: string[];
+  blobs: Blob[];
+  nextIndex: number;
+  controller: AbortController | null;
+  paused: boolean;
 };
 
 function chapterDownloadKey(mangaKey: string, chapterId: string): string {
@@ -138,16 +148,6 @@ function dedupeMangaItems(items: MangaDiscoveryItem[]): MangaDiscoveryItem[] {
   return result;
 }
 
-function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
-  return (
-    <div className="empty-state">
-      <IconX size={34} />
-      <p>{message}</p>
-      <button className="btn btn-ghost" onClick={onRetry}>Try Again</button>
-    </div>
-  );
-}
-
 function LoadingGrid({ count = 8 }: { count?: number }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 14 }}>
@@ -160,15 +160,6 @@ function LoadingGrid({ count = 8 }: { count?: number }) {
           </div>
         </div>
       ))}
-    </div>
-  );
-}
-
-function EmptyState({ label }: { label: string }) {
-  return (
-    <div className="empty-state">
-      <IconSearch size={36} />
-      <p>{label}</p>
     </div>
   );
 }
@@ -195,12 +186,12 @@ function MangaCard({
   item,
   onOpen,
   onRead,
-  onDownload,
+  onDownloadAll,
 }: {
   item: MangaDiscoveryItem;
   onOpen: () => void;
   onRead: () => void;
-  onDownload: () => void;
+  onDownloadAll: () => void;
 }) {
   return (
     <div className="card" style={{ overflow: "hidden", textAlign: "left", cursor: "pointer", border: "1px solid var(--border)", background: "var(--bg-surface)" }}>
@@ -234,8 +225,8 @@ function MangaCard({
           <button className="btn btn-primary" style={{ flex: 1, justifyContent: "center", height: 32 }} onClick={onRead}>
             Read
           </button>
-          <button className="btn btn-ghost" style={{ flex: 1, justifyContent: "center", height: 32 }} onClick={onDownload}>
-            Chapters
+          <button className="btn btn-ghost" style={{ width: 40, minWidth: 40, padding: 0, justifyContent: "center", height: 32 }} onClick={onDownloadAll} title="Download all chapters">
+            <IconDownload size={14} />
           </button>
         </div>
       </div>
@@ -249,14 +240,14 @@ function HorizontalRail({
   items,
   onOpen,
   onRead,
-  onDownload,
+  onDownloadAll,
 }: {
   title: string;
   subtitle?: string;
   items: MangaDiscoveryItem[];
   onOpen: (item: MangaDiscoveryItem) => void;
   onRead: (item: MangaDiscoveryItem) => void;
-  onDownload: (item: MangaDiscoveryItem) => void;
+  onDownloadAll: (item: MangaDiscoveryItem) => void;
 }) {
   return (
     <section>
@@ -272,7 +263,7 @@ function HorizontalRail({
               item={item}
               onOpen={() => onOpen(item)}
               onRead={() => onRead(item)}
-              onDownload={() => onDownload(item)}
+              onDownloadAll={() => onDownloadAll(item)}
             />
           );
         })}
@@ -314,6 +305,7 @@ export default function MangaPage() {
   const [offlineRecord, setOfflineRecord] = useState<OfflineMangaRecord | null>(null);
   const [chapterDownloadStates, setChapterDownloadStates] = useState<Record<string, DownloadState>>({});
   const [downloadedChapterKeys, setDownloadedChapterKeys] = useState<Set<string>>(new Set());
+  const chapterDownloadSessionsRef = useRef<Record<string, ChapterDownloadSession>>({});
 
   const season = useMemo(() => currentSeason(), []);
   const seasonYear = useMemo(() => new Date().getFullYear(), []);
@@ -323,11 +315,6 @@ export default function MangaPage() {
   const filteredConsumetHot = useMemo(() => filterAdultContent(consumetHot, adultContentBlocked), [consumetHot, adultContentBlocked]);
   const filteredSearchResults = useMemo(() => filterAdultContent(searchResults, adultContentBlocked), [searchResults, adultContentBlocked]);
   const filteredRecommendations = useMemo(() => filterAdultContent(recommendations, adultContentBlocked), [recommendations, adultContentBlocked]);
-  const visibleLibraryItems = useMemo(
-    () => dedupeMangaItems([...filteredTrending, ...filteredSeasonal, ...filteredComickHot, ...filteredConsumetHot, ...filteredSearchResults, ...filteredRecommendations]),
-    [filteredTrending, filteredSeasonal, filteredComickHot, filteredConsumetHot, filteredSearchResults, filteredRecommendations]
-  );
-
   const updateChapterDownloadState = (mangaKey: string, chapterId: string, next: DownloadState) => {
     const key = chapterDownloadKey(mangaKey, chapterId);
     setChapterDownloadStates((current) => ({ ...current, [key]: next }));
@@ -452,20 +439,9 @@ export default function MangaPage() {
     return [];
   };
 
-  const hydrateOfflineFlags = async (items: MangaDiscoveryItem[]) => {
-    const chapterKeys: string[] = [];
-    await Promise.all(items.map(async (item) => {
-      const mangaKey = getOfflineMangaKey(item);
-      const record = await getOfflineMangaRecord(mangaKey);
-      if (!record) return;
-      await Promise.all(record.chapters.map(async (chapter) => {
-        const pages = await getOfflineChapterPages(mangaKey, chapter.chapter_id);
-        if (pages.length > 0) {
-          chapterKeys.push(chapterDownloadKey(mangaKey, chapter.chapter_id));
-        }
-      }));
-    }));
-    setDownloadedChapterKeys((current) => new Set([...current, ...chapterKeys]));
+  const hydrateOfflineFlags = async () => {
+    const chapterKeys = await listOfflineChapterPageKeys();
+    setDownloadedChapterKeys(new Set(chapterKeys));
   };
 
   const openDetails = async (item: MangaDiscoveryItem, preferOffline = false) => {
@@ -507,39 +483,127 @@ export default function MangaPage() {
     return record;
   };
 
-  const handleDownload = async (item: MangaDiscoveryItem) => {
-    await openDetails(item, true);
-  };
-
-  const handleChapterDownload = async (chapter: MangaChapter) => {
-    if (!selectedItem) return;
-    const mangaKey = getOfflineMangaKey(selectedItem);
-    updateChapterDownloadState(mangaKey, chapter.chapter_id, { status: "downloading", message: "Preparing chapter...", progress: 0 });
+  const runChapterDownload = async (item: MangaDiscoveryItem, chapter: MangaChapter, resume = false): Promise<"done" | "paused" | "error"> => {
+    const mangaKey = getOfflineMangaKey(item);
+    const stateKey = chapterDownloadKey(mangaKey, chapter.chapter_id);
+    let session = chapterDownloadSessionsRef.current[stateKey];
+    if (session && !resume && !session.paused) {
+      return "done";
+    }
+    updateChapterDownloadState(mangaKey, chapter.chapter_id, {
+      status: "downloading",
+      message: resume ? "Resuming chapter..." : "Preparing chapter...",
+      progress: session?.pageUrls.length ? (session.nextIndex / Math.max(1, session.pageUrls.length)) * 100 : 0,
+    });
     try {
-      const record = await ensureOfflineMetadata(selectedItem);
-      if (!offlineRecord || offlineRecord.key !== record.key) {
+      const record = await ensureOfflineMetadata(item);
+      if (selectedItem && (!offlineRecord || offlineRecord.key !== record.key) && getOfflineMangaKey(selectedItem) === record.key) {
         setOfflineRecord(record);
       }
-      const pageUrls = await resolvePagesForChapter(chapter);
-      const blobs: Blob[] = [];
-      for (let pageIndex = 0; pageIndex < pageUrls.length; pageIndex += 1) {
-        const response = await fetch(pageUrls[pageIndex]);
+      if (!session || !resume) {
+        session = {
+          pageUrls: await resolvePagesForChapter(chapter),
+          blobs: [],
+          nextIndex: 0,
+          controller: null,
+          paused: false,
+        };
+        chapterDownloadSessionsRef.current[stateKey] = session;
+      } else {
+        session.paused = false;
+      }
+      for (let pageIndex = session.nextIndex; pageIndex < session.pageUrls.length; pageIndex += 1) {
+        const controller = new AbortController();
+        session.controller = controller;
+        const response = await fetch(session.pageUrls[pageIndex], { signal: controller.signal });
         if (!response.ok) throw new Error(`Page ${pageIndex + 1} failed with ${response.status}`);
-        blobs.push(await response.blob());
+        session.blobs.push(await response.blob());
+        session.nextIndex = pageIndex + 1;
         updateChapterDownloadState(mangaKey, chapter.chapter_id, {
           status: "downloading",
-          message: `Downloading page ${pageIndex + 1}/${pageUrls.length}`,
-          progress: ((pageIndex + 1) / Math.max(1, pageUrls.length)) * 100,
+          message: `Downloading page ${pageIndex + 1}/${session.pageUrls.length}`,
+          progress: ((pageIndex + 1) / Math.max(1, session.pageUrls.length)) * 100,
         });
       }
-      await saveOfflineChapterPages(mangaKey, chapter.chapter_id, blobs);
+      await saveOfflineChapterPages(mangaKey, chapter.chapter_id, session.blobs);
+      delete chapterDownloadSessionsRef.current[stateKey];
       markChapterDownloaded(mangaKey, chapter.chapter_id);
       updateChapterDownloadState(mangaKey, chapter.chapter_id, { status: "done", message: "Saved offline.", progress: 100 });
+      return "done";
     } catch (error) {
+      const activeSession = chapterDownloadSessionsRef.current[stateKey];
+      if (activeSession?.paused && error instanceof DOMException && error.name === "AbortError") {
+        updateChapterDownloadState(mangaKey, chapter.chapter_id, {
+          status: "paused",
+          message: `Paused at page ${activeSession.nextIndex}/${Math.max(1, activeSession.pageUrls.length)}`,
+          progress: (activeSession.nextIndex / Math.max(1, activeSession.pageUrls.length)) * 100,
+        });
+        return "paused";
+      }
+      delete chapterDownloadSessionsRef.current[stateKey];
       updateChapterDownloadState(mangaKey, chapter.chapter_id, {
         status: "error",
         message: error instanceof Error ? error.message : "Chapter download failed.",
       });
+      return "error";
+    }
+  };
+
+  const handleChapterDownload = async (chapter: MangaChapter) => {
+    if (!selectedItem) return;
+    await runChapterDownload(selectedItem, chapter, false);
+  };
+
+  const pauseChapterDownload = (chapter: MangaChapter) => {
+    if (!selectedItem) return;
+    const mangaKey = getOfflineMangaKey(selectedItem);
+    const stateKey = chapterDownloadKey(mangaKey, chapter.chapter_id);
+    const session = chapterDownloadSessionsRef.current[stateKey];
+    if (!session) return;
+    session.paused = true;
+    session.controller?.abort();
+  };
+
+  const stopChapterDownload = (chapter: MangaChapter) => {
+    if (!selectedItem) return;
+    const mangaKey = getOfflineMangaKey(selectedItem);
+    const stateKey = chapterDownloadKey(mangaKey, chapter.chapter_id);
+    const session = chapterDownloadSessionsRef.current[stateKey];
+    if (session) {
+      session.paused = false;
+      session.controller?.abort();
+      delete chapterDownloadSessionsRef.current[stateKey];
+    }
+    updateChapterDownloadState(mangaKey, chapter.chapter_id, {
+      status: "idle",
+      message: "Download stopped.",
+      progress: 0,
+    });
+  };
+
+  const resumeChapterDownload = async (chapter: MangaChapter) => {
+    if (!selectedItem) return;
+    await runChapterDownload(selectedItem, chapter, true);
+  };
+
+  const handleDownloadAll = async (item: MangaDiscoveryItem) => {
+    await openDetails(item, true);
+    const record = await ensureOfflineMetadata(item);
+    if (!offlineRecord || offlineRecord.key !== record.key) {
+      setOfflineRecord(record);
+    }
+    setDetailData(record.detailData);
+    setChapters(record.chapters);
+    setResolvedChapterSource(record.chapterSource);
+    const mangaKey = getOfflineMangaKey(item);
+    for (const chapter of record.chapters) {
+      if (downloadedChapterKeys.has(chapterDownloadKey(mangaKey, chapter.chapter_id))) {
+        continue;
+      }
+      const result = await runChapterDownload(item, chapter, false);
+      if (result === "paused") {
+        break;
+      }
     }
   };
 
@@ -547,27 +611,19 @@ export default function MangaPage() {
     setHomeLoading(true);
     setHomeError(null);
     try {
-      const [trendingResult, seasonalResult, comickResult, consumetResult] = await Promise.allSettled([
+      const [trendingResult, seasonalResult] = await Promise.allSettled([
         fetchTrendingManga(1),
         fetchSeasonalManga(seasonYear, season),
-        fetchComickFrontpage("trending", 1, 12, 7),
-        fetchConsumetMangaDiscover("trending", 1),
       ]);
 
       const nextTrending = trendingResult.status === "fulfilled" ? trendingResult.value : [];
       const nextSeasonal = seasonalResult.status === "fulfilled" ? seasonalResult.value : [];
-      const nextComickHot = comickResult.status === "fulfilled" ? comickResult.value : [];
-      const nextConsumetHot = consumetResult.status === "fulfilled"
-        ? consumetResult.value.map(mapConsumetMangaToDiscovery)
-        : [];
 
       setTrending(nextTrending);
       setSeasonal(nextSeasonal);
-      setComickHot(nextComickHot);
-      setConsumetHot(nextConsumetHot);
 
-      if (!nextTrending.length && !nextSeasonal.length && !nextComickHot.length && !nextConsumetHot.length) {
-        const reasons = [trendingResult, seasonalResult, comickResult, consumetResult]
+      if (!nextTrending.length && !nextSeasonal.length) {
+        const reasons = [trendingResult, seasonalResult]
           .filter((result): result is PromiseRejectedResult => result.status === "rejected")
           .map((result) => (result.reason instanceof Error ? result.reason.message : "Could not load manga discovery."));
         setHomeError(reasons[0] || "Could not load manga discovery.");
@@ -575,13 +631,27 @@ export default function MangaPage() {
     } finally {
       setHomeLoading(false);
     }
+
+    void Promise.allSettled([
+      fetchComickFrontpage("trending", 1, 12, 7),
+      fetchConsumetMangaDiscover("trending", 1),
+    ]).then(([comickResult, consumetResult]) => {
+      const nextComickHot = comickResult.status === "fulfilled" ? comickResult.value : [];
+      const nextConsumetHot = consumetResult.status === "fulfilled"
+        ? consumetResult.value.map(mapConsumetMangaToDiscovery)
+        : [];
+      setComickHot(nextComickHot);
+      setConsumetHot(nextConsumetHot);
+    }).catch(() => {
+      // secondary manga rails are optional
+    });
   };
 
   useEffect(() => { void loadHome(); }, []);
 
   useEffect(() => {
-    void hydrateOfflineFlags(visibleLibraryItems);
-  }, [visibleLibraryItems]);
+    void hydrateOfflineFlags();
+  }, []);
 
   useEffect(() => {
     if (!query.trim()) {
@@ -594,18 +664,30 @@ export default function MangaPage() {
       setSearchLoading(true);
       setSearchError(null);
       try {
-        const [nativeResult, consumetResult] = await Promise.allSettled([
-          searchManga(query),
-          searchConsumetManga(query),
-        ]);
-        if (cancelled) return;
-        const merged = dedupeMangaItems([
-          ...(nativeResult.status === "fulfilled" ? nativeResult.value : []),
-          ...(consumetResult.status === "fulfilled" ? consumetResult.value.map(mapConsumetMangaToDiscovery) : []),
-        ]);
-        setSearchResults(merged);
-        if (!merged.length && nativeResult.status === "rejected" && consumetResult.status === "rejected") {
-          throw nativeResult.reason instanceof Error ? nativeResult.reason : consumetResult.reason;
+        try {
+          const nativeItems = await searchManga(query);
+          if (cancelled) return;
+          setSearchResults(nativeItems);
+          setSearchLoading(false);
+
+          void searchConsumetManga(query)
+            .then((consumetItems) => {
+              if (cancelled) return;
+              setSearchResults((current) => dedupeMangaItems([
+                ...current,
+                ...consumetItems.map(mapConsumetMangaToDiscovery),
+              ]));
+            })
+            .catch(() => {
+              // native results are enough to keep search usable
+            });
+        } catch (nativeError) {
+          const consumetItems = await searchConsumetManga(query);
+          if (cancelled) return;
+          setSearchResults(consumetItems.map(mapConsumetMangaToDiscovery));
+          if (!consumetItems.length && nativeError) {
+            throw nativeError;
+          }
         }
       } catch (error) {
         if (!cancelled) {
@@ -794,17 +876,34 @@ export default function MangaPage() {
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
         {!selectedItem && !reader && !query && (
-          homeLoading ? <LoadingGrid count={10} /> : homeError ? <ErrorState message={homeError} onRetry={() => void loadHome()} /> : (
+          homeLoading ? <LoadingGrid count={10} /> : homeError ? (
+            <PageErrorState
+              title="Manga home is unavailable right now"
+              subtitle={homeError}
+              onRetry={() => void loadHome()}
+            />
+          ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
-              <HorizontalRail title="Trending Now" subtitle="Powered by AniList discovery" items={filteredTrending} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownload={(item) => void handleDownload(item)} />
-              <HorizontalRail title={`${season.charAt(0)}${season.slice(1).toLowerCase()} Picks`} subtitle={`Seasonal manga for ${seasonYear}`} items={filteredSeasonal} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownload={(item) => void handleDownload(item)} />
-              {filteredConsumetHot.length > 0 && <HorizontalRail title="Consumet MangaDex" subtitle="Primary manga reader matches from Consumet" items={filteredConsumetHot} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownload={(item) => void handleDownload(item)} />}
-              {filteredComickHot.length > 0 && <HorizontalRail title="Comick Hot" subtitle="Backup reader picks for long series" items={filteredComickHot} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownload={(item) => void handleDownload(item)} />}
+              <HorizontalRail title="Trending Now" subtitle="Powered by AniList discovery" items={filteredTrending} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownloadAll={(item) => void handleDownloadAll(item)} />
+              <HorizontalRail title={`${season.charAt(0)}${season.slice(1).toLowerCase()} Picks`} subtitle={`Seasonal manga for ${seasonYear}`} items={filteredSeasonal} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownloadAll={(item) => void handleDownloadAll(item)} />
+              {filteredConsumetHot.length > 0 && <HorizontalRail title="Consumet MangaDex" subtitle="Primary manga reader matches from Consumet" items={filteredConsumetHot} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownloadAll={(item) => void handleDownloadAll(item)} />}
+              {filteredComickHot.length > 0 && <HorizontalRail title="Comick Hot" subtitle="Backup reader picks for long series" items={filteredComickHot} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownloadAll={(item) => void handleDownloadAll(item)} />}
             </div>
           )
         )}
         {!selectedItem && !reader && !!query && (
-          searchLoading ? <LoadingGrid count={12} /> : searchError ? <ErrorState message={searchError} onRetry={() => setQuery((value) => value)} /> : filteredSearchResults.length === 0 ? <EmptyState label="No results found." /> : (
+          searchLoading ? <LoadingGrid count={12} /> : searchError ? (
+            <PageErrorState
+              title="Manga search could not be completed"
+              subtitle={searchError}
+              onRetry={() => setQuery((value) => value)}
+            />
+          ) : filteredSearchResults.length === 0 ? (
+            <PageEmptyState
+              title="No manga matched that search"
+              subtitle="Try another title, spelling, or language."
+            />
+          ) : (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 14 }}>
               {filteredSearchResults.map((item) => (
                 <MangaCard
@@ -812,7 +911,7 @@ export default function MangaPage() {
                   item={item}
                   onOpen={() => void openDetails(item)}
                   onRead={() => void handleRead(item)}
-                  onDownload={() => void handleDownload(item)}
+                  onDownloadAll={() => void handleDownloadAll(item)}
                 />
               ))}
             </div>
@@ -826,7 +925,13 @@ export default function MangaPage() {
             <button className="btn btn-primary" style={{ position: "fixed", right: 24, bottom: 24, zIndex: 25, boxShadow: "var(--shadow-lg)" }} onClick={() => setSelectedItem(null)}>
               Back
             </button>
-            {detailLoading ? <LoadingGrid count={4} /> : detailError ? <ErrorState message={detailError} onRetry={() => setSelectedItem({ ...selectedItem })} /> : detailData ? (
+            {detailLoading ? <LoadingGrid count={4} /> : detailError ? (
+              <PageErrorState
+                title="Manga details could not be loaded"
+                subtitle={detailError}
+                onRetry={() => setSelectedItem({ ...selectedItem })}
+              />
+            ) : detailData ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
                 <section className="card" style={{ padding: 18, display: "grid", gridTemplateColumns: "160px minmax(0, 1fr)", gap: 18 }}>
                   <img src={detailData.jikan?.cover_image || detailData.anilist?.cover_image || detailData.mangadex?.cover_image || detailData.comick?.cover_image || coverFallback(selectedItem.title)} alt={selectedItem.title} loading="eager" decoding="async" style={{ width: 160, height: 230, objectFit: "cover", borderRadius: 14, border: "1px solid var(--border)" }} onError={(event) => { (event.target as HTMLImageElement).src = coverFallback(selectedItem.title); }} />
@@ -858,7 +963,18 @@ export default function MangaPage() {
                       </select>
                     </div>
                   </div>
-                  {chaptersLoading ? <LoadingGrid count={4} /> : chaptersError ? <ErrorState message={chaptersError} onRetry={() => setChapterSource((value) => value)} /> : chapters.length === 0 ? <EmptyState label="No chapters available from the current reader source." /> : (
+                  {chaptersLoading ? <LoadingGrid count={4} /> : chaptersError ? (
+                    <PageErrorState
+                      title="Chapters could not be loaded"
+                      subtitle={chaptersError}
+                      onRetry={() => setChapterSource((value) => value)}
+                    />
+                  ) : chapters.length === 0 ? (
+                    <PageEmptyState
+                      title="No chapters are available from this reader source"
+                      subtitle="Try another reader source or language."
+                    />
+                  ) : (
                     <>
                       {chapterGroups > 1 && (
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
@@ -894,8 +1010,37 @@ export default function MangaPage() {
                                     <IconFolder size={14} />
                                   </button>
                                 )}
+                                {downloadState?.status === "downloading" ? (
+                                  <button
+                                    className="btn btn-ghost"
+                                    style={{ width: 42, minWidth: 42, padding: 0, justifyContent: "center", height: 34 }}
+                                    onClick={() => pauseChapterDownload(chapter)}
+                                    title="Pause chapter download"
+                                  >
+                                    <IconPause size={14} />
+                                  </button>
+                                ) : downloadState?.status === "paused" ? (
+                                  <button
+                                    className="btn btn-ghost"
+                                    style={{ width: 42, minWidth: 42, padding: 0, justifyContent: "center", height: 34 }}
+                                    onClick={() => void resumeChapterDownload(chapter)}
+                                    title="Resume chapter download"
+                                  >
+                                    <IconPlay size={14} />
+                                  </button>
+                                ) : null}
+                                {(downloadState?.status === "downloading" || downloadState?.status === "paused") ? (
+                                  <button
+                                    className="btn btn-ghost"
+                                    style={{ width: 42, minWidth: 42, padding: 0, justifyContent: "center", height: 34 }}
+                                    onClick={() => stopChapterDownload(chapter)}
+                                    title="Stop chapter download"
+                                  >
+                                    <IconStop size={14} />
+                                  </button>
+                                ) : null}
                                 <button className="btn btn-ghost" style={{ width: 42, minWidth: 42, padding: 0, justifyContent: "center", height: 34, fontSize: 10 }} onClick={() => void handleChapterDownload(chapter)} disabled={downloadState?.status === "downloading"} title={isDownloaded ? "Downloaded" : "Download chapter"}>
-                                  {downloadState?.status === "downloading" ? `${Math.round(downloadState.progress || 0)}%` : isDownloaded ? "OK" : <IconDownload size={14} />}
+                                  {downloadState?.status === "downloading" || downloadState?.status === "paused" ? `${Math.round(downloadState.progress || 0)}%` : isDownloaded ? "OK" : <IconDownload size={14} />}
                                 </button>
                               </div>
                             </div>
@@ -907,13 +1052,18 @@ export default function MangaPage() {
                 </section>
                 <section className="card" style={{ padding: 18 }}>
                   <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 12 }}>You Might Also Like</div>
-                  {recommendationsLoading ? <LoadingGrid count={4} /> : filteredRecommendations.length === 0 ? <EmptyState label="No recommendations available right now." /> : <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 14 }}>{filteredRecommendations.slice(0, 6).map((item) => (
+                  {recommendationsLoading ? <LoadingGrid count={4} /> : filteredRecommendations.length === 0 ? (
+                    <PageEmptyState
+                      title="No recommendations are available right now"
+                      subtitle="Try another title or come back after loading more manga."
+                    />
+                  ) : <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 14 }}>{filteredRecommendations.slice(0, 6).map((item) => (
                     <MangaCard
                       key={item.anilist_id ?? item.title}
                       item={item}
                       onOpen={() => void openDetails(item)}
                       onRead={() => void handleRead(item)}
-                      onDownload={() => void handleDownload(item)}
+                      onDownloadAll={() => void handleDownloadAll(item)}
                     />
                   ))}</div>}
                 </section>
@@ -938,7 +1088,18 @@ export default function MangaPage() {
               {activeChapter.title ? <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 4 }}>{activeChapter.title}</div> : null}
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>Source: {(activeChapter.source_name || activeChapter.provider || resolvedChapterSource || "mangadex").toUpperCase()}</div>
             </div>
-            {readerLoading ? <LoadingGrid count={6} /> : readerError ? <ErrorState message={readerError} onRetry={() => setReader({ ...reader })} /> : readerPages.length === 0 ? <EmptyState label="Chapter unavailable - try another chapter or switch reader source." /> : (
+            {readerLoading ? <LoadingGrid count={6} /> : readerError ? (
+              <PageErrorState
+                title="Reader pages could not be loaded"
+                subtitle={readerError}
+                onRetry={() => setReader({ ...reader })}
+              />
+            ) : readerPages.length === 0 ? (
+              <PageEmptyState
+                title="This chapter is unavailable right now"
+                subtitle="Try another chapter or switch the reader source."
+              />
+            ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "center" }}>
                 {readerPages.map((pageUrl, index) => (
                   <MangaReaderImage

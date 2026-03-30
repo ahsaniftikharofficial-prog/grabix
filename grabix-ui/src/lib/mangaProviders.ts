@@ -1,4 +1,5 @@
 import { BACKEND_API } from "./api";
+import { getCachedJson } from "./cache";
 
 export const MANGA_SOURCES = {
   ANILIST: "anilist",
@@ -101,29 +102,27 @@ export interface MangaDetailsResponse {
   chapter_count: number;
 }
 
-async function getJson<T>(url: string): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(url);
-  } catch (error) {
-    throw new Error(error instanceof Error ? error.message : "Unable to reach the manga service.");
-  }
-
-  if (!response.ok) {
-    let detail = "";
-    try {
-      const data = (await response.json()) as { detail?: string | { message?: string } };
-      detail = typeof data?.detail === "string"
-        ? data.detail
-        : typeof data?.detail === "object" && typeof data.detail?.message === "string"
-          ? data.detail.message
-          : "";
-    } catch {
-      detail = "";
-    }
-    throw new Error(detail || `Server error: ${response.status}`);
-  }
-  return (await response.json()) as T;
+async function getCachedMangaJson<T>(key: string, url: string, ttlMs: number, scope: "memory" | "session" | "local" = "local"): Promise<T> {
+  return await getCachedJson<T>({
+    key,
+    url,
+    ttlMs,
+    scope,
+    mapError: async (response) => {
+      let detail = "";
+      try {
+        const data = (await response.json()) as { detail?: string | { message?: string } };
+        detail = typeof data?.detail === "string"
+          ? data.detail
+          : typeof data?.detail === "object" && typeof data.detail?.message === "string"
+            ? data.detail.message
+            : "";
+      } catch {
+        detail = "";
+      }
+      return detail || `Server error: ${response.status}`;
+    },
+  });
 }
 
 export function toMangaImageProxy(url: string): string {
@@ -131,49 +130,91 @@ export function toMangaImageProxy(url: string): string {
 }
 
 export async function fetchTrendingManga(page = 1): Promise<MangaDiscoveryItem[]> {
-  const data = await getJson<{ items: MangaDiscoveryItem[] }>(MANGA_ENDPOINTS.trending(page));
+  const data = await getCachedMangaJson<{ items: MangaDiscoveryItem[] }>(
+    `manga:trending:${page}`,
+    MANGA_ENDPOINTS.trending(page),
+    300_000
+  );
   return data.items ?? [];
 }
 
 export async function fetchSeasonalManga(year: number, season: string): Promise<MangaDiscoveryItem[]> {
-  const data = await getJson<{ items: MangaDiscoveryItem[] }>(MANGA_ENDPOINTS.seasonal(year, season));
+  const data = await getCachedMangaJson<{ items: MangaDiscoveryItem[] }>(
+    `manga:seasonal:${year}:${season}`,
+    MANGA_ENDPOINTS.seasonal(year, season),
+    300_000
+  );
   return data.items ?? [];
 }
 
 export async function searchManga(query: string, source = "anilist", page = 1): Promise<MangaDiscoveryItem[]> {
-  const data = await getJson<{ items: MangaDiscoveryItem[] }>(MANGA_ENDPOINTS.search(query, source, page));
+  const data = await getCachedMangaJson<{ items: MangaDiscoveryItem[] }>(
+    `manga:search:${source}:${page}:${query.trim().toLowerCase()}`,
+    MANGA_ENDPOINTS.search(query, source, page),
+    180_000
+  );
   return data.items ?? [];
 }
 
 export async function fetchMangaDetails(id: string | number, source = "anilist_id"): Promise<MangaDetailsResponse> {
-  return await getJson<MangaDetailsResponse>(MANGA_ENDPOINTS.details(id, source));
+  return await getCachedMangaJson<MangaDetailsResponse>(
+    `manga:details:${source}:${id}`,
+    MANGA_ENDPOINTS.details(id, source),
+    300_000
+  );
 }
 
 export async function fetchMangaChapters(id: string, language = "en"): Promise<MangaChapter[]> {
-  const data = await getJson<{ items: MangaChapter[] }>(MANGA_ENDPOINTS.chapters(id, language));
+  const data = await getCachedMangaJson<{ items: MangaChapter[] }>(
+    `manga:chapters:${id}:${language}`,
+    MANGA_ENDPOINTS.chapters(id, language),
+    300_000
+  );
   return data.items ?? [];
 }
 
 export async function fetchMangaPages(chapterId: string): Promise<string[]> {
-  const data = await getJson<{ pages: string[] }>(MANGA_ENDPOINTS.pages(chapterId));
+  const data = await getCachedMangaJson<{ pages: string[] }>(
+    `manga:pages:${chapterId}`,
+    MANGA_ENDPOINTS.pages(chapterId),
+    600_000,
+    "session"
+  );
   return (data.pages ?? []).map(toMangaImageProxy);
 }
 
 export async function fetchMangaRecommendations(id: string | number): Promise<MangaDiscoveryItem[]> {
-  const data = await getJson<{ items: MangaDiscoveryItem[] }>(MANGA_ENDPOINTS.recommendations(id));
+  const data = await getCachedMangaJson<{ items: MangaDiscoveryItem[] }>(
+    `manga:recommendations:${id}`,
+    MANGA_ENDPOINTS.recommendations(id),
+    300_000
+  );
   return data.items ?? [];
 }
 
 export async function fetchComickFrontpage(section = "trending", page = 1, limit = 12, days = 7): Promise<MangaDiscoveryItem[]> {
-  const data = await getJson<{ items: MangaDiscoveryItem[] }>(MANGA_ENDPOINTS.frontpage(section, page, limit, days));
+  const data = await getCachedMangaJson<{ items: MangaDiscoveryItem[] }>(
+    `manga:frontpage:${section}:${page}:${limit}:${days}`,
+    MANGA_ENDPOINTS.frontpage(section, page, limit, days),
+    300_000
+  );
   return data.items ?? [];
 }
 
 export async function fetchComickChapters(title: string): Promise<{ match: MangaDiscoveryItem | null; items: MangaChapter[]; total: number }> {
-  return await getJson<{ match: MangaDiscoveryItem | null; items: MangaChapter[]; total: number }>(MANGA_ENDPOINTS.comickChapters(title));
+  return await getCachedMangaJson<{ match: MangaDiscoveryItem | null; items: MangaChapter[]; total: number }>(
+    `manga:comick:chapters:${title.trim().toLowerCase()}`,
+    MANGA_ENDPOINTS.comickChapters(title),
+    300_000
+  );
 }
 
 export async function fetchComickPages(url: string): Promise<string[]> {
-  const data = await getJson<{ pages: string[] }>(MANGA_ENDPOINTS.comickPages(url));
+  const data = await getCachedMangaJson<{ pages: string[] }>(
+    `manga:comick:pages:${url}`,
+    MANGA_ENDPOINTS.comickPages(url),
+    600_000,
+    "session"
+  );
   return (data.pages ?? []).map(toMangaImageProxy);
 }

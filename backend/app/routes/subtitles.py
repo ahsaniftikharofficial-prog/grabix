@@ -1,7 +1,6 @@
-import logging
-
 from fastapi import APIRouter, HTTPException, Query, Response
 
+from app.services.logging_utils import get_logger
 from app.services.subtitles import (
     cache_subtitle_content,
     download_subtitle,
@@ -10,7 +9,7 @@ from app.services.subtitles import (
 )
 
 router = APIRouter()
-logger = logging.getLogger("grabix.subtitles")
+logger = get_logger("subtitles")
 
 
 @router.get("/search")

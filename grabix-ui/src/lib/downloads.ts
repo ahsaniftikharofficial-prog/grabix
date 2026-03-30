@@ -8,6 +8,7 @@ export interface DownloadQueueRequest {
   forceHls?: boolean;
   category?: string;
   tags?: string[];
+  downloadEngine?: "standard" | "aria2";
 }
 
 export interface SubtitleDownloadRequest {
@@ -16,6 +17,7 @@ export interface SubtitleDownloadRequest {
   headers?: Record<string, string>;
   category?: string;
   tags?: string[];
+  downloadEngine?: "standard" | "aria2";
 }
 
 export interface DownloadQualityOption {
@@ -145,6 +147,7 @@ export async function queueVideoDownload(request: DownloadQueueRequest): Promise
         force_hls: Boolean(request.forceHls),
         category: request.category?.trim() || "",
         tags_csv: Array.isArray(request.tags) ? request.tags.filter(Boolean).join(",") : "",
+        download_engine: request.downloadEngine || "",
       }),
     });
   } catch (error) {
@@ -183,6 +186,7 @@ export async function queueSubtitleDownload(request: SubtitleDownloadRequest): P
             : "",
         category: request.category?.trim() || "",
         tags_csv: Array.isArray(request.tags) ? request.tags.filter(Boolean).join(",") : "",
+        download_engine: request.downloadEngine || "",
       }),
     });
   } catch (error) {

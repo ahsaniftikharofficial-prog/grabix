@@ -1,7 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useTheme } from "../context/ThemeContext";
 import { useContentFilter } from "../context/ContentFilterContext";
-import { BACKEND_API } from "../lib/api";
+import {
+  BACKEND_API,
+  fetchDiagnosticsLogs,
+  fetchStartupDiagnostics,
+  openStartupLog,
+  type DiagnosticsLogsPayload,
+  type StartupDiagnosticsPayload,
+} from "../lib/api";
 import { IconFolder, IconSun, IconMoon, IconInfo, IconCheck } from "../components/Icons";
 
 interface SettingRowProps {
@@ -37,12 +44,18 @@ export default function SettingsPage() {
   const [notifications, setNotifications] = useState(true);
   const [format, setFormat] = useState("mp4");
   const [quality, setQuality] = useState("1080p");
+  const [downloadEngine, setDownloadEngine] = useState<"standard" | "aria2">("standard");
+  const [aria2Available, setAria2Available] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState(false);
   const [adultError, setAdultError] = useState("");
   const [adultModalOpen, setAdultModalOpen] = useState(false);
   const [adultPassword, setAdultPassword] = useState("");
   const [adultSubmitting, setAdultSubmitting] = useState(false);
+  const [selfTest, setSelfTest] = useState<Record<string, unknown> | null>(null);
+  const [selfTestRunning, setSelfTestRunning] = useState(false);
+  const [startupDiagnostics, setStartupDiagnostics] = useState<StartupDiagnosticsPayload | null>(null);
+  const [diagnosticsLogs, setDiagnosticsLogs] = useState<DiagnosticsLogsPayload | null>(null);
 
   useEffect(() => {
     fetch(`${BACKEND_API}/settings`)
@@ -52,10 +65,24 @@ export default function SettingsPage() {
         if (typeof data.notifications === "boolean") setNotifications(data.notifications);
         if (typeof data.default_format === "string") setFormat(data.default_format);
         if (typeof data.default_quality === "string") setQuality(data.default_quality);
+        if (data.default_download_engine === "aria2" || data.default_download_engine === "standard") {
+          setDownloadEngine(data.default_download_engine);
+        }
       })
       .catch(() => {
         // Keep defaults when backend settings are unavailable.
       });
+
+    fetch(`${BACKEND_API}/download-engines`)
+      .then((response) => response.json())
+      .then((data: { engines?: Array<{ id?: string; available?: boolean }> }) => {
+        const aria2 = data.engines?.find((entry) => entry.id === "aria2");
+        setAria2Available(Boolean(aria2?.available));
+      })
+      .catch(() => setAria2Available(false));
+
+    void fetchStartupDiagnostics().then((payload) => setStartupDiagnostics(payload));
+    void fetchDiagnosticsLogs(12).then((payload) => setDiagnosticsLogs(payload)).catch(() => setDiagnosticsLogs(null));
   }, []);
 
   const save = () => {
@@ -69,6 +96,7 @@ export default function SettingsPage() {
         notifications,
         default_format: format,
         default_quality: quality,
+        default_download_engine: downloadEngine,
       }),
     })
       .then(() => {
@@ -109,6 +137,48 @@ export default function SettingsPage() {
       setAdultSubmitting(false);
     }
   };
+
+  const runSelfTest = async () => {
+    setSelfTestRunning(true);
+    try {
+      const response = await fetch(`${BACKEND_API}/diagnostics/self-test`);
+      const payload = (await response.json()) as Record<string, unknown>;
+      setSelfTest(payload);
+    } catch {
+      setSelfTest({
+        release_gate: {
+          ready: false,
+          failed_checks: [{ label: "Backend self-test could not be reached." }],
+        },
+      });
+    } finally {
+      setSelfTestRunning(false);
+      void fetchDiagnosticsLogs(12).then((payload) => setDiagnosticsLogs(payload)).catch(() => setDiagnosticsLogs(null));
+    }
+  };
+
+  const exportDiagnostics = async () => {
+    try {
+      const [backendPayload, startupPayload] = await Promise.all([
+        fetch(`${BACKEND_API}/diagnostics/export`).then((response) => response.json()),
+        fetchStartupDiagnostics(),
+      ]);
+      const blob = new Blob(
+        [JSON.stringify({ backend: backendPayload, startup: startupPayload }, null, 2)],
+        { type: "application/json" }
+      );
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `grabix-diagnostics-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      // Ignore export failures.
+    }
+  };
+
+  const selfTestGate = (selfTest?.release_gate as { ready?: boolean; failed_checks?: Array<{ label?: string; details?: Record<string, unknown> }> } | undefined) || undefined;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
@@ -156,6 +226,12 @@ export default function SettingsPage() {
               <option>360p</option>
             </select>
           </SettingRow>
+          <SettingRow label="Download engine" sub={aria2Available ? "Choose the stable standard engine or the faster aria2 engine for supported downloads." : "aria2 is not installed right now, so GRABIX will use the standard engine."}>
+            <select value={downloadEngine} onChange={(e) => setDownloadEngine((e.target.value === "aria2" ? "aria2" : "standard"))} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+              <option value="standard">Standard (stable)</option>
+              <option value="aria2">aria2 (fast)</option>
+            </select>
+          </SettingRow>
         </div>
 
         <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>Behaviour</div>
@@ -199,9 +275,85 @@ export default function SettingsPage() {
               <IconCheck size={13} /> Active
             </div>
           </SettingRow>
+          <SettingRow label="Fast engine" sub="aria2 multi-connection downloader availability">
+            <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: aria2Available ? "var(--text-success)" : "var(--text-muted)" }}>
+              <IconCheck size={13} /> {aria2Available ? "aria2 ready" : "Not installed"}
+            </div>
+          </SettingRow>
           <div style={{ paddingTop: 10, display: "flex", alignItems: "flex-start", gap: 8, color: "var(--text-muted)", fontSize: 12 }}>
             <IconInfo size={14} style={{ flexShrink: 0, marginTop: 1 }} />
             GRABIX is free and open source. For legal use only, respect copyright.
+          </div>
+        </div>
+
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginTop: 20, marginBottom: 4 }}>Diagnostics</div>
+        <div className="card card-padded">
+          <SettingRow label="Release self-test" sub="Runs the local shipping checks against backend, library, storage, and providers">
+            <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => void runSelfTest()} disabled={selfTestRunning}>
+              {selfTestRunning ? "Running..." : "Run self-test"}
+            </button>
+          </SettingRow>
+          <SettingRow label="Export diagnostics" sub="Save a local diagnostics JSON bundle for debugging installer/runtime issues">
+            <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => void exportDiagnostics()}>
+              Export JSON
+            </button>
+          </SettingRow>
+          <SettingRow label="Startup log" sub="Open the packaged-app startup log if sidecars fail to boot in the installer build">
+            <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => void openStartupLog()}>
+              Open log
+            </button>
+          </SettingRow>
+          {startupDiagnostics ? (
+            <div style={{ paddingTop: 10, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
+              Backend: {startupDiagnostics.backend.status} • Anime Provider: {startupDiagnostics.consumet.status}
+            </div>
+          ) : null}
+          {diagnosticsLogs?.backend_log_path ? (
+            <div style={{ paddingTop: 8, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, wordBreak: "break-all" }}>
+              Backend log: {diagnosticsLogs.backend_log_path}
+            </div>
+          ) : null}
+          {selfTestGate ? (
+            <div style={{ marginTop: 14, padding: 12, borderRadius: 12, background: "var(--bg-surface2)" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: selfTestGate.ready ? "var(--text-success)" : "var(--text-danger)" }}>
+                {selfTestGate.ready ? "Release gate passed" : "Release gate has failed checks"}
+              </div>
+              {!selfTestGate.ready && Array.isArray(selfTestGate.failed_checks) ? (
+                <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6, fontSize: 12, color: "var(--text-secondary)" }}>
+                  {selfTestGate.failed_checks.map((check, index) => (
+                    <div key={index}>
+                      {check.label || "Unnamed check"}
+                      {check.details?.broken_items ? ` (${check.details.broken_items} broken item(s))` : ""}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          <div style={{ marginTop: 14, padding: 12, borderRadius: 12, background: "var(--bg-surface2)" }}>
+            <div style={{ fontSize: 13, fontWeight: 700 }}>Recent failures and warnings</div>
+            {diagnosticsLogs?.events?.length ? (
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                {diagnosticsLogs.events.slice().reverse().map((entry, index) => (
+                  <div key={`${entry.timestamp}-${index}`} style={{ border: "1px solid var(--border)", borderRadius: 10, padding: "10px 12px", background: "var(--bg-surface)" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", fontSize: 11, color: "var(--text-muted)" }}>
+                      <span>{entry.service} â€¢ {entry.level}</span>
+                      <span>{entry.timestamp}</span>
+                    </div>
+                    <div style={{ marginTop: 4, fontSize: 12, fontWeight: 600 }}>{entry.message}</div>
+                    {entry.correlation_id ? (
+                      <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                        Correlation: {entry.correlation_id}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)" }}>
+                No recent warnings or failures were recorded.
+              </div>
+            )}
           </div>
         </div>
       </div>

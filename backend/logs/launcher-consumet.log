@@ -1,0 +1,7 @@
+
+> grabix-consumet-local@1.0.0 start
+> node server.cjs
+
+GRABIX Consumet gateway listening on http://127.0.0.1:3000
+Anime provider: HiAnime (https://aniwatchtv.to)
+^C^C

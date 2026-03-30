@@ -3,13 +3,14 @@ import { IconDownload, IconPlay, IconSearch, IconStar, IconX } from "../componen
 import { IconHeart } from "../components/Icons";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import VidSrcPlayer from "../components/VidSrcPlayer";
+import { PageEmptyState, PageErrorState } from "../components/PageStates";
 import { useFavorites } from "../context/FavoritesContext";
 import { useContentFilter } from "../context/ContentFilterContext";
 import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
 import { filterAdultContent } from "../lib/contentFilter";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
 import { BACKEND_API } from "../lib/api";
-import { fetchMovieBoxSources, getTvSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
+import { fetchMovieBoxSources, getTvSources, resolveTvPlaybackSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
 
 const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzdWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
 const TMDB = "https://api.themoviedb.org/3";
@@ -41,6 +42,7 @@ export default function TVSeriesPage() {
   const [tab, setTab] = useState<Tab>("trending");
   const [shows, setShows] = useState<Show[]>([]);
   const [loading, setLoading] = useState(true);
+  const [pageError, setPageError] = useState("");
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   const [detail, setDetail] = useState<Show | null>(null);
@@ -53,6 +55,7 @@ export default function TVSeriesPage() {
 
   const fetchTMDB = async (nextTab: Tab, nextPage = 1) => {
     setLoading(true);
+    setPageError("");
     try {
       const endpoints: Record<Tab, string> = {
         trending: `/trending/tv/week?page=${nextPage}`,
@@ -65,6 +68,7 @@ export default function TVSeriesPage() {
       setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
     } catch {
       setShows([]);
+      setPageError("TV series could not be loaded right now.");
     } finally {
       setLoading(false);
     }
@@ -72,15 +76,26 @@ export default function TVSeriesPage() {
 
   const searchShows = async (nextQuery: string, nextPage = 1) => {
     setLoading(true);
+    setPageError("");
     try {
       const data = await tf(`/search/tv?query=${encodeURIComponent(nextQuery)}&page=${nextPage}`);
       const nextShows = (data.results ?? []) as Show[];
       setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
     } catch {
       setShows([]);
+      setPageError("TV search could not be completed right now.");
     } finally {
       setLoading(false);
     }
+  };
+
+  const retryCurrentView = () => {
+    setPage(1);
+    if (query) {
+      void searchShows(query, 1);
+      return;
+    }
+    void fetchTMDB(tab, 1);
   };
 
   useEffect(() => {
@@ -151,8 +166,17 @@ export default function TVSeriesPage() {
       )}
 
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
-        {loading && filteredShows.length === 0 ? <LoadingGrid /> : filteredShows.length === 0 ? (
-          <div className="empty-state"><IconSearch size={36} /><p>No results</p></div>
+        {loading && filteredShows.length === 0 ? <LoadingGrid /> : pageError ? (
+          <PageErrorState
+            title="TV series are unavailable right now"
+            subtitle={pageError}
+            onRetry={retryCurrentView}
+          />
+        ) : filteredShows.length === 0 ? (
+          <PageEmptyState
+            title={query ? "No series matched that search" : "No series are available here yet"}
+            subtitle={query ? "Try a different title or spelling." : "Try another tab or refresh this page."}
+          />
         ) : (
           <>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 }}>
@@ -397,11 +421,20 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
   }, [downloadDialogOpen, downloadLanguage, data.name, season, episode, seriesYear]);
 
   const handlePlay = async () => {
+    const sources = await resolveTvPlaybackSources({
+      tmdbId: show.id,
+      imdbId: data.external_ids?.imdb_id,
+      title: data.name,
+      altTitles,
+      year: Number.isFinite(seriesYear) ? seriesYear : undefined,
+      season,
+      episode,
+    });
     onPlay({
       title: data.name,
-      subtitle: `TV playback for S${season}E${episode} with GRABIX servers`,
+      subtitle: `TV playback for S${season}E${episode} with Movie Box primary and embed fallbacks`,
       poster: poster || undefined,
-      sources: fallbackSources,
+      sources: sources.length > 0 ? sources : fallbackSources,
     });
   };
 

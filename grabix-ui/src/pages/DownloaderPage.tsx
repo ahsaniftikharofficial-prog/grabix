@@ -6,12 +6,15 @@ import {
   IconPlay, IconPause, IconStop, IconClock, IconScissors,
   IconFolder, IconInfo,
 } from "../components/Icons";
+import { PageEmptyState } from "../components/PageStates";
 import TrimSlider from "../components/TrimSlider";
 import { BACKEND_API } from "../lib/api";
+import { invoke } from "@tauri-apps/api/core";
 const API = BACKEND_API;
 
 type FileType = "video" | "audio" | "thumbnail" | "subtitle";
 type Status = "idle" | "loading" | "ok" | "error";
+type DownloadEngine = "standard" | "aria2";
 
 interface VideoInfo {
   title: string;
@@ -37,8 +40,15 @@ interface QueueItem {
   total: string;
   size: string;
   filePath: string;
+  partialFilePath: string;
   error: string;
   canPause: boolean;
+  recoverable: boolean;
+  retryCount: number;
+  failureCode: string;
+  downloadEngine: DownloadEngine;
+  requestedEngine: DownloadEngine;
+  engineNote: string;
 }
 
 function toQueueItem(serverItem: any, previous?: QueueItem): QueueItem {
@@ -59,8 +69,15 @@ function toQueueItem(serverItem: any, previous?: QueueItem): QueueItem {
     total: serverItem.total ?? previous?.total ?? "",
     size: serverItem.size ?? previous?.size ?? "",
     filePath: serverItem.file_path ?? previous?.filePath ?? "",
+    partialFilePath: serverItem.partial_file_path ?? previous?.partialFilePath ?? "",
     error: serverItem.error ?? previous?.error ?? "",
     canPause: serverItem.can_pause ?? previous?.canPause ?? false,
+    recoverable: serverItem.recoverable ?? previous?.recoverable ?? false,
+    retryCount: serverItem.retry_count ?? previous?.retryCount ?? 0,
+    failureCode: serverItem.failure_code ?? previous?.failureCode ?? "",
+    downloadEngine: serverItem.download_engine === "aria2" ? "aria2" : previous?.downloadEngine ?? "standard",
+    requestedEngine: serverItem.download_engine_requested === "aria2" ? "aria2" : previous?.requestedEngine ?? "standard",
+    engineNote: serverItem.engine_note ?? previous?.engineNote ?? "",
   };
 }
 
@@ -101,6 +118,8 @@ export default function DownloaderPage() {
   const [errMsg, setErrMsg] = useState("");
   const [fileType, setFileType] = useState<FileType>("video");
   const [quality, setQuality] = useState("1080p");
+  const [downloadEngine, setDownloadEngine] = useState<DownloadEngine>("standard");
+  const [aria2Available, setAria2Available] = useState(false);
   const [audioFormat, setAudioFormat] = useState("mp3");
   const [subtitleLang, setSubtitleLang] = useState("en");
   const [trimStart, setTrimStart] = useState(0);
@@ -130,6 +149,25 @@ export default function DownloaderPage() {
         // Ignore sync failures while backend is offline.
       }
     };
+
+    fetch(`${API}/settings`)
+      .then((response) => response.json())
+      .then((data: Record<string, unknown>) => {
+        if (!active) return;
+        if (data.default_download_engine === "aria2" || data.default_download_engine === "standard") {
+          setDownloadEngine(data.default_download_engine);
+        }
+      })
+      .catch(() => undefined);
+
+    fetch(`${API}/download-engines`)
+      .then((response) => response.json())
+      .then((data: { engines?: Array<{ id?: string; available?: boolean }> }) => {
+        if (!active) return;
+        const aria2 = data.engines?.find((entry) => entry.id === "aria2");
+        setAria2Available(Boolean(aria2?.available));
+      })
+      .catch(() => setAria2Available(false));
 
     void syncBackendQueue();
     const interval = setInterval(syncBackendQueue, 1000);
@@ -184,10 +222,23 @@ export default function DownloaderPage() {
 
   const handlePasteBtn = async () => {
     try {
-      const text = await navigator.clipboard.readText();
+      let text = "";
+      try {
+        text = await navigator.clipboard.readText();
+      } catch {
+        text = await invoke<string>("read_clipboard_text");
+      }
+      if (!text.trim()) {
+        setErrMsg("Clipboard is empty.");
+        setStatus("error");
+        return;
+      }
       setUrl(text);
       fetchInfo(text);
-    } catch { setErrMsg("Clipboard access denied."); setStatus("error"); }
+    } catch {
+      setErrMsg("Clipboard access denied. Use Ctrl+V if another app is blocking clipboard access.");
+      setStatus("error");
+    }
   };
 
   const startDownload = async () => {
@@ -209,14 +260,21 @@ export default function DownloaderPage() {
       total: "",
       size: "",
       filePath: "",
+      partialFilePath: "",
       error: "",
       canPause: false,
+      recoverable: false,
+      retryCount: 0,
+      failureCode: "",
+      downloadEngine,
+      requestedEngine: downloadEngine,
+      engineNote: "",
     };
     setQueue(prev => [newItem, ...prev]);
 
     try {
       const trimEnabled = trimOpen && trimEnd - trimStart < info!.duration;
-      const res = await fetch(`${API}/download?url=${encodeURIComponent(url)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}`);
+      const res = await fetch(`${API}/download?url=${encodeURIComponent(url)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(downloadEngine)}`);
       const data = await res.json();
       const serverTaskId = data.task_id ?? taskId;
 
@@ -275,11 +333,15 @@ export default function DownloaderPage() {
         thumbnail: "", format: fileType === "video" ? quality : fileType,
         fileType, status: "queued", percent: 0, speed: "", eta: "",
         downloaded: "", total: "", size: "", filePath: "", error: "", canPause: false,
+        partialFilePath: "", recoverable: false, retryCount: 0, failureCode: "",
+        downloadEngine,
+        requestedEngine: downloadEngine,
+        engineNote: "",
       };
       setQueue(prev => [newItem, ...prev]);
       try {
         const trimEnabled = trimOpen && info && trimEnd - trimStart < info.duration;
-        const res = await fetch(`${API}/download?url=${encodeURIComponent(bUrl)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}`);
+        const res = await fetch(`${API}/download?url=${encodeURIComponent(bUrl)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(downloadEngine)}`);
         const data = await res.json();
         const serverTaskId = data.task_id ?? taskId;
       setQueue(prev => prev.map(q => q.id === taskId ? { ...q, id: serverTaskId, serverId: serverTaskId } : q));
@@ -598,6 +660,31 @@ export default function DownloaderPage() {
             </div>
 
             {/* ── QUALITY (Video only) ── */}
+            <div style={{ marginBottom: 14 }} className="fade-in">
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, letterSpacing: 0.5, textTransform: "uppercase" }}>
+                Download Engine
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <button
+                  className={`quality-chip${downloadEngine === "standard" ? " active" : ""}`}
+                  onClick={() => setDownloadEngine("standard")}
+                >
+                  Standard (stable)
+                </button>
+                <button
+                  className={`quality-chip${downloadEngine === "aria2" ? " active" : ""}`}
+                  onClick={() => setDownloadEngine("aria2")}
+                >
+                  aria2 (fast)
+                </button>
+              </div>
+              <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)" }}>
+                {aria2Available
+                  ? "aria2 is best for direct-file downloads. GRABIX automatically falls back to Standard for unsupported cases."
+                  : "aria2 is not installed right now, so Standard remains the active downloader."}
+              </div>
+            </div>
+
             {fileType === "video" && (
               <div style={{ marginBottom: 14 }} className="fade-in">
                 <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, letterSpacing: 0.5, textTransform: "uppercase" }}>
@@ -761,11 +848,11 @@ export default function DownloaderPage() {
 
         {/* ── EMPTY STATE ── */}
         {status === "idle" && queue.length === 0 && (
-          <div className="empty-state">
-            <IconLink size={40} color="var(--text-muted)" />
-            <p>Paste a video link to get started</p>
-            <span>Supports YouTube, Vimeo, Twitter, and 1000+ sites via yt-dlp</span>
-          </div>
+          <PageEmptyState
+            title="Paste a video link to get started"
+            subtitle="Supports YouTube, Vimeo, Twitter, and 1000+ sites via yt-dlp."
+            icon={<IconLink size={40} color="var(--text-muted)" />}
+          />
         )}
       </div>
     </div>
@@ -797,6 +884,12 @@ function QueueCard({
     downloading: "Downloading", processing: "Processing…", queued: "Queued", paused: "Paused",
     canceling: "Canceling…",
   };
+  const statusLabel =
+    item.status === "paused" && item.recoverable
+      ? "Paused for recovery"
+      : item.status === "failed" && item.recoverable
+        ? "Needs retry"
+        : (statusLabels[item.status] ?? item.status);
 
   // Clean up raw speed string: strip ANSI codes and extra whitespace
   const cleanSpeed = formatDisplaySpeed(item.speed);
@@ -817,10 +910,16 @@ function QueueCard({
           <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.title}</div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 2 }}>
             <span style={{ fontSize: 11, color: statusColors[item.status] ?? "var(--text-muted)", fontWeight: 600 }}>
-              {statusLabels[item.status] ?? item.status}
+              {statusLabel}
             </span>
             <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{item.format.toUpperCase()}</span>
+            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{item.downloadEngine === "aria2" ? "aria2" : "Standard"}</span>
           </div>
+          {item.engineNote && (
+            <div style={{ marginTop: 3, fontSize: 11, color: "var(--text-muted)", lineHeight: 1.4 }}>
+              {item.engineNote}
+            </div>
+          )}
           {statsSummary && (isActive || isPaused) && (
             <div style={{ marginTop: 3, fontSize: 11, color: "var(--text-secondary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
               {statsSummary}
@@ -960,6 +1059,12 @@ function QueueCard({
         </div>
       )}
 
+      {item.status === "paused" && item.recoverable && item.error && (
+        <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-warning)", display: "flex", alignItems: "center", gap: 5 }}>
+          <IconAlert size={13} /> {item.error}
+        </div>
+      )}
+
       {/* ── Properties panel (inline toggle) ── */}
       {showProps && (
         <div style={{
@@ -971,9 +1076,12 @@ function QueueCard({
           {[
             ["Type",   item.fileType.charAt(0).toUpperCase() + item.fileType.slice(1)],
             ["Format", item.format.toUpperCase()],
-            ["Status", statusLabels[item.status] ?? item.status],
+            ["Status", statusLabel],
+            ["Recovery", item.recoverable ? "Yes" : "No"],
+            ["Retries", String(item.retryCount || 0)],
             ["Size",   item.total || item.size || "—"],
             ["Path",   item.filePath || "—"],
+            ["Partial", item.partialFilePath || "—"],
             ["URL",    item.url || "—"],
           ].map(([label, value]) => (
             <div key={label} style={{ display: "flex", gap: 0 }}>

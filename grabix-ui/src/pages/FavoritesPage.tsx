@@ -1,17 +1,19 @@
 import { useState } from "react";
 import { IconPlay, IconX } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
+import AppToast from "../components/AppToast";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import { useContentFilter } from "../context/ContentFilterContext";
 import { FavItem, useFavorites } from "../context/FavoritesContext";
 import { filterAdultContent } from "../lib/contentFilter";
-import { fetchMovieBoxSources, getAnimeSources, getMovieSources, getTvSources, type StreamSource } from "../lib/streamProviders";
+import { fetchMovieBoxSources, getAnimeSources, resolveMoviePlaybackSources, resolveTvPlaybackSources, type StreamSource } from "../lib/streamProviders";
 
 export default function FavoritesPage() {
   const { adultContentBlocked } = useContentFilter();
   const { favorites, remove } = useFavorites();
   const [filter, setFilter] = useState<"all" | "movie" | "anime" | "manga" | "series">("all");
   const [player, setPlayer] = useState<{ title: string; poster?: string; sources: StreamSource[]; mediaType: "movie" | "tv" } | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
   const filtered = filterAdultContent(
     filter === "all" ? favorites : favorites.filter(favorite => favorite.type === filter),
@@ -35,15 +37,27 @@ export default function FavoritesPage() {
         sources = [];
       }
     } else if (item.type === "movie" && item.tmdbId) {
-      sources = getMovieSources({ tmdbId: item.tmdbId, imdbId: item.imdbId });
+      sources = await resolveMoviePlaybackSources({
+        tmdbId: item.tmdbId,
+        imdbId: item.imdbId,
+        title: item.title,
+        year: item.year,
+      });
     } else if (item.type === "anime" && item.tmdbId) {
       sources = getAnimeSources(item.tmdbId);
     } else if (item.type === "series" && item.tmdbId) {
-      sources = getTvSources({ tmdbId: item.tmdbId, imdbId: item.imdbId });
+      sources = await resolveTvPlaybackSources({
+        tmdbId: item.tmdbId,
+        imdbId: item.imdbId,
+        title: item.title,
+        year: item.year,
+        season: 1,
+        episode: 1,
+      });
     }
 
     if (sources.length === 0) {
-      alert("Stream not available for this item.");
+      setToast("Stream is not available for this favorite right now.");
       return;
     }
 
@@ -91,6 +105,7 @@ export default function FavoritesPage() {
       </div>
 
       {player && <VidSrcPlayer title={player.title} poster={player.poster} sources={player.sources} mediaType={player.mediaType} onClose={() => setPlayer(null)} />}
+      {toast ? <AppToast message={toast} variant="error" onClose={() => setToast(null)} /> : null}
     </div>
   );
 }

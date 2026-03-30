@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { IconDownload, IconRefresh, IconSearch, IconX } from "../components/Icons";
+import { IconDownload, IconSearch, IconX } from "../components/Icons";
+import { PageEmptyState, PageErrorState } from "../components/PageStates";
 import { useContentFilter } from "../context/ContentFilterContext";
 import {
   fetchConsumetDomainInfo,
@@ -63,15 +64,6 @@ function getDownloadLinks(value: unknown): Array<{ label: string; url: string }>
     const url = typeof download.url === "string" ? download.url.trim() : "";
     return label && url ? [{ label, url }] : [];
   });
-}
-
-function EmptyState({ label }: { label: string }) {
-  return (
-    <div className="empty-state">
-      <IconSearch size={34} />
-      <p>{label}</p>
-    </div>
-  );
 }
 
 function LoadingGrid({ count = 8 }: { count?: number }) {
@@ -252,13 +244,24 @@ export default function ExplorePage() {
 
       <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
         {loading ? <LoadingGrid /> : error ? (
-          <div className="empty-state">
-            <IconX size={34} />
-            <p>{error}</p>
-            <button className="btn btn-ghost" onClick={() => isNews ? void loadNews(topic) : setQuery((value) => value)}><IconRefresh size={14} /> Try Again</button>
-          </div>
+          <PageErrorState
+            title={isNews ? "News is unavailable right now" : `${title} could not be loaded`}
+            subtitle={error}
+            onRetry={() => {
+              if (isNews) {
+                void loadNews(topic);
+                return;
+              }
+              setQuery((value) => value);
+            }}
+          />
         ) : isNews ? (
-          filteredNewsItems.length === 0 ? <EmptyState label="No news articles were available." /> : (
+          filteredNewsItems.length === 0 ? (
+            <PageEmptyState
+              title="No news articles are available right now"
+              subtitle="Try another topic or refresh this feed."
+            />
+          ) : (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 }}>
               {filteredNewsItems.map((item) => (
                 <button key={item.id} className="card" style={{ textAlign: "left", overflow: "hidden", cursor: "pointer", border: "1px solid var(--border)", background: "var(--bg-surface)" }} onClick={() => void openNews(item)}>
@@ -272,9 +275,15 @@ export default function ExplorePage() {
             </div>
           )
         ) : !query ? (
-          <EmptyState label={`Search ${title.toLowerCase()} to load results from ${provider}.`} />
+          <PageEmptyState
+            title={`Search ${title.toLowerCase()} to get started`}
+            subtitle={`Results will load from ${provider}.`}
+          />
         ) : filteredMediaItems.length === 0 ? (
-          <EmptyState label={`No ${title.toLowerCase()} results found.`} />
+          <PageEmptyState
+            title={`No ${title.toLowerCase()} results were found`}
+            subtitle="Try a different search term or provider query."
+          />
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 14 }}>
             {filteredMediaItems.map((item) => (

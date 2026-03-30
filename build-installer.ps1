@@ -46,14 +46,19 @@ Push-Location $root
 python -m PyInstaller `
   --noconfirm `
   --clean `
-  --onefile `
+  --onedir `
+  --contents-directory . `
   --noconsole `
   --name grabix-backend `
   --distpath $backendDist `
   --paths $root `
   --collect-submodules backend.app `
-  --collect-submodules moviebox_api `
-  --hidden-import moviebox_api.constants `
+  --collect-all moviebox_api `
+  --collect-all throttlebuster `
+  --hidden-import moviebox_api.v1.constants `
+  --hidden-import moviebox_api.v1.core `
+  --hidden-import moviebox_api.v1.download `
+  --hidden-import moviebox_api.v1.requests `
   --hidden-import python_multipart `
   backend/main.py | Out-Host
 Pop-Location
@@ -64,7 +69,9 @@ npx pkg server.cjs `
   --output (Join-Path $consumetDist "grabix-consumet.exe") | Out-Host
 Pop-Location
 
-Copy-Item (Join-Path $backendDist "grabix-backend.exe") (Join-Path $tauriBin "grabix-backend.exe") -Force
+Remove-Item (Join-Path $tauriBin "grabix-backend") -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $tauriBin "grabix-backend.exe") -Force -ErrorAction SilentlyContinue
+Copy-Item (Join-Path $backendDist "grabix-backend") (Join-Path $tauriBin "grabix-backend") -Recurse -Force
 Copy-Item (Join-Path $consumetDist "grabix-consumet.exe") (Join-Path $tauriBin "grabix-consumet.exe") -Force
 
 Push-Location $frontend

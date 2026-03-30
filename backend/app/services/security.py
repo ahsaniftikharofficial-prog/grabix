@@ -1,0 +1,146 @@
+import ipaddress
+import json
+import socket
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+from fastapi import HTTPException
+
+DEFAULT_LOCAL_APP_ORIGINS = [
+    "http://127.0.0.1:1420",
+    "http://localhost:1420",
+    "http://127.0.0.1:1421",
+    "http://localhost:1421",
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+    "tauri://localhost",
+    "http://tauri.localhost",
+]
+
+DEFAULT_APPROVED_MEDIA_HOSTS = (
+    "youtube.com",
+    "youtu.be",
+    "googlevideo.com",
+    "ytimg.com",
+    "vimeo.com",
+    "archive.org",
+    "moviebox.ng",
+    "moviebox.ph",
+    "movieboxpro.app",
+    "hakunaymatata.com",
+    "bcdnxw.com",
+    "bunnycdn",
+    "cdn",
+    "vidsrc",
+    "2embed",
+    "multiembed",
+    "vsembed",
+    "hianime",
+    "aniwatch",
+    "mangadex",
+    "comick",
+    "opensubtitles",
+    "subdl",
+)
+
+
+def is_private_or_loopback_host(hostname: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(hostname)
+        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return True
+
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return True
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return True
+    return False
+
+
+def validate_outbound_url(url: str, *, allowed_hosts: tuple[str, ...] = DEFAULT_APPROVED_MEDIA_HOSTS) -> str:
+    parsed = urlparse((url or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="Only http/https URLs are allowed.")
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        raise HTTPException(status_code=400, detail="URL is missing a hostname.")
+    if is_private_or_loopback_host(hostname):
+        raise HTTPException(status_code=400, detail="Private, loopback, and local network hosts are blocked.")
+    if not any(token in hostname for token in allowed_hosts):
+        raise HTTPException(status_code=400, detail=f"Host '{hostname}' is not on the approved media allowlist.")
+    return parsed.geturl()
+
+
+def normalize_download_target(
+    url: str,
+    *,
+    self_base_url: str,
+    headers_json: str = "",
+    moviebox_headers: dict[str, str] | None = None,
+    allowed_hosts: tuple[str, ...] = DEFAULT_APPROVED_MEDIA_HOSTS,
+) -> tuple[str, str]:
+    parsed = urlparse((url or "").strip())
+    self_parsed = urlparse(self_base_url)
+    same_host = (parsed.hostname or "").lower() == (self_parsed.hostname or "").lower()
+    same_port = (parsed.port or (443 if parsed.scheme == "https" else 80)) == (
+        self_parsed.port or (443 if self_parsed.scheme == "https" else 80)
+    )
+
+    if same_host and same_port and parsed.path in {"/stream/proxy", "/moviebox/proxy-stream", "/moviebox/subtitle"}:
+        query = parse_qs(parsed.query)
+        nested_url = (query.get("url") or [""])[0].strip()
+        nested_headers_json = headers_json or (query.get("headers_json") or [""])[0].strip()
+        if not nested_headers_json and parsed.path.startswith("/moviebox/") and moviebox_headers:
+            nested_headers_json = json.dumps(dict(moviebox_headers))
+        if nested_url:
+            return validate_outbound_url(nested_url, allowed_hosts=allowed_hosts), nested_headers_json
+
+    return validate_outbound_url(url, allowed_hosts=allowed_hosts), headers_json
+
+
+def ensure_safe_managed_path(raw_path: str, base_dir: str | Path, *, must_exist: bool = False, expect_file: bool | None = None) -> Path:
+    base_path = Path(base_dir).resolve()
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = base_path / candidate
+    candidate = candidate.resolve(strict=False)
+
+    try:
+        candidate.relative_to(base_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Path is outside the managed GRABIX folder.") from exc
+
+    if must_exist and not candidate.exists():
+        raise HTTPException(status_code=404, detail="Managed path was not found.")
+    if expect_file is True and candidate.exists() and not candidate.is_file():
+        raise HTTPException(status_code=400, detail="Expected a file path.")
+    if expect_file is False and candidate.exists() and not candidate.is_dir():
+        raise HTTPException(status_code=400, detail="Expected a folder path.")
+    return candidate
+
+
+def redact_for_diagnostics(value: Any) -> Any:
+    sensitive_keys = {"password", "token", "authorization", "cookie", "headers_json", "secret"}
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if str(key).lower() in sensitive_keys:
+                redacted[key] = "<redacted>"
+            else:
+                redacted[key] = redact_for_diagnostics(item)
+        return redacted
+    if isinstance(value, list):
+        return [redact_for_diagnostics(item) for item in value]
+    return value

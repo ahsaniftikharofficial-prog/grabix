@@ -1,3 +1,6 @@
+import asyncio
+import asyncio
+import logging
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -6,15 +9,26 @@ import ctypes
 from pathlib import Path
 from datetime import datetime
 from difflib import SequenceMatcher
-from urllib.parse import parse_qs, quote, urljoin, urlparse, urlencode
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse, urlencode
 from urllib.request import Request as URLRequest, urlopen
 from pydantic import BaseModel
 from app.routes.consumet import router as consumet_router
 from app.routes.downloads import router as downloads_router
 from app.routes.manga import router as manga_router
+from app.routes.providers import router as providers_router
 from app.routes.settings import router as settings_router
 from app.routes.streaming import router as streaming_router
 from app.routes.subtitles import router as subtitles_router
+from app.services.consumet import get_health_status as get_consumet_health_status
+from app.services.logging_utils import LOG_DIR, backend_log_path, get_logger, log_event, read_recent_log_events
+from app.services.security import (
+    DEFAULT_APPROVED_MEDIA_HOSTS,
+    DEFAULT_LOCAL_APP_ORIGINS,
+    ensure_safe_managed_path,
+    normalize_download_target as security_normalize_download_target,
+    redact_for_diagnostics,
+    validate_outbound_url as security_validate_outbound_url,
+)
 
 try:
     import bcrypt
@@ -37,20 +51,24 @@ except Exception as exc:
     SELENIUM_IMPORT_ERROR = str(exc)
 
 try:
-    from moviebox_api import (
+    from moviebox_api.v1.constants import (
+        DOWNLOAD_REQUEST_HEADERS as MOVIEBOX_DOWNLOAD_REQUEST_HEADERS,
+        SubjectType as MovieBoxSubjectType,
+    )
+    from moviebox_api.v1.core import (
         Homepage as MovieBoxHomepage,
         HotMoviesAndTVSeries as MovieBoxHotMoviesAndTVSeries,
         MovieDetails as MovieBoxMovieDetails,
         PopularSearch as MovieBoxPopularSearch,
-        DownloadableMovieFilesDetail,
-        DownloadableTVSeriesFilesDetail,
         Search as MovieBoxSearch,
-        Session as MovieBoxSession,
-        SubjectType as MovieBoxSubjectType,
         Trending as MovieBoxTrending,
         TVSeriesDetails as MovieBoxTVSeriesDetails,
     )
-    from moviebox_api.constants import DOWNLOAD_REQUEST_HEADERS as MOVIEBOX_DOWNLOAD_REQUEST_HEADERS
+    from moviebox_api.v1.download import (
+        DownloadableMovieFilesDetail,
+        DownloadableTVSeriesFilesDetail,
+    )
+    from moviebox_api.v1.requests import Session as MovieBoxSession
     MOVIEBOX_AVAILABLE = True
     MOVIEBOX_IMPORT_ERROR = ""
 except Exception as exc:
@@ -59,18 +77,7 @@ except Exception as exc:
     MOVIEBOX_DOWNLOAD_REQUEST_HEADERS = {}
 
 app = FastAPI()
-LOCAL_APP_ORIGINS = [
-    "http://127.0.0.1:1420",
-    "http://localhost:1420",
-    "http://127.0.0.1:1421",
-    "http://localhost:1421",
-    "http://127.0.0.1:5173",
-    "http://localhost:5173",
-    "http://127.0.0.1:8000",
-    "http://localhost:8000",
-    "tauri://localhost",
-    "http://tauri.localhost",
-]
+LOCAL_APP_ORIGINS = DEFAULT_LOCAL_APP_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=LOCAL_APP_ORIGINS,
@@ -81,9 +88,14 @@ app.add_middleware(
 app.include_router(consumet_router, prefix="/consumet")
 app.include_router(downloads_router)
 app.include_router(manga_router, prefix="/manga")
+app.include_router(providers_router)
 app.include_router(settings_router)
 app.include_router(streaming_router)
 app.include_router(subtitles_router, prefix="/subtitles")
+backend_logger = get_logger("backend")
+downloads_logger = get_logger("downloads")
+library_logger = get_logger("library")
+playback_logger = get_logger("playback")
 
 DOWNLOAD_DIR = str(Path.home() / "Downloads" / "GRABIX")
 DB_PATH = str(Path.home() / "Downloads" / "GRABIX" / "grabix.db")
@@ -96,6 +108,7 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 downloads: dict = {}
 download_controls: dict = {}
 FFMPEG_PATH = shutil.which("ffmpeg")
+ARIA2_PATH = shutil.which("aria2c")
 HIANIME_LOCAL_BASE = os.getenv("CONSUMET_API_BASE", "http://127.0.0.1:3000").rstrip("/")
 SELF_BASE_URL = os.getenv("GRABIX_PUBLIC_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 STREAM_EXTRACT_CACHE_TTL_SECONDS = 900
@@ -103,31 +116,7 @@ stream_extract_cache: dict[str, tuple[float, dict]] = {}
 ADULT_UNLOCK_WINDOW_SECONDS = 300
 ADULT_UNLOCK_MAX_ATTEMPTS = 5
 adult_unlock_attempts: dict[str, list[float]] = {}
-APPROVED_MEDIA_HOSTS = (
-    "youtube.com",
-    "youtu.be",
-    "googlevideo.com",
-    "ytimg.com",
-    "vimeo.com",
-    "archive.org",
-    "moviebox.ng",
-    "moviebox.ph",
-    "movieboxpro.app",
-    "hakunaymatata.com",
-    "bcdnxw.com",
-    "bunnycdn",
-    "cdn",
-    "vidsrc",
-    "2embed",
-    "multiembed",
-    "vsembed",
-    "hianime",
-    "aniwatch",
-    "mangadex",
-    "comick",
-    "opensubtitles",
-    "subdl",
-)
+APPROVED_MEDIA_HOSTS = DEFAULT_APPROVED_MEDIA_HOSTS
 EDGE_BINARY_PATH = next(
     (
         path
@@ -141,6 +130,21 @@ EDGE_BINARY_PATH = next(
 )
 ANIME_RESOLVE_CACHE_TTL_SECONDS = 300
 anime_resolve_cache: dict[str, tuple[float, dict]] = {}
+CONSUMET_HEALTH_CACHE_TTL_SECONDS = 15
+consumet_health_cache: tuple[float, dict] | None = None
+
+
+def _is_internal_managed_file(path: Path) -> bool:
+    try:
+        resolved = path.resolve()
+        log_root = LOG_DIR.resolve()
+        if resolved == log_root or log_root in resolved.parents:
+            return True
+    except Exception:
+        pass
+
+    ignored_names = {Path(DB_PATH).name, Path(SETTINGS_PATH).name}
+    return path.name in ignored_names
 
 
 class AnimeResolveRequest(BaseModel):
@@ -164,6 +168,41 @@ class AdultContentConfigureRequest(BaseModel):
     password: str
 
 
+def _correlation_id_from_request(request: Request | None) -> str:
+    if request is None:
+        return ""
+    return str(getattr(request.state, "correlation_id", "") or request.headers.get("X-Request-ID", "")).strip()
+
+
+@app.middleware("http")
+async def correlation_middleware(request: Request, call_next):
+    correlation_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.correlation_id = correlation_id
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        log_event(
+            backend_logger,
+            logging.ERROR,
+            event="request_error",
+            message=f"{request.method} {request.url.path} failed.",
+            correlation_id=correlation_id,
+            details={"error": str(exc), "path": request.url.path, "method": request.method},
+        )
+        raise
+    response.headers["X-Request-ID"] = correlation_id
+    if response.status_code >= 500:
+        log_event(
+            backend_logger,
+            logging.ERROR,
+            event="request_5xx",
+            message=f"{request.method} {request.url.path} returned {response.status_code}.",
+            correlation_id=correlation_id,
+            details={"path": request.url.path, "method": request.method, "status_code": response.status_code},
+        )
+    return response
+
+
 if os.name == "nt":
     PROCESS_SUSPEND_RESUME = 0x0800
     PROCESS_TERMINATE = 0x0001
@@ -185,6 +224,15 @@ def _strip_ansi(s: str) -> str:
 
 def has_ffmpeg() -> bool:
     return FFMPEG_PATH is not None
+
+
+def has_aria2() -> bool:
+    return ARIA2_PATH is not None
+
+
+def _sanitize_download_engine(engine: str | None) -> str:
+    normalized = str(engine or "").strip().lower()
+    return normalized if normalized in {"standard", "aria2"} else "standard"
 
 
 def _format_bytes(num: float | int | None) -> str:
@@ -256,60 +304,18 @@ def _verify_adult_password(password: str, hashed_value: str) -> bool:
         return False
 
 
-def _is_private_or_loopback_host(hostname: str) -> bool:
-    try:
-        ip = ipaddress.ip_address(hostname)
-        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-    except ValueError:
-        pass
-
-    try:
-        infos = socket.getaddrinfo(hostname, None)
-    except socket.gaierror:
-        return True
-
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return True
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-            return True
-    return False
-
-
 def _validate_outbound_url(url: str, *, allowed_hosts: tuple[str, ...] = APPROVED_MEDIA_HOSTS) -> str:
-    parsed = urlparse((url or "").strip())
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise HTTPException(status_code=400, detail="Only http/https URLs are allowed.")
-    hostname = (parsed.hostname or "").lower()
-    if not hostname:
-        raise HTTPException(status_code=400, detail="URL is missing a hostname.")
-    if _is_private_or_loopback_host(hostname):
-        raise HTTPException(status_code=400, detail="Private, loopback, and local network hosts are blocked.")
-    if not any(token in hostname for token in allowed_hosts):
-        raise HTTPException(status_code=400, detail=f"Host '{hostname}' is not on the approved media allowlist.")
-    return parsed.geturl()
+    return security_validate_outbound_url(url, allowed_hosts=allowed_hosts)
 
 
 def _normalize_download_target(url: str, headers_json: str = "") -> tuple[str, str]:
-    parsed = urlparse((url or "").strip())
-    self_parsed = urlparse(SELF_BASE_URL)
-    same_host = (parsed.hostname or "").lower() == (self_parsed.hostname or "").lower()
-    same_port = (parsed.port or (443 if parsed.scheme == "https" else 80)) == (
-        self_parsed.port or (443 if self_parsed.scheme == "https" else 80)
+    return security_normalize_download_target(
+        url,
+        self_base_url=SELF_BASE_URL,
+        headers_json=headers_json,
+        moviebox_headers=dict(MOVIEBOX_DOWNLOAD_REQUEST_HEADERS or {}),
+        allowed_hosts=APPROVED_MEDIA_HOSTS,
     )
-
-    if same_host and same_port and parsed.path in {"/stream/proxy", "/moviebox/proxy-stream", "/moviebox/subtitle"}:
-        query = parse_qs(parsed.query)
-        nested_url = (query.get("url") or [""])[0].strip()
-        nested_headers_json = headers_json or (query.get("headers_json") or [""])[0].strip()
-        if not nested_headers_json and parsed.path.startswith("/moviebox/"):
-            nested_headers_json = json.dumps(dict(MOVIEBOX_DOWNLOAD_REQUEST_HEADERS or {}))
-        if nested_url:
-            return _validate_outbound_url(nested_url), nested_headers_json
-
-    return _validate_outbound_url(url), headers_json
 
 
 def _normalize_category_label(value: str) -> str:
@@ -418,11 +424,38 @@ def init_db():
                 created_at TEXT
             )
         """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS download_jobs (
+                id TEXT PRIMARY KEY,
+                url TEXT,
+                title TEXT,
+                thumbnail TEXT,
+                dl_type TEXT,
+                status TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                file_path TEXT,
+                partial_file_path TEXT,
+                error TEXT,
+                percent REAL DEFAULT 0,
+                speed TEXT DEFAULT '',
+                eta TEXT DEFAULT '',
+                downloaded TEXT DEFAULT '',
+                total TEXT DEFAULT '',
+                size TEXT DEFAULT '',
+                can_pause INTEGER DEFAULT 0,
+                retry_count INTEGER DEFAULT 0,
+                failure_code TEXT DEFAULT '',
+                recoverable INTEGER DEFAULT 0,
+                download_strategy TEXT DEFAULT '',
+                params_json TEXT DEFAULT '{}'
+            )
+        """)
         con.commit()
         con.close()
-        print("[GRABIX] Database initialized successfully.")
+        log_event(backend_logger, logging.INFO, event="db_init", message="Database initialized successfully.")
     except Exception as e:
-        print(f"[GRABIX] DB init error: {e}")
+        log_event(backend_logger, logging.ERROR, event="db_init_failed", message="Database initialization failed.", details={"error": str(e)})
 
 
 init_db()
@@ -456,7 +489,7 @@ def db_insert(row: dict):
         con.commit()
         con.close()
     except Exception as e:
-        print(f"[GRABIX] db_insert error: {e}")
+        log_event(backend_logger, logging.ERROR, event="history_insert_failed", message="History insert failed.", details={"error": str(e), "row_id": row.get("id", "")})
 
 
 def db_update_status(dl_id: str, status: str, file_path: str = ""):
@@ -466,7 +499,97 @@ def db_update_status(dl_id: str, status: str, file_path: str = ""):
         con.commit()
         con.close()
     except Exception as e:
-        print(f"[GRABIX] db_update_status error: {e}")
+        log_event(backend_logger, logging.ERROR, event="history_status_update_failed", message="History status update failed.", details={"error": str(e), "download_id": dl_id, "status": status})
+
+
+def db_upsert_download_job(row: dict):
+    try:
+        now = datetime.now().isoformat()
+        con = get_db_connection()
+        con.execute(
+            """
+            INSERT INTO download_jobs
+            (id, url, title, thumbnail, dl_type, status, created_at, updated_at,
+             file_path, partial_file_path, error, percent, speed, eta, downloaded,
+             total, size, can_pause, retry_count, failure_code, recoverable,
+             download_strategy, params_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                url=excluded.url,
+                title=excluded.title,
+                thumbnail=excluded.thumbnail,
+                dl_type=excluded.dl_type,
+                status=excluded.status,
+                updated_at=excluded.updated_at,
+                file_path=excluded.file_path,
+                partial_file_path=excluded.partial_file_path,
+                error=excluded.error,
+                percent=excluded.percent,
+                speed=excluded.speed,
+                eta=excluded.eta,
+                downloaded=excluded.downloaded,
+                total=excluded.total,
+                size=excluded.size,
+                can_pause=excluded.can_pause,
+                retry_count=excluded.retry_count,
+                failure_code=excluded.failure_code,
+                recoverable=excluded.recoverable,
+                download_strategy=excluded.download_strategy,
+                params_json=excluded.params_json
+            """,
+            (
+                row["id"],
+                row.get("url", ""),
+                row.get("title", ""),
+                row.get("thumbnail", ""),
+                row.get("dl_type", ""),
+                row.get("status", "queued"),
+                row.get("created_at", now),
+                row.get("updated_at", now),
+                row.get("file_path", ""),
+                row.get("partial_file_path", ""),
+                row.get("error", ""),
+                float(row.get("percent", 0) or 0),
+                row.get("speed", ""),
+                row.get("eta", ""),
+                row.get("downloaded", ""),
+                row.get("total", ""),
+                row.get("size", ""),
+                1 if row.get("can_pause") else 0,
+                int(row.get("retry_count", 0) or 0),
+                row.get("failure_code", ""),
+                1 if row.get("recoverable") else 0,
+                row.get("download_strategy", ""),
+                row.get("params_json", "{}"),
+            ),
+        )
+        con.commit()
+        con.close()
+    except Exception as e:
+        log_event(backend_logger, logging.ERROR, event="download_job_upsert_failed", message="Download job persistence failed.", details={"error": str(e), "download_id": row.get("id", "")})
+
+
+def db_delete_download_job(dl_id: str):
+    try:
+        con = get_db_connection()
+        con.execute("DELETE FROM download_jobs WHERE id=?", (dl_id,))
+        con.commit()
+        con.close()
+    except Exception as e:
+        log_event(backend_logger, logging.ERROR, event="download_job_delete_failed", message="Download job deletion failed.", details={"error": str(e), "download_id": dl_id})
+
+
+def db_list_download_jobs() -> list[sqlite3.Row]:
+    try:
+        con = get_db_connection()
+        rows = con.execute(
+            "SELECT * FROM download_jobs ORDER BY created_at DESC, updated_at DESC"
+        ).fetchall()
+        con.close()
+        return rows
+    except Exception as e:
+        log_event(backend_logger, logging.ERROR, event="download_job_list_failed", message="Download job listing failed.", details={"error": str(e)})
+        return []
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
@@ -476,6 +599,7 @@ DEFAULT_SETTINGS = {
     "notifications": True,
     "default_format": "mp4",
     "default_quality": "1080p",
+    "default_download_engine": "standard",
     "download_folder": DOWNLOAD_DIR,
     "adult_content_enabled": False,
     "adult_password_hash": "",
@@ -493,7 +617,7 @@ def load_settings() -> dict:
                 # Merge with defaults so any new keys are always present
                 return {**DEFAULT_SETTINGS, **saved}
     except Exception as e:
-        print(f"[GRABIX] load_settings error: {e}")
+        log_event(backend_logger, logging.ERROR, event="settings_load_failed", message="Settings load failed.", details={"error": str(e)})
     return DEFAULT_SETTINGS.copy()
 
 
@@ -504,7 +628,7 @@ def save_settings_to_disk(data: dict):
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(current, f, indent=2)
     except Exception as e:
-        print(f"[GRABIX] save_settings error: {e}")
+        log_event(backend_logger, logging.ERROR, event="settings_save_failed", message="Settings save failed.", details={"error": str(e)})
 
 
 def _settings_public_payload(data: dict) -> dict:
@@ -836,11 +960,19 @@ def _extract_stream_url_via_browser(url: str) -> tuple[str, str] | None:
     options = EdgeOptions()
     options.binary_location = EDGE_BINARY_PATH
     options.page_load_strategy = "eager"
+    options.add_argument("--headless=new")
     options.add_argument("--window-size=1280,720")
     options.add_argument("--autoplay-policy=no-user-gesture-required")
     options.add_argument("--disable-features=msEdgeSidebarV2")
     options.add_argument("--mute-audio")
     options.add_argument("--disable-gpu")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-renderer-backgrounding")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--disable-popup-blocking")
+    options.add_argument("--disable-dev-shm-usage")
     options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
     options.set_capability("ms:loggingPrefs", {"performance": "ALL"})
 
@@ -905,7 +1037,13 @@ def _extract_stream_url_via_browser(url: str) -> tuple[str, str] | None:
 
             time.sleep(0.6)
     except Exception as exc:
-        print(f"[GRABIX] browser stream resolver error for {url[:180]}: {exc}")
+        log_event(
+            playback_logger,
+            logging.ERROR,
+            event="browser_stream_resolver_failed",
+            message="Browser stream resolver failed.",
+            details={"error": str(exc), "url": url[:180]},
+        )
     finally:
         if driver is not None:
             try:
@@ -986,9 +1124,18 @@ def _capture_hianime_stream_via_edge(embed_url: str, watch_url: str, server: str
 
     options = EdgeOptions()
     options.binary_location = EDGE_BINARY_PATH
+    options.add_argument("--headless=new")
     options.add_argument("--autoplay-policy=no-user-gesture-required")
     options.add_argument("--disable-features=msEdgeSidebarV2")
     options.add_argument("--mute-audio")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-renderer-backgrounding")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--disable-popup-blocking")
+    options.add_argument("--disable-dev-shm-usage")
 
     driver = webdriver.Edge(options=options)
     try:
@@ -1131,10 +1278,45 @@ def anime_resolve_source(payload: AnimeResolveRequest):
 
 @app.get("/check-link")
 def check_link(url: str):
+    def _normalize_check_link_input(raw_url: str) -> str:
+        cleaned = str(raw_url or "").replace("\r", "").replace("\n", "").strip().strip("'\"")
+        if not cleaned:
+            raise ValueError("Paste a full http or https link.")
+
+        if cleaned.startswith("www."):
+            cleaned = f"https://{cleaned}"
+
+        parsed = urlparse(cleaned)
+        if not parsed.scheme and "." in (parsed.path or "") and " " not in cleaned:
+            cleaned = f"https://{cleaned}"
+            parsed = urlparse(cleaned)
+
+        if parsed.scheme and parsed.scheme.lower() not in {"http", "https"}:
+            raise ValueError("Only http and https links are supported.")
+        if not parsed.netloc:
+            raise ValueError("Paste a valid web link, for example https://youtube.com/watch?v=...")
+        return cleaned
+
+    def _direct_preview_payload(safe_url: str) -> dict:
+        parsed = urlparse(safe_url)
+        raw_name = Path(unquote(parsed.path or "")).stem
+        guessed_title = re.sub(r"[_\-]+", " ", raw_name).strip() or parsed.netloc or "Direct file"
+        return {
+            "valid": True,
+            "title": guessed_title,
+            "thumbnail": "",
+            "duration_seconds": 0,
+            "uploader": parsed.netloc,
+            "formats": ["Source"],
+        }
+
     opts = {"quiet": True, "no_warnings": True, "no_color": True, "noplaylist": True, "skip_download": True, "socket_timeout": 8}
     try:
+        safe_url = _normalize_check_link_input(url)
+        if _is_direct_media_url(safe_url) or _is_direct_subtitle_url(safe_url):
+            return _direct_preview_payload(safe_url)
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(safe_url, download=False)
             return {
                 "valid": True,
                 "title": info.get("title", "Unknown"),
@@ -1143,6 +1325,15 @@ def check_link(url: str):
                 "uploader": info.get("channel") or info.get("uploader", ""),
                 "formats": _get_formats(info),
             }
+    except OSError as e:
+        if getattr(e, "errno", None) == 22:
+            return {
+                "valid": False,
+                "error": "That link could not be read. Paste a full http or https media URL.",
+            }
+        return {"valid": False, "error": str(e)}
+    except ValueError as e:
+        return {"valid": False, "error": str(e)}
     except Exception as e:
         return {"valid": False, "error": str(e)}
 
@@ -1457,6 +1648,75 @@ def _moviebox_guess_seasons(title: str) -> list[int]:
     return [1]
 
 
+def _moviebox_base_title(title: str) -> str:
+    cleaned = re.sub(r"\[(.*?)\]", "", title or "", flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(hindi|urdu|punjabi|dub|dubbed)\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip(" -")
+
+
+def _moviebox_extract_season_episode_counts(payload) -> dict[int, int]:
+    counts: dict[int, int] = {}
+
+    def register(season_value, episode_value) -> None:
+        try:
+            season_number = int(season_value or 0)
+            max_episode = int(episode_value or 0)
+        except Exception:
+            return
+        if season_number > 0 and max_episode > 0:
+            counts[season_number] = max(counts.get(season_number, 0), max_episode)
+
+    def visit(node) -> None:
+        if isinstance(node, dict):
+            lowered = {str(key).lower(): key for key in node.keys()}
+            season_key = next((lowered[name] for name in ("se", "season", "seasonnumber", "season_number") if name in lowered), None)
+            episode_key = next(
+                (
+                    lowered[name]
+                    for name in ("maxep", "episodecount", "episodes", "epcount", "episode_count", "latestep")
+                    if name in lowered
+                ),
+                None,
+            )
+            if season_key is not None and episode_key is not None:
+                register(node.get(season_key), node.get(episode_key))
+            for value in node.values():
+                visit(value)
+            return
+
+        if isinstance(node, (list, tuple, set)):
+            for item in node:
+                visit(item)
+            return
+
+        season_value = getattr(node, "se", None)
+        if season_value is None:
+            season_value = getattr(node, "season", None)
+        episode_value = getattr(node, "maxEp", None)
+        if episode_value is None:
+            episode_value = getattr(node, "episodeCount", None)
+        if episode_value is None:
+            episode_value = getattr(node, "episodes", None)
+        if season_value is not None and episode_value is not None:
+            register(season_value, episode_value)
+
+        for attr_name in ("seasons", "seasonList", "episodes", "episodeList", "resource", "resData", "subject"):
+            try:
+                child = getattr(node, attr_name, None)
+            except Exception:
+                child = None
+            if child is not None:
+                visit(child)
+
+    visit(payload)
+    return counts
+
+
+def _moviebox_total_episode_count(season_episode_counts: dict[int, int] | None) -> int:
+    return sum(int(value or 0) for value in (season_episode_counts or {}).values())
+
+
 async def _moviebox_discover_payload():
     cache_key = "moviebox:discover"
     cached = _moviebox_cache_get(cache_key)
@@ -1466,10 +1726,12 @@ async def _moviebox_discover_payload():
     _moviebox_assert_available()
     session = MovieBoxSession(timeout=20)
 
-    homepage = await MovieBoxHomepage(session).get_content_model()
-    trending = await MovieBoxTrending(session).get_content_model()
-    hot = await MovieBoxHotMoviesAndTVSeries(session).get_content_model()
-    popular_searches = await MovieBoxPopularSearch(session).get_content_model()
+    homepage, trending, hot, popular_searches = await asyncio.gather(
+        MovieBoxHomepage(session).get_content_model(),
+        MovieBoxTrending(session).get_content_model(),
+        MovieBoxHotMoviesAndTVSeries(session).get_content_model(),
+        MovieBoxPopularSearch(session).get_content_model(),
+    )
 
     categories: dict[str, list] = {}
     for category in list(getattr(homepage, "operatingList", []) or []):
@@ -1646,6 +1908,50 @@ async def _moviebox_find_item(
     return session, ranked[0]
 
 
+async def _moviebox_find_non_hindi_item(
+    title: str,
+    media_type: str,
+    year: int | None = None,
+    anime_only: bool = False,
+):
+    _moviebox_assert_available()
+
+    normalized_media_type = _moviebox_media_type_value(media_type)
+    subject_type = MovieBoxSubjectType.ALL
+    if normalized_media_type == "movie":
+        subject_type = MovieBoxSubjectType.MOVIES
+    elif normalized_media_type in {"series", "anime"}:
+        subject_type = MovieBoxSubjectType.TV_SERIES
+
+    session = MovieBoxSession(timeout=15)
+    results = await MovieBoxSearch(session, query=title, subject_type=subject_type, per_page=16).get_content_model()
+    items = _moviebox_filter_items(
+        _moviebox_unique_items(list(getattr(results, "items", []) or [])),
+        media_type=normalized_media_type,
+        anime_only=normalized_media_type == "anime" or anime_only,
+    )
+    items = [item for item in items if not _moviebox_is_hindi(item)]
+    if year is not None:
+        year_matches = [item for item in items if _moviebox_release_year(item) == year]
+        if year_matches:
+            items = year_matches
+    if not items:
+        return session, None
+
+    ranked = sorted(
+        items,
+        key=lambda item: _moviebox_match_score(
+            item,
+            title,
+            year,
+            prefer_hindi=False,
+            anime_only=normalized_media_type == "anime" or anime_only,
+        ),
+        reverse=True,
+    )
+    return session, ranked[0]
+
+
 async def _moviebox_resolve_item(
     subject_id: str | None = None,
     title: str | None = None,
@@ -1667,11 +1973,14 @@ async def _moviebox_resolve_item(
 
 def _moviebox_subject_payload(item, detail_model=None) -> dict:
     detail_subject = None
+    detail_dump = None
     if detail_model is not None:
         try:
-            detail_subject = detail_model.resData.model_dump().get("subject", {})
+            detail_dump = detail_model.resData.model_dump()
+            detail_subject = detail_dump.get("subject", {})
         except Exception:
             detail_subject = None
+            detail_dump = None
 
     description = getattr(item, "description", "") or ""
     if isinstance(detail_subject, dict) and detail_subject.get("description"):
@@ -1680,17 +1989,7 @@ def _moviebox_subject_payload(item, detail_model=None) -> dict:
     payload = _moviebox_card_payload(item)
     payload["description"] = description
     payload["duration_seconds"] = getattr(item, "duration", 0) or 0
-    season_episode_counts: dict[int, int] = {}
-    try:
-        resource = getattr(getattr(detail_model, "resData", None), "resource", None)
-        seasons = list(getattr(resource, "seasons", []) or [])
-        for season_info in seasons:
-            season_number = int(getattr(season_info, "se", 0) or 0)
-            max_episode = int(getattr(season_info, "maxEp", 0) or 0)
-            if season_number > 0 and max_episode > 0:
-                season_episode_counts[season_number] = max_episode
-    except Exception:
-        season_episode_counts = {}
+    season_episode_counts = _moviebox_extract_season_episode_counts(detail_dump or detail_model)
 
     payload["available_seasons"] = (
         sorted(season_episode_counts.keys()) or _moviebox_guess_seasons(payload["title"])
@@ -1811,9 +2110,38 @@ async def moviebox_details(
     except Exception:
         detail_model = None
 
+    payload = _moviebox_subject_payload(item, detail_model)
+
+    if (
+        payload.get("moviebox_media_type") == "series"
+        and payload.get("is_hindi")
+        and payload.get("title")
+    ):
+        try:
+            canonical_title = _moviebox_base_title(str(payload.get("title") or ""))
+            if canonical_title and canonical_title.lower() != str(payload.get("title") or "").lower():
+                canonical_session, canonical_item = await _moviebox_find_non_hindi_item(
+                    canonical_title,
+                    normalized_media_type,
+                    year,
+                    anime_only=normalized_media_type == "anime",
+                )
+                if canonical_item and not _moviebox_is_hindi(canonical_item):
+                    canonical_detail_model = None
+                    try:
+                        canonical_detail_model = await MovieBoxTVSeriesDetails(canonical_item, canonical_session).get_content_model()
+                    except Exception:
+                        canonical_detail_model = None
+                    canonical_payload = _moviebox_subject_payload(canonical_item, canonical_detail_model)
+                    if _moviebox_total_episode_count(canonical_payload.get("season_episode_counts")) > _moviebox_total_episode_count(payload.get("season_episode_counts")):
+                        payload["available_seasons"] = canonical_payload.get("available_seasons", payload.get("available_seasons", []))
+                        payload["season_episode_counts"] = canonical_payload.get("season_episode_counts", payload.get("season_episode_counts", {}))
+        except Exception:
+            pass
+
     return {
         "provider": "MovieBox",
-        "item": _moviebox_subject_payload(item, detail_model),
+        "item": payload,
     }
 
 
@@ -2140,12 +2468,21 @@ def _set_ffmpeg_process_state(pid: int, suspend: bool) -> bool:
 
 def _delete_download_files(item: dict) -> None:
     file_path = str(item.get("file_path") or "").strip()
+    partial_file_path = str(item.get("partial_file_path") or "").strip()
     if not file_path:
-        return
-    candidates = {file_path}
+        if not partial_file_path:
+            return
+        candidates = set()
+    else:
+        candidates = {file_path}
+    if partial_file_path:
+        candidates.add(partial_file_path)
     if file_path.endswith(".mkv"):
         candidates.add(f"{file_path}.part.mkv")
     candidates.add(f"{file_path}.part")
+    candidates.add(f"{file_path}.aria2")
+    if partial_file_path:
+        candidates.add(f"{partial_file_path}.aria2")
     for candidate in candidates:
         try:
             path = Path(candidate)
@@ -2155,9 +2492,44 @@ def _delete_download_files(item: dict) -> None:
             continue
 
 
+WINDOWS_RESERVED_FILENAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+}
+
+
+def _safe_download_stem(raw_title: str, fallback: str) -> str:
+    cleaned = str(raw_title or "")
+    cleaned = re.sub(r"[\x00-\x1f]+", " ", cleaned)
+    cleaned = re.sub(r'[\\/:*?"<>|]+', " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().rstrip(" .")
+    if not cleaned:
+        cleaned = fallback
+    cleaned = cleaned[:140].strip().rstrip(" .")
+    if not cleaned:
+        cleaned = fallback
+    if cleaned.split(".", 1)[0].upper() in WINDOWS_RESERVED_FILENAMES:
+        cleaned = f"{cleaned}_file"
+    return cleaned or fallback
+
+
+def _safe_download_path(base_dir: str, raw_title: str, extension: str, fallback: str) -> str:
+    stem = _safe_download_stem(raw_title, fallback)
+    ext = re.sub(r"[^A-Za-z0-9]+", "", str(extension or "").lstrip(".")) or "bin"
+    return str(Path(base_dir) / f"{stem}.{ext}")
+
+
+def _yt_dlp_output_template(dl_id: str, url: str) -> str:
+    fallback = f"grabix-{dl_id}"
+    target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or fallback
+    safe_stem = _safe_download_stem(target_title, fallback)
+    return str(Path(DOWNLOAD_DIR) / f"{safe_stem}.%(ext)s")
+
+
 def _download_direct_media(dl_id: str, url: str, headers: dict[str, str] | None = None) -> str:
-    target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or f"grabix-{dl_id}"
-    safe_title = re.sub(r'[\\\\/:*?"<>|]+', " ", target_title).strip() or f"grabix-{dl_id}"
+    fallback = f"grabix-{dl_id}"
+    target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or fallback
 
     request_headers = {"User-Agent": "Mozilla/5.0"}
     request_headers.update(headers or {})
@@ -2167,11 +2539,14 @@ def _download_direct_media(dl_id: str, url: str, headers: dict[str, str] | None 
         initial_length = int(response.headers.get("Content-Length", "0") or 0)
         ext = _guess_media_extension(url, content_type)
 
-    output_path = str(Path(DOWNLOAD_DIR) / f"{safe_title}.{ext}")
+    output_path = _safe_download_path(DOWNLOAD_DIR, target_title, ext, fallback)
     part_path = f"{output_path}.part"
     downloaded_bytes = Path(part_path).stat().st_size if Path(part_path).exists() else 0
     total_bytes = initial_length if initial_length > 0 else 0
     controls = download_controls[dl_id]
+    downloads[dl_id]["file_path"] = output_path
+    downloads[dl_id]["partial_file_path"] = part_path
+    _persist_download_record(dl_id, force=True)
 
     while True:
         while controls["pause"].is_set() and not controls["cancel"].is_set():
@@ -2201,7 +2576,9 @@ def _download_direct_media(dl_id: str, url: str, headers: dict[str, str] | None 
                     "total": "",
                     "size": "",
                     "file_path": output_path,
+                    "partial_file_path": part_path,
                 })
+                _persist_download_record(dl_id)
                 continue
             if content_range and "/" in content_range:
                 try:
@@ -2230,7 +2607,9 @@ def _download_direct_media(dl_id: str, url: str, headers: dict[str, str] | None 
                         "total": _format_bytes(total_bytes),
                         "size": _format_bytes(total_bytes or downloaded_bytes),
                         "file_path": output_path,
+                        "partial_file_path": part_path,
                     })
+                    _persist_download_record(dl_id)
 
         if not total_bytes or downloaded_bytes >= total_bytes:
             break
@@ -2245,13 +2624,15 @@ def _download_direct_media(dl_id: str, url: str, headers: dict[str, str] | None 
         "total": _format_bytes(total_bytes or downloaded_bytes),
         "size": _format_bytes(total_bytes or downloaded_bytes),
         "file_path": output_path,
+        "partial_file_path": "",
     })
+    _persist_download_record(dl_id, force=True)
     return output_path
 
 
 def _download_direct_subtitle(dl_id: str, url: str, headers: dict[str, str] | None = None) -> str:
-    target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or f"grabix-{dl_id}"
-    safe_title = re.sub(r'[\\\\/:*?"<>|]+', " ", target_title).strip() or f"grabix-{dl_id}"
+    fallback = f"grabix-{dl_id}"
+    target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or fallback
 
     request_headers = {"User-Agent": "Mozilla/5.0"}
     request_headers.update(headers or {})
@@ -2260,9 +2641,12 @@ def _download_direct_subtitle(dl_id: str, url: str, headers: dict[str, str] | No
         content_type = response.headers.get("Content-Type", "text/vtt")
         total_bytes = int(response.headers.get("Content-Length", "0") or 0)
         ext = _guess_subtitle_extension(url, content_type)
-        output_path = str(Path(DOWNLOAD_DIR) / f"{safe_title}.{ext}")
+        output_path = _safe_download_path(DOWNLOAD_DIR, target_title, ext, fallback)
         controls = download_controls[dl_id]
         downloaded_bytes = 0
+        downloads[dl_id]["file_path"] = output_path
+        downloads[dl_id]["partial_file_path"] = ""
+        _persist_download_record(dl_id, force=True)
 
         with open(output_path, "wb") as file_obj:
             while True:
@@ -2284,6 +2668,7 @@ def _download_direct_subtitle(dl_id: str, url: str, headers: dict[str, str] | No
                     "size": _format_bytes(total_bytes or downloaded_bytes),
                     "file_path": output_path,
                 })
+                _persist_download_record(dl_id)
 
     downloads[dl_id].update({
         "percent": 100,
@@ -2292,16 +2677,177 @@ def _download_direct_subtitle(dl_id: str, url: str, headers: dict[str, str] | No
         "size": _format_bytes(total_bytes or downloaded_bytes),
         "file_path": output_path,
     })
+    _persist_download_record(dl_id, force=True)
     return output_path
+
+
+def _download_via_aria2(
+    dl_id: str,
+    url: str,
+    dl_type: str,
+    headers: dict[str, str] | None = None,
+) -> str:
+    if not has_aria2():
+        raise RuntimeError("aria2 is not installed. Switch to the standard downloader or install aria2c.")
+
+    fallback = f"grabix-{dl_id}"
+    target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or fallback
+    request_headers = {"User-Agent": "Mozilla/5.0"}
+    request_headers.update(headers or {})
+
+    probe = URLRequest(url, headers=request_headers, method="HEAD")
+    total_bytes = 0
+    ext = "bin"
+    try:
+        with urlopen(probe, timeout=20) as response:
+            content_type = response.headers.get("Content-Type", "")
+            total_bytes = int(response.headers.get("Content-Length", "0") or 0)
+            if dl_type == "subtitle":
+                ext = _guess_subtitle_extension(url, content_type)
+            else:
+                ext = _guess_media_extension(url, content_type)
+    except Exception:
+        ext = _guess_subtitle_extension(url, "") if dl_type == "subtitle" else _guess_media_extension(url, "")
+
+    output_path = _safe_download_path(DOWNLOAD_DIR, target_title, ext, fallback)
+    controls = download_controls[dl_id]
+    downloads[dl_id].update({
+        "file_path": output_path,
+        "partial_file_path": output_path,
+        "total": _format_bytes(total_bytes),
+        "size": _format_bytes(total_bytes),
+    })
+    _persist_download_record(dl_id, force=True)
+
+    command = [
+        ARIA2_PATH,
+        "--allow-overwrite=true",
+        "--auto-file-renaming=false",
+        "--continue=true",
+        "--max-connection-per-server=8",
+        "--split=8",
+        "--min-split-size=1M",
+        "--summary-interval=0",
+        "--console-log-level=warn",
+        "--dir",
+        DOWNLOAD_DIR,
+        "--out",
+        Path(output_path).name,
+    ]
+    for key, value in request_headers.items():
+        command.extend(["--header", f"{key}: {value}"])
+    command.append(url)
+
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=creation_flags,
+    )
+    controls["process"] = process
+    controls["process_kind"] = "aria2"
+    last_error_lines: list[str] = []
+    last_size_sample = 0
+    last_sample_ts = time.monotonic()
+
+    try:
+        while True:
+            while controls["pause"].is_set() and not controls["cancel"].is_set():
+                time.sleep(0.2)
+            if controls["cancel"].is_set():
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+                raise RuntimeError("Download canceled")
+
+            if process.poll() is not None:
+                break
+
+            if process.stderr:
+                line = process.stderr.readline()
+                if line:
+                    clean_line = line.strip()
+                    if clean_line:
+                        last_error_lines.append(clean_line)
+                        if len(last_error_lines) > 8:
+                            last_error_lines.pop(0)
+
+            current_size = 0
+            try:
+                current_size = Path(output_path).stat().st_size
+            except Exception:
+                current_size = 0
+
+            pct = round((current_size / total_bytes) * 100, 1) if total_bytes else 0
+            now = time.monotonic()
+            elapsed = max(now - last_sample_ts, 0.001)
+            delta = max(0, current_size - last_size_sample)
+            speed = downloads[dl_id].get("speed", "")
+            if delta > 0 and elapsed >= 0.5:
+                speed = f"{_format_bytes(delta / elapsed)}/s"
+                last_size_sample = current_size
+                last_sample_ts = now
+            eta = ""
+            if total_bytes > 0 and delta > 0 and elapsed > 0:
+                bytes_per_second = delta / elapsed
+                remaining = max(total_bytes - current_size, 0)
+                eta = _format_eta(remaining / bytes_per_second) if bytes_per_second > 0 else ""
+
+            downloads[dl_id].update({
+                "percent": pct,
+                "downloaded": _format_bytes(current_size),
+                "total": _format_bytes(total_bytes),
+                "size": _format_bytes(total_bytes or current_size),
+                "speed": speed,
+                "eta": eta,
+                "file_path": output_path,
+                "partial_file_path": output_path,
+            })
+            _persist_download_record(dl_id)
+            time.sleep(0.25)
+
+        return_code = process.wait()
+        if return_code != 0:
+            detail = " | ".join(last_error_lines[-3:]) or f"aria2 exited with code {return_code}"
+            raise RuntimeError(detail)
+
+        final_size = 0
+        try:
+            final_size = Path(output_path).stat().st_size if Path(output_path).exists() else 0
+        except Exception:
+            final_size = 0
+        total_label = _format_bytes(total_bytes or final_size)
+        downloads[dl_id].update({
+            "percent": 100,
+            "downloaded": total_label,
+            "total": total_label,
+            "size": total_label,
+            "file_path": output_path,
+            "partial_file_path": "",
+            "speed": "",
+            "eta": "0s",
+        })
+        _persist_download_record(dl_id, force=True)
+        return output_path
+    finally:
+        controls["process"] = None
+        controls["process_kind"] = ""
+        if process.stderr:
+            process.stderr.close()
 
 
 def _download_hls_media(dl_id: str, url: str, headers: dict[str, str] | None = None) -> str:
     if not has_ffmpeg():
         raise RuntimeError("FFmpeg is required for HLS downloads.")
 
-    target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or f"grabix-{dl_id}"
-    safe_title = re.sub(r'[\\\\/:*?"<>|]+', " ", target_title).strip() or f"grabix-{dl_id}"
-    final_path = str(Path(DOWNLOAD_DIR) / f"{safe_title}.mkv")
+    fallback = f"grabix-{dl_id}"
+    target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or fallback
+    final_path = _safe_download_path(DOWNLOAD_DIR, target_title, "mkv", fallback)
     output_path = f"{final_path}.part.mkv"
 
     request_headers = {"User-Agent": "Mozilla/5.0"}
@@ -2326,12 +2872,14 @@ def _download_hls_media(dl_id: str, url: str, headers: dict[str, str] | None = N
 
     downloads[dl_id].update({
         "file_path": final_path,
+        "partial_file_path": output_path,
         "downloaded": "",
         "total": "",
         "size": "",
         "speed": "",
         "eta": "",
     })
+    _persist_download_record(dl_id, force=True)
 
     last_error = "FFmpeg could not start the HLS download."
     for attempt in range(3):
@@ -2376,6 +2924,7 @@ def _download_hls_media(dl_id: str, url: str, headers: dict[str, str] | None = N
                     total_label = duration_match.group(1)
                     total_duration_seconds = _parse_timecode_to_seconds(total_label)
                     downloads[dl_id]["total"] = total_label
+                    downloads[dl_id]["partial_file_path"] = output_path
 
                 match = re.search(r"time=(\d+:\d+:\d+\.\d+)", line)
                 if match:
@@ -2412,6 +2961,7 @@ def _download_hls_media(dl_id: str, url: str, headers: dict[str, str] | None = N
                     remaining_seconds = max(total_duration_seconds - current_seconds, 0.0)
                     if speed_factor > 0:
                         downloads[dl_id]["eta"] = _format_eta(remaining_seconds / speed_factor)
+                _persist_download_record(dl_id)
         finally:
             controls["process"] = None
             controls["process_kind"] = ""
@@ -2426,7 +2976,9 @@ def _download_hls_media(dl_id: str, url: str, headers: dict[str, str] | None = N
             downloads[dl_id].update({
                 "percent": 100,
                 "file_path": final_path,
+                "partial_file_path": "",
             })
+            _persist_download_record(dl_id, force=True)
             return final_path
 
         last_error = " | ".join(error_tail[-3:]) or f"FFmpeg exited with code {return_code}"
@@ -2437,6 +2989,123 @@ def _download_hls_media(dl_id: str, url: str, headers: dict[str, str] | None = N
 
 
 # ── Download record helpers ───────────────────────────────────────────────────
+def _download_strategy_for(params: dict | None) -> str:
+    payload = params or {}
+    engine = _sanitize_download_engine(payload.get("download_engine"))
+    dl_type = str(payload.get("dl_type") or "").lower()
+    url = str(payload.get("url") or "")
+    if engine == "aria2":
+        if dl_type == "video" and _is_direct_media_url(url):
+            return "aria2_direct_media"
+        if dl_type == "subtitle" and _is_direct_subtitle_url(url):
+            return "aria2_direct_subtitle"
+        if dl_type == "thumbnail":
+            return "aria2_thumbnail"
+        return "aria2_fallback_standard"
+    if dl_type == "subtitle" and _is_direct_subtitle_url(url):
+        return "direct_subtitle"
+    if dl_type == "video" and (payload.get("force_hls") or ".m3u8" in url.lower()):
+        return "hls"
+    if dl_type == "video" and _is_direct_media_url(url):
+        return "direct_media"
+    if dl_type in {"video", "audio", "thumbnail", "subtitle"}:
+        return "yt_dlp"
+    return dl_type or "unknown"
+
+
+def _requested_download_engine(payload: dict | None) -> str:
+    return _sanitize_download_engine((payload or {}).get("download_engine"))
+
+
+def _effective_download_engine(payload: dict | None) -> str:
+    requested = _requested_download_engine(payload)
+    if requested != "aria2":
+        return "standard"
+
+    params = payload or {}
+    url = str(params.get("url") or "")
+    dl_type = str(params.get("dl_type") or "").lower()
+    trim_enabled = bool(params.get("trim_enabled"))
+    force_hls = bool(params.get("force_hls")) or ".m3u8" in url.lower()
+
+    if not has_aria2():
+        return "standard"
+    if force_hls or trim_enabled:
+        return "standard"
+    if dl_type == "video" and _is_direct_media_url(url):
+        return "aria2"
+    if dl_type == "subtitle" and _is_direct_subtitle_url(url):
+        return "aria2"
+    if dl_type == "thumbnail":
+        return "aria2"
+    return "standard"
+
+
+def _download_engine_note(payload: dict | None) -> str:
+    requested = _requested_download_engine(payload)
+    effective = _effective_download_engine(payload)
+    if requested != "aria2":
+        return ""
+    if effective == "aria2":
+        return ""
+    if not has_aria2():
+        return "aria2 is not installed, so GRABIX used the standard downloader."
+    return "aria2 currently works only for direct-file video, subtitle, and thumbnail downloads. GRABIX used the standard downloader here."
+
+
+def _persist_download_record(dl_id: str, force: bool = False):
+    item = downloads.get(dl_id)
+    if not item:
+        return
+
+    now = time.monotonic()
+    last_persist_at = float(item.get("_last_persist_at", 0) or 0)
+    if not force and now - last_persist_at < 1.5:
+        return
+    item["_last_persist_at"] = now
+
+    params = dict(item.get("params") or {})
+    row = {
+        "id": dl_id,
+        "url": params.get("url", ""),
+        "title": item.get("title", ""),
+        "thumbnail": item.get("thumbnail", ""),
+        "dl_type": params.get("dl_type", ""),
+        "status": item.get("status", "queued"),
+        "created_at": item.get("created_at", datetime.now().isoformat()),
+        "updated_at": datetime.now().isoformat(),
+        "file_path": item.get("file_path", ""),
+        "partial_file_path": item.get("partial_file_path", ""),
+        "error": item.get("error", ""),
+        "percent": item.get("percent", 0),
+        "speed": item.get("speed", ""),
+        "eta": item.get("eta", ""),
+        "downloaded": item.get("downloaded", ""),
+        "total": item.get("total", ""),
+        "size": item.get("size", ""),
+        "can_pause": item.get("can_pause", False),
+        "retry_count": item.get("retry_count", 0),
+        "failure_code": item.get("failure_code", ""),
+        "recoverable": item.get("recoverable", False),
+        "download_strategy": item.get("download_strategy") or _download_strategy_for(params),
+        "download_engine": item.get("download_engine") or _effective_download_engine(params),
+        "download_engine_requested": item.get("download_engine_requested") or _requested_download_engine(params),
+        "engine_note": item.get("engine_note", ""),
+        "params_json": json.dumps(params),
+    }
+    db_upsert_download_job(row)
+
+
+def _create_download_controls() -> dict:
+    return {
+        "pause": threading.Event(),
+        "cancel": threading.Event(),
+        "thread": None,
+        "process": None,
+        "process_kind": "",
+    }
+
+
 def _create_download_record(dl_id: str, title: str = "", params: dict | None = None) -> dict:
     pause_supported = bool((params or {}).get("can_pause", False))
     downloads[dl_id] = {
@@ -2452,18 +3121,21 @@ def _create_download_record(dl_id: str, title: str = "", params: dict | None = N
         "thumbnail": (params or {}).get("thumbnail", ""),
         "error": "",
         "file_path": "",
+        "partial_file_path": "",
         "folder": DOWNLOAD_DIR,
         "created_at": datetime.now().isoformat(),
         "params": params or {},
         "can_pause": pause_supported,
+        "retry_count": 0,
+        "failure_code": "",
+        "recoverable": False,
+        "download_strategy": _download_strategy_for(params),
+        "download_engine": _effective_download_engine(params),
+        "download_engine_requested": _requested_download_engine(params),
+        "engine_note": _download_engine_note(params),
     }
-    download_controls[dl_id] = {
-        "pause": threading.Event(),
-        "cancel": threading.Event(),
-        "thread": None,
-        "process": None,
-        "process_kind": "",
-    }
+    download_controls[dl_id] = _create_download_controls()
+    _persist_download_record(dl_id, force=True)
     return downloads[dl_id]
 
 
@@ -2481,10 +3153,18 @@ def _public_download(d: dict) -> dict:
         "thumbnail": d.get("thumbnail", ""),
         "error": d.get("error", ""),
         "file_path": d.get("file_path", ""),
+        "partial_file_path": d.get("partial_file_path", ""),
         "folder": d.get("folder", DOWNLOAD_DIR),
         "created_at": d.get("created_at", ""),
         "dl_type": (d.get("params") or {}).get("dl_type", ""),
         "can_pause": d.get("can_pause", False),
+        "retry_count": d.get("retry_count", 0),
+        "failure_code": d.get("failure_code", ""),
+        "recoverable": d.get("recoverable", False),
+        "download_strategy": d.get("download_strategy", ""),
+        "download_engine": d.get("download_engine", "standard"),
+        "download_engine_requested": d.get("download_engine_requested", "standard"),
+        "engine_note": d.get("engine_note", ""),
     }
 
 
@@ -2511,6 +3191,10 @@ def _start_download_thread(dl_id: str):
         daemon=True,
     )
     download_controls[dl_id]["thread"] = worker
+    downloads[dl_id]["status"] = "queued"
+    downloads[dl_id]["recoverable"] = False
+    downloads[dl_id]["failure_code"] = ""
+    _persist_download_record(dl_id, force=True)
     worker.start()
 
 
@@ -2533,12 +3217,13 @@ def start_download(
     force_hls: bool = False,
     category: str = "",
     tags_csv: str = "",
+    download_engine: str = "",
 ):
     safe_url, headers_json = _normalize_download_target(url, headers_json)
     resolved_category = _infer_download_category(safe_url, title, dl_type, category)
     resolved_tags = _normalize_tags_csv(tags_csv, resolved_category, dl_type)
+    resolved_engine = _sanitize_download_engine(download_engine or load_settings().get("default_download_engine"))
     dl_id = str(uuid.uuid4())
-    pause_supported = dl_type == "video" and (force_hls or _is_direct_media_url(safe_url))
     params = {
         "url": safe_url,
         "title": title,
@@ -2555,10 +3240,20 @@ def start_download(
         "use_cpu": use_cpu,
         "headers_json": headers_json,
         "force_hls": force_hls,
-        "can_pause": pause_supported,
+        "download_engine": resolved_engine,
         "category": resolved_category,
         "tags_csv": resolved_tags,
     }
+    effective_engine = _effective_download_engine(params)
+    pause_supported = (
+        dl_type == "video"
+        and (
+            force_hls
+            or _is_direct_media_url(safe_url)
+            or effective_engine == "aria2"
+        )
+    ) or (effective_engine == "aria2" and dl_type in {"subtitle", "thumbnail"})
+    params["can_pause"] = pause_supported
     _create_download_record(dl_id, title=title, params=params)
 
     # Quick metadata fetch for history DB — non-blocking, errors are swallowed
@@ -2631,11 +3326,32 @@ def start_download(
             "category": resolved_category,
             "tags": resolved_tags,
         })
-        print(f"[GRABIX] metadata fetch (non-fatal): {e}")
+        log_event(
+            downloads_logger,
+            logging.WARNING,
+            event="download_metadata_fetch_failed",
+            message="Download metadata fetch failed; using fallback metadata.",
+            details={"error": str(e), "download_id": dl_id, "url": safe_url[:180]},
+        )
 
+    _persist_download_record(dl_id, force=True)
+    log_event(
+        downloads_logger,
+        logging.INFO,
+        event="download_queued",
+        message="Download queued.",
+        details={"download_id": dl_id, "download_type": dl_type, "title": downloads[dl_id].get("title", ""), "strategy": downloads[dl_id].get("download_strategy", "")},
+    )
     _start_download_thread(dl_id)
     # Return both "task_id" and "id" so any frontend variant works
-    return {"task_id": dl_id, "id": dl_id, "folder": DOWNLOAD_DIR}
+    return {
+        "task_id": dl_id,
+        "id": dl_id,
+        "folder": DOWNLOAD_DIR,
+        "download_engine": downloads[dl_id].get("download_engine", effective_engine),
+        "download_engine_requested": downloads[dl_id].get("download_engine_requested", resolved_engine),
+        "engine_note": downloads[dl_id].get("engine_note", ""),
+    }
 
 
 # FIX 1: This is the correct endpoint name the frontend polls
@@ -2654,6 +3370,69 @@ def list_downloads():
     return [_public_download(item) for item in ordered]
 
 
+def recover_download_jobs():
+    rows = db_list_download_jobs()
+    active_statuses = {"queued", "downloading", "processing", "canceling"}
+
+    for row in rows:
+        try:
+            params = json.loads(row["params_json"] or "{}")
+            if not isinstance(params, dict):
+                params = {}
+        except Exception:
+            params = {}
+
+        dl_id = row["id"]
+        if dl_id in downloads:
+            continue
+
+        status = str(row["status"] or "queued")
+        can_pause = bool(row["can_pause"])
+        recoverable = bool(row["recoverable"])
+        error_message = str(row["error"] or "")
+        failure_code = str(row["failure_code"] or "")
+
+        if status in active_statuses:
+            recoverable = True
+            if can_pause:
+                status = "paused"
+                error_message = "Download was interrupted when GRABIX closed. Resume to continue."
+                failure_code = "restart_interrupted"
+            else:
+                status = "failed"
+                error_message = "Download was interrupted when GRABIX closed. Retry to continue."
+                failure_code = "restart_interrupted"
+
+        downloads[dl_id] = {
+            "id": dl_id,
+            "status": status,
+            "percent": float(row["percent"] or 0),
+            "speed": row["speed"] or "",
+            "eta": row["eta"] or "",
+            "downloaded": row["downloaded"] or "",
+            "total": row["total"] or "",
+            "size": row["size"] or "",
+            "title": row["title"] or "",
+            "thumbnail": row["thumbnail"] or "",
+            "error": error_message,
+            "file_path": row["file_path"] or "",
+            "partial_file_path": row["partial_file_path"] or "",
+            "folder": DOWNLOAD_DIR,
+            "created_at": row["created_at"] or datetime.now().isoformat(),
+            "params": params,
+            "can_pause": can_pause,
+            "retry_count": int(row["retry_count"] or 0),
+            "failure_code": failure_code,
+            "recoverable": recoverable,
+            "download_strategy": row["download_strategy"] or _download_strategy_for(params),
+            "download_engine": _effective_download_engine(params),
+            "download_engine_requested": _requested_download_engine(params),
+            "engine_note": _download_engine_note(params),
+        }
+        download_controls[dl_id] = _create_download_controls()
+        _persist_download_record(dl_id, force=True)
+
+
 # FIX 2 + FIX 3 (Library): Proper error handling so "no such table" never reaches the UI
 @app.get("/history")
 def get_history():
@@ -2665,13 +3444,13 @@ def get_history():
         con.close()
         return [dict(row) for row in rows]
     except Exception as e:
-        print(f"[GRABIX] get_history error: {e}")
+        log_event(backend_logger, logging.ERROR, event="history_fetch_failed", message="History fetch failed.", details={"error": str(e)})
         return []
 
 
 def open_download_folder(path: str = ""):
     # If the specific file doesn't exist, fall back to the DOWNLOAD_DIR folder
-    target = Path(path) if path else Path(DOWNLOAD_DIR)
+    target = ensure_safe_managed_path(path, DOWNLOAD_DIR) if path else Path(DOWNLOAD_DIR).resolve()
     if not target.exists():
         target = Path(DOWNLOAD_DIR)
     if not target.exists():
@@ -2679,14 +3458,33 @@ def open_download_folder(path: str = ""):
 
     try:
         if os.name == "nt":
+            creation_flags = 0
+            for flag_name in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
+                creation_flags |= getattr(subprocess, flag_name, 0)
             if target.is_file():
                 # Highlight the specific file in Explorer
-                subprocess.Popen(["explorer", "/select,", str(target)])
+                subprocess.Popen(["explorer", "/select,", str(target)], creationflags=creation_flags)
             else:
                 # Open the folder
-                subprocess.Popen(["explorer", str(target)])
+                subprocess.Popen(["explorer", str(target)], creationflags=creation_flags)
         else:
             raise HTTPException(status_code=501, detail="Open folder is currently implemented for Windows only")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"opened": str(target)}
+
+
+def open_local_file(path: str):
+    target = ensure_safe_managed_path(path, DOWNLOAD_DIR)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Local file not found")
+
+    try:
+        if os.name == "nt":
+            os.startfile(str(target))
+        else:
+            raise HTTPException(status_code=501, detail="Open file is currently implemented for Windows only")
     except OSError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -2711,7 +3509,11 @@ def download_action(dl_id: str, action: str):
             _set_ffmpeg_process_state(process.pid, suspend=True)
         if item["status"] == "downloading":
             item["status"] = "paused"
+            item["recoverable"] = True
+            item["failure_code"] = "paused"
             db_update_status(dl_id, "paused", item.get("file_path", ""))
+            _persist_download_record(dl_id, force=True)
+            log_event(downloads_logger, logging.INFO, event="download_paused", message="Download paused.", details={"download_id": dl_id})
     elif action == "resume":
         if not item.get("can_pause"):
             raise HTTPException(status_code=400, detail="Resume is not supported for this download type")
@@ -2719,9 +3521,25 @@ def download_action(dl_id: str, action: str):
         process = controls.get("process")
         if process is not None and process.poll() is None:
             _set_ffmpeg_process_state(process.pid, suspend=False)
-        if item["status"] == "paused":
+        worker = controls.get("thread")
+        if (worker is None or not worker.is_alive()) and item["status"] == "paused":
+            item.update({
+                "status": "queued",
+                "error": "",
+                "recoverable": False,
+                "failure_code": "",
+            })
+            db_update_status(dl_id, "queued", item.get("file_path", ""))
+            _persist_download_record(dl_id, force=True)
+            log_event(downloads_logger, logging.INFO, event="download_resumed", message="Download resumed from paused state.", details={"download_id": dl_id})
+            _start_download_thread(dl_id)
+        elif item["status"] == "paused":
             item["status"] = "downloading"
+            item["recoverable"] = False
+            item["failure_code"] = ""
             db_update_status(dl_id, "downloading", item.get("file_path", ""))
+            _persist_download_record(dl_id, force=True)
+            log_event(downloads_logger, logging.INFO, event="download_resumed", message="Download process resumed.", details={"download_id": dl_id})
     elif action == "cancel":
         controls["cancel"].set()
         process = controls.get("process")
@@ -2731,6 +3549,9 @@ def download_action(dl_id: str, action: str):
             except Exception:
                 pass
         item["status"] = "canceling"
+        item["failure_code"] = "cancel_requested"
+        _persist_download_record(dl_id, force=True)
+        log_event(downloads_logger, logging.WARNING, event="download_cancel_requested", message="Download cancel requested.", details={"download_id": dl_id})
     elif action == "retry":
         if item["status"] not in {"failed", "canceled"}:
             raise HTTPException(status_code=400, detail="Only failed or canceled downloads can be retried")
@@ -2740,8 +3561,12 @@ def download_action(dl_id: str, action: str):
         item.update({
             "status": "queued", "percent": 0, "speed": "", "eta": "",
             "downloaded": "", "total": "", "size": "", "error": "", "file_path": "",
+            "partial_file_path": "", "recoverable": False, "failure_code": "",
+            "retry_count": int(item.get("retry_count", 0) or 0) + 1,
         })
         db_update_status(dl_id, "queued")
+        _persist_download_record(dl_id, force=True)
+        log_event(downloads_logger, logging.INFO, event="download_retried", message="Download retried.", details={"download_id": dl_id, "retry_count": item.get("retry_count", 0)})
         _start_download_thread(dl_id)
     else:
         raise HTTPException(status_code=400, detail="Unsupported action")
@@ -2773,6 +3598,8 @@ def delete_download(dl_id: str):
     db_update_status(dl_id, "canceled", item.get("file_path", ""))
     downloads.pop(dl_id, None)
     download_controls.pop(dl_id, None)
+    db_delete_download_job(dl_id)
+    log_event(downloads_logger, logging.INFO, event="download_deleted", message="Download entry deleted.", details={"download_id": dl_id})
     return {"deleted": True}
 
 
@@ -2789,6 +3616,8 @@ def stop_all_downloads():
                     except Exception:
                         pass
             item["status"] = "canceling"
+            item["failure_code"] = "cancel_requested"
+            _persist_download_record(dl_id, force=True)
     return {"status": "stopping"}
 
 
@@ -2804,6 +3633,28 @@ def update_settings(data: dict):
     sanitized.pop("adult_password_configured", None)
     save_settings_to_disk(sanitized)
     return _settings_public_payload(load_settings())
+
+
+@app.get("/download-engines")
+def get_download_engines():
+    return {
+        "default": _sanitize_download_engine(load_settings().get("default_download_engine")),
+        "engines": [
+            {
+                "id": "standard",
+                "label": "Standard (stable)",
+                "available": True,
+                "description": "Best compatibility through the current GRABIX downloader stack.",
+            },
+            {
+                "id": "aria2",
+                "label": "aria2 (fast)",
+                "available": has_aria2(),
+                "description": "Faster multi-connection direct-file downloads. Falls back to Standard when a download type is unsupported.",
+                "binary_path": ARIA2_PATH or "",
+            },
+        ],
+    }
 
 
 def configure_adult_content(data: AdultContentConfigureRequest):
@@ -2892,11 +3743,12 @@ def migrate_db():
             con.execute("ALTER TABLE history ADD COLUMN file_size INTEGER DEFAULT 0")
         con.commit()
         con.close()
-        print("[GRABIX] Phase 3 DB migration done.")
+        log_event(backend_logger, logging.INFO, event="db_migrated", message="History schema migration completed.")
     except Exception as e:
-        print(f"[GRABIX] migrate_db error: {e}")
+        log_event(backend_logger, logging.ERROR, event="db_migration_failed", message="History schema migration failed.", details={"error": str(e)})
 
 migrate_db()
+recover_download_jobs()
 
 
 # ── Helper: get real file size from disk ─────────────────────────────────────
@@ -2925,6 +3777,244 @@ def _format_bytes_int(num: int) -> str:
 
 
 # ── Phase 3: Enriched history endpoint ───────────────────────────────────────
+def _guess_dl_type_from_path(file_path: str) -> str:
+    suffix = Path(file_path).suffix.lower()
+    if suffix in {".mp3", ".m4a", ".aac", ".flac", ".wav", ".opus", ".ogg"}:
+        return "audio"
+    if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        return "thumbnail"
+    if suffix in {".srt", ".vtt", ".ass", ".ssa", ".sub"}:
+        return "subtitle"
+    return "video"
+
+
+def _build_library_index() -> list[dict]:
+    init_db()
+    migrate_db()
+    con = get_db_connection()
+    rows = con.execute("SELECT * FROM history ORDER BY created_at DESC LIMIT 1000").fetchall()
+    tracked_paths: set[str] = set()
+    result: list[dict] = []
+
+    for row in rows:
+        item = dict(row)
+        file_path = str(item.get("file_path") or "").strip()
+        exists_on_disk = bool(file_path and Path(file_path).exists() and Path(file_path).is_file())
+        if exists_on_disk:
+            tracked_paths.add(str(Path(file_path).resolve()))
+
+        stored_size = int(item.get("file_size") or 0)
+        actual_size = _get_file_size(file_path) if exists_on_disk else 0
+        size_bytes = actual_size or stored_size
+        if actual_size and actual_size != stored_size:
+            con.execute("UPDATE history SET file_size=? WHERE id=?", (actual_size, item["id"]))
+
+        broken = bool(file_path) and not exists_on_disk
+        item["file_size"] = size_bytes
+        item["file_size_label"] = _format_bytes_int(size_bytes)
+        item["file_exists"] = exists_on_disk
+        item["local_available"] = exists_on_disk
+        item["broken"] = broken
+        item["source_type"] = "history"
+        item["library_status"] = "broken" if broken else (item.get("status") or "done")
+        item["category"] = item.get("category") or _infer_download_category(
+            str(item.get("url") or ""),
+            str(item.get("title") or ""),
+            str(item.get("dl_type") or ""),
+            str(item.get("category") or ""),
+        )
+        result.append(item)
+
+    ignored_suffixes = {".part", ".ytdl", ".tmp", ".temp"}
+    for path in Path(DOWNLOAD_DIR).rglob("*"):
+        if not path.is_file():
+            continue
+        if _is_internal_managed_file(path):
+            continue
+        if ".part." in path.name.lower():
+            continue
+        if any(str(path).lower().endswith(suffix) for suffix in ignored_suffixes):
+            continue
+        resolved = str(path.resolve())
+        if resolved in tracked_paths:
+            continue
+
+        file_size = path.stat().st_size
+        dl_type = _guess_dl_type_from_path(str(path))
+        created_at = datetime.fromtimestamp(path.stat().st_mtime).isoformat()
+        result.append({
+            "id": f"untracked:{resolved}",
+            "url": "",
+            "title": path.stem,
+            "thumbnail": "",
+            "channel": "",
+            "duration": 0,
+            "dl_type": dl_type,
+            "file_path": str(path),
+            "status": "untracked",
+            "created_at": created_at,
+            "tags": "untracked,local",
+            "category": _infer_download_category("", path.stem, dl_type, ""),
+            "file_size": file_size,
+            "file_size_label": _format_bytes_int(file_size),
+            "file_exists": True,
+            "local_available": True,
+            "broken": False,
+            "source_type": "untracked",
+            "library_status": "untracked",
+        })
+
+    con.commit()
+    con.close()
+    return sorted(result, key=lambda item: str(item.get("created_at") or ""), reverse=True)
+
+
+def _reconcile_library_state() -> dict:
+    init_db()
+    migrate_db()
+    con = get_db_connection()
+    rows = con.execute("SELECT id, url, title, dl_type, category, status, file_path, file_size FROM history").fetchall()
+    marked_missing = 0
+    restored = 0
+    recategorized = 0
+    resized = 0
+
+    for row in rows:
+        item = dict(row)
+        item_id = str(item.get("id") or "")
+        file_path = str(item.get("file_path") or "").strip()
+        exists_on_disk = bool(file_path and Path(file_path).exists() and Path(file_path).is_file())
+        current_status = str(item.get("status") or "")
+        desired_status = current_status or "done"
+
+        if file_path:
+            if exists_on_disk and current_status in {"missing", "broken"}:
+                desired_status = "done"
+                restored += 1
+            elif not exists_on_disk and current_status not in {"missing", "broken"}:
+                desired_status = "missing"
+                marked_missing += 1
+
+        actual_size = _get_file_size(file_path) if exists_on_disk else 0
+        stored_size = int(item.get("file_size") or 0)
+        if actual_size and actual_size != stored_size:
+            con.execute("UPDATE history SET file_size=? WHERE id=?", (actual_size, item_id))
+            resized += 1
+
+        inferred_category = _infer_download_category(
+            str(item.get("url") or ""),
+            str(item.get("title") or ""),
+            str(item.get("dl_type") or ""),
+            str(item.get("category") or ""),
+        )
+        if inferred_category and inferred_category != str(item.get("category") or ""):
+            con.execute("UPDATE history SET category=? WHERE id=?", (inferred_category, item_id))
+            recategorized += 1
+
+        if desired_status != current_status:
+            con.execute("UPDATE history SET status=? WHERE id=?", (desired_status, item_id))
+
+    con.commit()
+    con.close()
+
+    index = _build_library_index()
+    broken = sum(1 for item in index if item.get("broken"))
+    untracked = sum(1 for item in index if item.get("source_type") == "untracked")
+    result = {
+        "reconciled": True,
+        "tracked_rows": len(rows),
+        "indexed_items": len(index),
+        "marked_missing": marked_missing,
+        "restored": restored,
+        "recategorized": recategorized,
+        "resized": resized,
+        "broken": broken,
+        "untracked": untracked,
+    }
+    log_event(
+        library_logger,
+        logging.INFO,
+        event="library_reconciled",
+        message="Library reconciliation completed.",
+        details=result,
+    )
+    return result
+
+
+@app.get("/library/index")
+def get_library_index():
+    try:
+        return _build_library_index()
+    except Exception as e:
+        log_event(library_logger, logging.ERROR, event="library_index_failed", message="Library index build failed.", details={"error": str(e)})
+        return []
+
+
+@app.post("/library/reconcile")
+def reconcile_library():
+    try:
+        return _reconcile_library_state()
+    except Exception as e:
+        log_event(library_logger, logging.ERROR, event="library_reconcile_failed", message="Library reconcile failed.", details={"error": str(e)})
+        raise HTTPException(status_code=500, detail="Library reconcile failed.")
+
+
+@app.post("/library/mark-missing")
+def mark_library_item_missing(item_id: str):
+    try:
+        con = get_db_connection()
+        row = con.execute("SELECT id, file_path FROM history WHERE id=?", (item_id,)).fetchone()
+        if not row:
+            con.close()
+            raise HTTPException(status_code=404, detail="Library item not found")
+        con.execute("UPDATE history SET status=? WHERE id=?", ("missing", item_id))
+        con.commit()
+        con.close()
+        return {"marked": True, "id": item_id, "status": "missing", "file_path": row["file_path"] or ""}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/library/stale/{item_id}")
+def remove_stale_library_item(item_id: str):
+    try:
+        con = get_db_connection()
+        row = con.execute("SELECT file_path FROM history WHERE id=?", (item_id,)).fetchone()
+        if not row:
+            con.close()
+            raise HTTPException(status_code=404, detail="Library item not found")
+        file_path = str(row["file_path"] or "").strip()
+        if file_path and Path(file_path).exists():
+            con.close()
+            raise HTTPException(status_code=400, detail="Local file still exists. Use the normal delete action instead.")
+        con.execute("DELETE FROM history WHERE id=?", (item_id,))
+        con.commit()
+        con.close()
+        return {"removed": True, "id": item_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/library/file")
+def delete_library_file(path: str):
+    target = ensure_safe_managed_path(path, DOWNLOAD_DIR, must_exist=True, expect_file=True)
+    try:
+        target.unlink()
+        return {"deleted": True, "path": str(target)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+try:
+    _reconcile_library_state()
+except Exception as reconcile_error:
+    log_event(library_logger, logging.ERROR, event="startup_library_reconcile_failed", message="Startup library reconcile failed.", details={"error": str(reconcile_error)})
+
+
 @app.get("/history/full")
 def get_history_full():
     """
@@ -2976,7 +4066,7 @@ def delete_history_item(item_id: str, delete_file: bool = True):
         deleted_file = False
         if delete_file and file_path:
             try:
-                p = Path(file_path)
+                p = ensure_safe_managed_path(file_path, DOWNLOAD_DIR, expect_file=True)
                 if p.exists() and p.is_file():
                     p.unlink()
                     deleted_file = True
@@ -3049,7 +4139,7 @@ def get_storage_stats():
         untracked_count = 0
         try:
             for f in Path(DOWNLOAD_DIR).iterdir():
-                if f.is_file() and str(f) not in tracked_files:
+                if f.is_file() and not _is_internal_managed_file(f) and str(f) not in tracked_files:
                     sz = f.stat().st_size
                     untracked_bytes += sz
                     untracked_count += 1
@@ -3060,7 +4150,7 @@ def get_storage_stats():
         folder_total = 0
         try:
             for f in Path(DOWNLOAD_DIR).rglob("*"):
-                if f.is_file():
+                if f.is_file() and not _is_internal_managed_file(f):
                     try:
                         folder_total += f.stat().st_size
                     except Exception:
@@ -3135,12 +4225,12 @@ def organize_library():
             dl_type = row["dl_type"] or "video"
             if not fp:
                 continue
-            p = Path(fp)
+            p = ensure_safe_managed_path(fp, DOWNLOAD_DIR, expect_file=True)
             if not p.exists() or not p.is_file():
                 continue
 
             subfolder = type_folders.get(dl_type, "Other")
-            dest_dir = Path(DOWNLOAD_DIR) / subfolder
+            dest_dir = ensure_safe_managed_path(str(Path(DOWNLOAD_DIR) / subfolder), DOWNLOAD_DIR)
             dest_dir.mkdir(exist_ok=True)
             dest = dest_dir / p.name
 
@@ -3176,6 +4266,9 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
                    use_cpu=True, headers_json="", force_hls=False):
     downloads[dl_id]["status"] = "downloading"
     downloads[dl_id]["error"] = ""
+    downloads[dl_id]["recoverable"] = False
+    downloads[dl_id]["failure_code"] = ""
+    _persist_download_record(dl_id, force=True)
     controls = download_controls[dl_id]
     request_headers: dict[str, str] = {}
     if headers_json:
@@ -3189,6 +4282,7 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
                 }
         except Exception:
             request_headers = {}
+    effective_engine = downloads[dl_id].get("download_engine") or _effective_download_engine(downloads[dl_id].get("params"))
 
     def progress_hook(d):
         while controls["pause"].is_set() and not controls["cancel"].is_set():
@@ -3215,6 +4309,7 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
                 "size": _format_bytes(total_bytes or downloaded_bytes),
                 "file_path": d.get("filename", downloads[dl_id].get("file_path", "")),
             })
+            _persist_download_record(dl_id)
         elif d["status"] == "finished":
             downloads[dl_id]["percent"] = 100
             downloads[dl_id]["eta"] = "0s"
@@ -3222,17 +4317,56 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
             downloads[dl_id]["downloaded"] = downloads[dl_id].get("total") or downloads[dl_id].get("downloaded", "")
             downloads[dl_id]["size"] = downloads[dl_id].get("total") or downloads[dl_id].get("size", "")
             downloads[dl_id]["file_path"] = d.get("filename", downloads[dl_id].get("file_path", ""))
+            downloads[dl_id]["partial_file_path"] = ""
+            _persist_download_record(dl_id, force=True)
 
-    template = f"{DOWNLOAD_DIR}/%(title)s.%(ext)s"
-    opts: dict = {"outtmpl": template, "noplaylist": True, "progress_hooks": [progress_hook], "continuedl": True}
+    template = _yt_dlp_output_template(dl_id, url)
+    opts: dict = {
+        "outtmpl": template,
+        "noplaylist": True,
+        "progress_hooks": [progress_hook],
+        "continuedl": True,
+        "windowsfilenames": True,
+    }
 
     try:
+        if effective_engine == "aria2" and not (force_hls or ".m3u8" in url.lower()):
+            if dl_type == "video" and _is_direct_media_url(url):
+                output_path = _download_via_aria2(dl_id, url, dl_type, request_headers)
+                downloads[dl_id]["file_path"] = output_path
+                downloads[dl_id]["status"] = "done"
+                downloads[dl_id]["percent"] = 100
+                downloads[dl_id]["partial_file_path"] = ""
+                db_update_status(dl_id, "done", output_path)
+                _persist_download_record(dl_id, force=True)
+                return
+            if dl_type == "subtitle" and _is_direct_subtitle_url(url):
+                output_path = _download_via_aria2(dl_id, url, dl_type, request_headers)
+                downloads[dl_id]["file_path"] = output_path
+                downloads[dl_id]["status"] = "done"
+                downloads[dl_id]["percent"] = 100
+                downloads[dl_id]["partial_file_path"] = ""
+                db_update_status(dl_id, "done", output_path)
+                _persist_download_record(dl_id, force=True)
+                return
+            if dl_type == "thumbnail":
+                output_path = _download_via_aria2(dl_id, url, dl_type, request_headers)
+                downloads[dl_id]["file_path"] = output_path
+                downloads[dl_id]["status"] = "done"
+                downloads[dl_id]["percent"] = 100
+                downloads[dl_id]["partial_file_path"] = ""
+                db_update_status(dl_id, "done", output_path)
+                _persist_download_record(dl_id, force=True)
+                return
+
         if dl_type == "video" and (force_hls or ".m3u8" in url.lower()):
             output_path = _download_hls_media(dl_id, url, request_headers)
             downloads[dl_id]["file_path"] = output_path
             downloads[dl_id]["status"] = "done"
             downloads[dl_id]["percent"] = 100
+            downloads[dl_id]["partial_file_path"] = ""
             db_update_status(dl_id, "done", output_path)
+            _persist_download_record(dl_id, force=True)
             return
 
         if dl_type == "video" and _is_direct_media_url(url):
@@ -3240,7 +4374,9 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
             downloads[dl_id]["file_path"] = output_path
             downloads[dl_id]["status"] = "done"
             downloads[dl_id]["percent"] = 100
+            downloads[dl_id]["partial_file_path"] = ""
             db_update_status(dl_id, "done", output_path)
+            _persist_download_record(dl_id, force=True)
             return
 
         if dl_type == "subtitle" and _is_direct_subtitle_url(url):
@@ -3248,7 +4384,9 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
             downloads[dl_id]["file_path"] = output_path
             downloads[dl_id]["status"] = "done"
             downloads[dl_id]["percent"] = 100
+            downloads[dl_id]["partial_file_path"] = ""
             db_update_status(dl_id, "done", output_path)
+            _persist_download_record(dl_id, force=True)
             return
 
         if dl_type == "video":
@@ -3301,13 +4439,21 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         downloads[dl_id]["file_path"] = file_path
         downloads[dl_id]["status"] = "done"
         downloads[dl_id]["percent"] = 100
+        downloads[dl_id]["partial_file_path"] = ""
         db_update_status(dl_id, "done", file_path)
+        _persist_download_record(dl_id, force=True)
 
     except Exception as e:
         status = "canceled" if controls["cancel"].is_set() else "failed"
+        error_text = str(e)
+        if isinstance(e, OSError) and getattr(e, "errno", None) == 22:
+            error_text = "Windows rejected the generated download file path. GRABIX now uses safer filenames, so retry this download after restarting the backend/app."
         downloads[dl_id]["status"] = status
-        downloads[dl_id]["error"] = str(e)
+        downloads[dl_id]["error"] = error_text
+        downloads[dl_id]["recoverable"] = status == "failed"
+        downloads[dl_id]["failure_code"] = "download_canceled" if status == "canceled" else "download_failed"
         db_update_status(dl_id, status, downloads[dl_id].get("file_path", ""))
+        _persist_download_record(dl_id, force=True)
     finally:
         controls["pause"].clear()
         controls["process"] = None
@@ -3502,6 +4648,303 @@ def ffmpeg_status():
     """Check if FFmpeg is available."""
     return {"available": has_ffmpeg(), "path": FFMPEG_PATH or ""}
 
+
+def _service_payload(name: str, status: str, message: str, retryable: bool = True, details: dict | None = None) -> dict:
+    return {
+        "name": name,
+        "status": status,
+        "message": message,
+        "retryable": retryable,
+        "details": details or {},
+    }
+
+
+def _database_health() -> dict:
+    try:
+        con = get_db_connection()
+        con.execute("SELECT 1").fetchone()
+        con.close()
+        return _service_payload("database", "online", "Database is ready.")
+    except Exception as exc:
+        return _service_payload("database", "offline", "Database could not be opened.", True, {"error": str(exc)})
+
+
+def _downloads_health() -> dict:
+    try:
+        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+        writable = os.access(DOWNLOAD_DIR, os.W_OK)
+        if writable:
+            return _service_payload("downloads", "online", "Download folder is writable.")
+        return _service_payload("downloads", "offline", "Download folder is not writable.", True)
+    except Exception as exc:
+        return _service_payload("downloads", "offline", "Download folder is unavailable.", True, {"error": str(exc)})
+
+
+async def health_services() -> dict:
+    ffmpeg_available = has_ffmpeg()
+    database = _database_health()
+    downloads_health = _downloads_health()
+    moviebox = (
+        _service_payload("moviebox", "online", "Movie Box provider is available.", False)
+        if MOVIEBOX_AVAILABLE
+        else _service_payload(
+            "moviebox",
+            "degraded",
+            "Movie Box provider is unavailable. Other movie sources can still work.",
+            True,
+            {"import_error": MOVIEBOX_IMPORT_ERROR or ""},
+        )
+    )
+    manga = _service_payload("manga", "online", "Manga routes are available.", False)
+
+    global consumet_health_cache
+    if consumet_health_cache and consumet_health_cache[0] > time.time():
+        consumet_health = consumet_health_cache[1]
+    else:
+        try:
+            consumet_health = await asyncio.wait_for(get_consumet_health_status(), timeout=0.9)
+        except Exception as exc:
+            consumet_health = {
+                "configured": False,
+                "healthy": False,
+                "message": "Consumet is still warming up. Anime fallback playback is already available.",
+                "error": str(exc),
+            }
+        consumet_health_cache = (time.time() + CONSUMET_HEALTH_CACHE_TTL_SECONDS, consumet_health)
+
+    consumet_status = "online" if consumet_health.get("healthy") else "degraded"
+    consumet = _service_payload(
+        "consumet",
+        consumet_status,
+        str(consumet_health.get("message") or "Consumet health unavailable."),
+        True,
+        {"configured": bool(consumet_health.get("configured")), "api_base": consumet_health.get("api_base", "")},
+    )
+    anime = _service_payload(
+        "anime",
+        "online" if consumet_health.get("healthy") else "degraded",
+        "Anime playback is fully available." if consumet_health.get("healthy") else "Anime will use fallback providers until Consumet recovers.",
+        True,
+    )
+    ffmpeg = _service_payload(
+        "ffmpeg",
+        "online" if ffmpeg_available else "degraded",
+        "FFmpeg is ready." if ffmpeg_available else "FFmpeg is unavailable, so converter and some HLS flows are limited.",
+        True,
+        {"path": FFMPEG_PATH or ""},
+    )
+
+    services = {
+        "backend": _service_payload("backend", "online", "Backend is responding.", False),
+        "database": database,
+        "downloads": downloads_health,
+        "ffmpeg": ffmpeg,
+        "consumet": consumet,
+        "moviebox": moviebox,
+        "anime": anime,
+        "manga": manga,
+    }
+    summary = {"online": 0, "degraded": 0, "offline": 0}
+    for payload in services.values():
+        state = payload.get("status", "offline")
+        summary[state] = summary.get(state, 0) + 1
+    return {"services": services, "summary": summary}
+
+
+async def health_capabilities() -> dict:
+    payload = await health_services()
+    services = payload["services"]
+    capabilities = {
+        "startup_ready": services["database"]["status"] == "online" and services["downloads"]["status"] == "online",
+        "can_show_shell": True,
+        "can_open_library": True,
+        "can_download_media": services["downloads"]["status"] == "online",
+        "can_use_converter": services["ffmpeg"]["status"] == "online",
+        "can_browse_movies": True,
+        "can_browse_tv": True,
+        "can_use_moviebox": services["moviebox"]["status"] == "online",
+        "can_play_anime": True,
+        "can_play_anime_primary": services["consumet"]["status"] == "online",
+        "can_play_anime_fallback": True,
+        "can_read_manga": services["manga"]["status"] == "online",
+    }
+    degraded_services = [
+        name
+        for name, item in services.items()
+        if item["status"] in {"degraded", "offline"} and name != "backend"
+    ]
+    payload["capabilities"] = capabilities
+    payload["summary"].update(
+        {
+            "backend_reachable": True,
+            "startup_ready": capabilities["startup_ready"],
+            "degraded_services": degraded_services,
+        }
+    )
+    return payload
+
+
+@app.get("/health/services")
+async def runtime_health_services():
+    return await health_services()
+
+
+@app.get("/health/capabilities")
+async def runtime_health_capabilities():
+    return await health_capabilities()
+
+
+@app.get("/health/ping")
+async def runtime_health_ping():
+    database = _database_health()
+    downloads_health = _downloads_health()
+    core_ready = database["status"] == "online" and downloads_health["status"] == "online"
+    return {
+        "ok": True,
+        "core_ready": core_ready,
+        "services": {
+            "backend": _service_payload("backend", "online", "Backend is responding.", False),
+            "database": database,
+            "downloads": downloads_health,
+        },
+    }
+
+
+def _providers_status_payload(payload: dict) -> dict:
+    services = payload["services"]
+    return {
+        "providers": {
+            "moviebox": services["moviebox"],
+            "consumet": services["consumet"],
+            "anime": services["anime"],
+            "manga": services["manga"],
+        },
+        "fallbacks": {
+            "movies": ["moviebox", "embed"],
+            "tv": ["moviebox", "embed"],
+            "anime": ["backend-resolved", "moviebox", "consumet-watch", "embed"],
+            "manga": ["mangadex", "comick", "offline-cache"],
+        },
+    }
+
+
+@app.get("/providers/status")
+async def providers_status():
+    payload = await health_capabilities()
+    registry = {}
+    try:
+        from app.services.providers import provider_registry_snapshot
+
+        registry = provider_registry_snapshot()
+    except Exception as exc:
+        registry = {"error": str(exc)}
+    status_payload = _providers_status_payload(payload)
+    status_payload["registry"] = registry
+    return status_payload
+
+
+async def _diagnostics_payload() -> dict:
+    runtime = redact_for_diagnostics(await health_capabilities())
+    providers = redact_for_diagnostics(_providers_status_payload(runtime))
+    ffmpeg = ffmpeg_status()
+    storage = storage_stats()
+    recent_events = read_recent_log_events(limit=25, levels={"WARNING", "ERROR", "CRITICAL"})
+    library_items = _build_library_index()
+    broken_library = sum(1 for item in library_items if item.get("broken"))
+    untracked_library = sum(1 for item in library_items if item.get("source_type") == "untracked")
+    queue = list_downloads()
+    queue_active = sum(1 for item in queue if item.get("status") in {"queued", "downloading", "processing", "paused"})
+
+    checks = [
+        {
+            "id": "database_online",
+            "label": "Database is online",
+            "passed": runtime["services"]["database"]["status"] == "online",
+        },
+        {
+            "id": "downloads_writable",
+            "label": "Download folder is writable",
+            "passed": runtime["services"]["downloads"]["status"] == "online",
+        },
+        {
+            "id": "backend_reachable",
+            "label": "Backend is reachable",
+            "passed": bool(runtime["summary"].get("backend_reachable")),
+        },
+        {
+            "id": "library_has_no_broken_items",
+            "label": "Library has no broken tracked files",
+            "passed": broken_library == 0,
+            "details": {"broken_items": broken_library},
+        },
+        {
+            "id": "moviebox_provider_ready",
+            "label": "Movie Box provider is ready",
+            "passed": runtime["services"]["moviebox"]["status"] == "online",
+        },
+        {
+            "id": "anime_fallback_ready",
+            "label": "Anime playback has fallback coverage",
+            "passed": bool(runtime["capabilities"].get("can_play_anime_fallback")),
+        },
+        {
+            "id": "ffmpeg_ready",
+            "label": "FFmpeg is available",
+            "passed": bool(ffmpeg.get("available")),
+        },
+    ]
+    failed_checks = [check for check in checks if not check.get("passed")]
+
+    return {
+        "generated_at": datetime.now().isoformat(),
+        "runtime": runtime,
+        "providers": providers,
+        "ffmpeg": ffmpeg,
+        "storage": storage,
+        "library": {
+            "total_items": len(library_items),
+            "broken_items": broken_library,
+            "untracked_items": untracked_library,
+        },
+        "queue": {
+            "total": len(queue),
+            "active": queue_active,
+        },
+        "logs": {
+            "backend_log_path": backend_log_path(),
+            "recent_events": redact_for_diagnostics(recent_events),
+        },
+        "release_gate": {
+            "ready": len(failed_checks) == 0,
+            "failed_checks": redact_for_diagnostics(failed_checks),
+            "checks": redact_for_diagnostics(checks),
+        },
+        "security": {
+            "local_origins_only": True,
+            "approved_media_host_count": len(APPROVED_MEDIA_HOSTS),
+            "managed_download_root": str(Path(DOWNLOAD_DIR).resolve()),
+        },
+    }
+
+
+@app.get("/diagnostics/self-test")
+async def diagnostics_self_test():
+    return await _diagnostics_payload()
+
+
+@app.get("/diagnostics/export")
+async def diagnostics_export():
+    return await _diagnostics_payload()
+
+
+@app.get("/diagnostics/logs")
+async def diagnostics_logs(limit: int = 20):
+    safe_limit = max(1, min(limit, 100))
+    return {
+        "backend_log_path": backend_log_path(),
+        "events": redact_for_diagnostics(read_recent_log_events(limit=safe_limit)),
+    }
+
 async def extract_stream(url: str):
     safe_url = _validate_outbound_url(url)
     cached = stream_extract_cache.get(safe_url)
@@ -3520,12 +4963,12 @@ async def extract_stream(url: str):
     browser_result = _extract_stream_url_via_browser(safe_url)
     if browser_result:
         direct_url, kind = browser_result
-        print(f"[GRABIX] extract-stream browser fallback succeeded for {safe_url[:180]}")
+        log_event(playback_logger, logging.INFO, event="extract_stream_browser_fallback", message="Browser fallback resolved a stream.", details={"url": safe_url[:180], "format": kind})
         payload = {"url": direct_url, "quality": "Auto", "format": kind}
         stream_extract_cache[safe_url] = (time.time() + STREAM_EXTRACT_CACHE_TTL_SECONDS, payload)
         return payload
 
-    print(f"[GRABIX] extract-stream failed for {safe_url[:180]}: {ytdlp_error}")
+    log_event(playback_logger, logging.ERROR, event="extract_stream_failed", message="Stream extraction failed.", details={"url": safe_url[:180], "error": ytdlp_error})
     raise HTTPException(status_code=422, detail=ytdlp_error)
 
 

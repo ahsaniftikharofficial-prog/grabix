@@ -11,6 +11,8 @@ import {
 } from "../lib/streamProviders";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
+import AppToast from "../components/AppToast";
+import { PageEmptyState, PageErrorState } from "../components/PageStates";
 import { useFavorites } from "../context/FavoritesContext";
 import { useContentFilter } from "../context/ContentFilterContext";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
@@ -55,16 +57,13 @@ function toServerOption(option: DownloadQualityOption) {
   };
 }
 
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
 export default function MovieBoxPage() {
   const { adultContentBlocked } = useContentFilter();
   const [discover, setDiscover] = useState<MovieBoxSection[]>([]);
   const [popularSearches, setPopularSearches] = useState<string[]>([]);
   const [results, setResults] = useState<MovieBoxItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [pageError, setPageError] = useState("");
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
@@ -77,6 +76,7 @@ export default function MovieBoxPage() {
 
   const loadDiscover = async () => {
     setLoading(true);
+    setPageError("");
     try {
       const data = await fetchMovieBoxDiscover();
       setDiscover(data.sections);
@@ -84,6 +84,7 @@ export default function MovieBoxPage() {
     } catch {
       setDiscover([]);
       setPopularSearches([]);
+      setPageError("Movie Box discover data could not be loaded right now.");
     } finally {
       setLoading(false);
     }
@@ -91,6 +92,7 @@ export default function MovieBoxPage() {
 
   const runSearch = async (nextQuery: string, nextPage = 1) => {
     setLoading(true);
+    setPageError("");
     try {
       const data = await searchMovieBox({
         query: nextQuery,
@@ -109,9 +111,19 @@ export default function MovieBoxPage() {
       setResults((prev) => (nextPage === 1 ? data.items : [...prev, ...data.items]));
     } catch {
       setResults([]);
+      setPageError("Movie Box search could not be completed right now.");
     } finally {
       setLoading(false);
     }
+  };
+
+  const retryCurrentView = () => {
+    setPage(1);
+    if (isSearchMode) {
+      void runSearch(query, 1);
+      return;
+    }
+    void loadDiscover();
   };
 
   useEffect(() => {
@@ -224,13 +236,18 @@ export default function MovieBoxPage() {
       <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
         {loading && ((isSearchMode && filteredResults.length === 0) || (!isSearchMode && sectionsToRender.length === 0)) ? (
           <LoadingGrid />
+        ) : pageError ? (
+          <PageErrorState
+            title="Movie Box is unavailable right now"
+            subtitle={pageError}
+            onRetry={retryCurrentView}
+          />
         ) : isSearchMode ? (
           filteredResults.length === 0 ? (
-            <div className="empty-state">
-              <IconSearch size={36} />
-              <p>No Movie Box results</p>
-              <span>Try another title, or keep Hindi mode on for dubbed results.</span>
-            </div>
+            <PageEmptyState
+              title="No Movie Box titles matched that search"
+              subtitle="Try another title, or keep Hindi mode on for dubbed results."
+            />
           ) : (
             <>
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
@@ -245,11 +262,10 @@ export default function MovieBoxPage() {
             </>
           )
         ) : sectionsToRender.length === 0 ? (
-          <div className="empty-state">
-            <IconSearch size={36} />
-            <p>No discover data right now</p>
-            <span>Movie Box may be rate-limiting or temporarily unavailable.</span>
-          </div>
+          <PageEmptyState
+            title="No discover data is available right now"
+            subtitle="Movie Box may be rate-limiting or temporarily unavailable."
+          />
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
             {sectionsToRender.map((section) => (
@@ -342,6 +358,7 @@ function MovieBoxDetail({
   const [episode, setEpisode] = useState(1);
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
+  const [toast, setToast] = useState<{ message: string; variant: "success" | "error" | "info" } | null>(null);
   const [downloadDialogOpen, setDownloadDialogOpen] = useState(false);
   const [downloadLanguage, setDownloadLanguage] = useState<"english" | "hindi">(
     item.is_hindi ? "hindi" : "english"
@@ -354,6 +371,7 @@ function MovieBoxDetail({
   const [playQuality, setPlayQuality] = useState("");
   const [playOptionsLoading, setPlayOptionsLoading] = useState(false);
   const [playOptionsError, setPlayOptionsError] = useState("");
+  const [resolvedSources, setResolvedSources] = useState<StreamSource[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -405,6 +423,28 @@ function MovieBoxDetail({
       targets.push(item);
     }
 
+    for (const target of targets) {
+      try {
+        const sources = await fetchSourcesForItem(target);
+        if (sources.length > 0) {
+          if (target.id !== details.id) {
+            setDetails(target);
+          }
+          return sources;
+        }
+      } catch (error) {
+        lastError = error;
+        console.error("[GRABIX] MovieBox source resolve failed", {
+          title: target.title,
+          subjectId: target.id,
+          mediaType: target.media_type,
+          season,
+          episode,
+          reason: error instanceof Error ? error.message : error,
+        });
+      }
+    }
+
     try {
       const refreshed = await fetchMovieBoxDetails({
         subjectId: details.id || item.id,
@@ -412,40 +452,13 @@ function MovieBoxDetail({
         mediaType: details.media_type,
         year: details.year || item.year,
       });
-      if (!targets.some((target) => target.id === refreshed.id)) {
-        targets.unshift(refreshed);
+      const sources = await fetchSourcesForItem(refreshed);
+      if (sources.length > 0) {
+        setDetails(refreshed);
+        return sources;
       }
     } catch (error) {
       lastError = error;
-    }
-
-    for (const target of targets) {
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        try {
-          const sources = await fetchSourcesForItem(target);
-          if (sources.length > 0) {
-            if (target.id !== details.id) {
-              setDetails(target);
-            }
-            return sources;
-          }
-        } catch (error) {
-          lastError = error;
-          console.error("[GRABIX] MovieBox source resolve failed", {
-            title: target.title,
-            subjectId: target.id,
-            mediaType: target.media_type,
-            season,
-            episode,
-            attempt: attempt + 1,
-            reason: error instanceof Error ? error.message : error,
-          });
-          if (attempt === 0) {
-            await wait(350);
-            continue;
-          }
-        }
-      }
     }
 
     throw lastError instanceof Error
@@ -499,7 +512,9 @@ function MovieBoxDetail({
     setSending(true);
     setDownloadError("");
     try {
-      const sources = await loadSourcesForLanguage(language);
+      const sources = language === "english" && resolvedSources.length > 0
+        ? resolvedSources
+        : await loadSourcesForLanguage(language);
       if (sources.length === 0) {
         setDownloadOptions([]);
         setDownloadQuality("");
@@ -527,6 +542,27 @@ function MovieBoxDetail({
   };
 
   useEffect(() => {
+    let cancelled = false;
+    setResolvedSources([]);
+    setPlayOptionsError("");
+    loadSources()
+      .then((sources) => {
+        if (!cancelled) {
+          setResolvedSources(sources);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setResolvedSources([]);
+          setPlayOptionsError(error instanceof Error ? error.message : "Could not load playable sources.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [details.id, details.media_type, season, episode]);
+
+  useEffect(() => {
     if (!downloadDialogOpen) return;
     void loadDownloadOptions(downloadLanguage);
   }, [downloadDialogOpen, downloadLanguage, details.id, season, episode]);
@@ -543,7 +579,7 @@ function MovieBoxDetail({
       setPlayOptionsLoading(true);
       setPlayOptionsError("");
       try {
-        const sources = await loadSources();
+        const sources = resolvedSources.length > 0 ? resolvedSources : await loadSources();
         const options = await resolveSourceDownloadOptions(sources);
         if (cancelled) return;
         setPlayOptions(options);
@@ -564,13 +600,13 @@ function MovieBoxDetail({
     return () => {
       cancelled = true;
     };
-  }, [details.id, details.moviebox_media_type, season, episode]);
+  }, [details.id, details.moviebox_media_type, resolvedSources, season, episode]);
 
   const handlePlay = async () => {
     try {
-      const sources = await loadSources();
+      const sources = resolvedSources.length > 0 ? resolvedSources : await loadSources();
       if (sources.length === 0) {
-        alert("Movie Box did not return any playable sources for this title.");
+        setToast({ message: "Movie Box did not return any playable sources for this title.", variant: "error" });
         return;
       }
 
@@ -599,7 +635,7 @@ function MovieBoxDetail({
         episode,
         reason: error instanceof Error ? error.message : error,
       });
-      alert("Movie Box playback failed for this title. Try another title or try again in a moment.");
+      setToast({ message: "Movie Box playback failed for this title. Try again in a moment.", variant: "error" });
     }
   };
 
@@ -609,7 +645,7 @@ function MovieBoxDetail({
       const sources = await loadSources();
       const source = sources[0];
       if (!source) {
-        alert("Movie Box did not return a downloadable file.");
+        setToast({ message: "Movie Box did not return a downloadable file.", variant: "error" });
         return;
       }
 
@@ -622,10 +658,11 @@ function MovieBoxDetail({
         throw new Error(`Downloader returned ${response.status}`);
       }
       setSent(true);
+      setToast({ message: "Movie Box download queued. Open Downloader to track progress.", variant: "success" });
       window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
       window.setTimeout(() => setSent(false), 2500);
     } catch {
-      alert("Could not queue this Movie Box download.");
+      setToast({ message: "Could not queue this Movie Box download.", variant: "error" });
     } finally {
       setSending(false);
     }
@@ -664,6 +701,7 @@ function MovieBoxDetail({
         tags: [downloadLanguage === "hindi" ? "Hindi" : "English"],
       });
       setSent(true);
+      setToast({ message: "Movie Box download queued. Open Downloader to track progress.", variant: "success" });
       setDownloadDialogOpen(false);
       window.setTimeout(() => setSent(false), 2500);
     } catch (error) {
@@ -846,6 +884,7 @@ function MovieBoxDetail({
         onClose={() => setDownloadDialogOpen(false)}
         onConfirm={() => void confirmDownload()}
       />
+      {toast ? <AppToast message={toast.message} variant={toast.variant} onClose={() => setToast(null)} /> : null}
     </div>
   );
 }

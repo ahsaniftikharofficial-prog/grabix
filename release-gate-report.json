@@ -1,0 +1,259 @@
+﻿{
+    "generated_at":  "2026-03-30T05:21:23",
+    "source_checks":  {
+                          "python_compile":  "passed",
+                          "backend_tests":  "passed",
+                          "frontend_build":  "passed",
+                          "tauri_check":  "passed"
+                      },
+    "packaged_binaries":  {
+                              "grabix-backend.exe":  {
+                                                         "exists":  true,
+                                                         "path":  "H:\\Code\\Project 3\\grabix\\grabix-ui\\src-tauri\\bin\\grabix-backend.exe",
+                                                         "size_bytes":  24761797,
+                                                         "sha256":  "33D393CFB0DC1734E8804A85C5E748EE78726109BFE6B7BACA472BD5BDF82A07"
+                                                     },
+                              "grabix-consumet.exe":  {
+                                                          "exists":  true,
+                                                          "path":  "H:\\Code\\Project 3\\grabix\\grabix-ui\\src-tauri\\bin\\grabix-consumet.exe",
+                                                          "size_bytes":  47621745,
+                                                          "sha256":  "DEB147C4F4FDCBF54379F985A24C1FBAEF91A3B5096D676ED70707BC04DEB774"
+                                                      }
+                          },
+    "backend_runtime":  {
+                            "generated_at":  "2026-03-30T05:21:37.165831",
+                            "runtime":  {
+                                            "services":  {
+                                                             "backend":  {
+                                                                             "name":  "backend",
+                                                                             "status":  "online",
+                                                                             "message":  "Backend is responding.",
+                                                                             "retryable":  false,
+                                                                             "details":  {
+
+                                                                                         }
+                                                                         },
+                                                             "database":  {
+                                                                              "name":  "database",
+                                                                              "status":  "online",
+                                                                              "message":  "Database is ready.",
+                                                                              "retryable":  true,
+                                                                              "details":  {
+
+                                                                                          }
+                                                                          },
+                                                             "downloads":  {
+                                                                               "name":  "downloads",
+                                                                               "status":  "online",
+                                                                               "message":  "Download folder is writable.",
+                                                                               "retryable":  true,
+                                                                               "details":  {
+
+                                                                                           }
+                                                                           },
+                                                             "ffmpeg":  {
+                                                                            "name":  "ffmpeg",
+                                                                            "status":  "online",
+                                                                            "message":  "FFmpeg is ready.",
+                                                                            "retryable":  true,
+                                                                            "details":  {
+                                                                                            "path":  "C:\\ffmpeg\\bin\\ffmpeg.EXE"
+                                                                                        }
+                                                                        },
+                                                             "consumet":  {
+                                                                              "name":  "consumet",
+                                                                              "status":  "online",
+                                                                              "message":  "Consumet is reachable for Hianime anime playback.",
+                                                                              "retryable":  true,
+                                                                              "details":  {
+                                                                                              "configured":  true,
+                                                                                              "api_base":  "http://127.0.0.1:65091"
+                                                                                          }
+                                                                          },
+                                                             "moviebox":  {
+                                                                              "name":  "moviebox",
+                                                                              "status":  "online",
+                                                                              "message":  "Movie Box provider is available.",
+                                                                              "retryable":  false,
+                                                                              "details":  {
+
+                                                                                          }
+                                                                          },
+                                                             "anime":  {
+                                                                           "name":  "anime",
+                                                                           "status":  "online",
+                                                                           "message":  "Anime playback is fully available.",
+                                                                           "retryable":  true,
+                                                                           "details":  {
+
+                                                                                       }
+                                                                       },
+                                                             "manga":  {
+                                                                           "name":  "manga",
+                                                                           "status":  "online",
+                                                                           "message":  "Manga routes are available.",
+                                                                           "retryable":  false,
+                                                                           "details":  {
+
+                                                                                       }
+                                                                       }
+                                                         },
+                                            "summary":  {
+                                                            "online":  8,
+                                                            "degraded":  0,
+                                                            "offline":  0,
+                                                            "backend_reachable":  true,
+                                                            "startup_ready":  true,
+                                                            "degraded_services":  [
+
+                                                                                  ]
+                                                        },
+                                            "capabilities":  {
+                                                                 "startup_ready":  true,
+                                                                 "can_show_shell":  true,
+                                                                 "can_open_library":  true,
+                                                                 "can_download_media":  true,
+                                                                 "can_use_converter":  true,
+                                                                 "can_browse_movies":  true,
+                                                                 "can_browse_tv":  true,
+                                                                 "can_use_moviebox":  true,
+                                                                 "can_play_anime":  true,
+                                                                 "can_play_anime_primary":  true,
+                                                                 "can_play_anime_fallback":  true,
+                                                                 "can_read_manga":  true
+                                                             }
+                                        },
+                            "providers":  {
+                                              "providers":  {
+                                                                "moviebox":  {
+                                                                                 "name":  "moviebox",
+                                                                                 "status":  "online",
+                                                                                 "message":  "Movie Box provider is available.",
+                                                                                 "retryable":  false,
+                                                                                 "details":  {
+
+                                                                                             }
+                                                                             },
+                                                                "consumet":  {
+                                                                                 "name":  "consumet",
+                                                                                 "status":  "online",
+                                                                                 "message":  "Consumet is reachable for Hianime anime playback.",
+                                                                                 "retryable":  true,
+                                                                                 "details":  {
+                                                                                                 "configured":  true,
+                                                                                                 "api_base":  "http://127.0.0.1:65091"
+                                                                                             }
+                                                                             },
+                                                                "anime":  {
+                                                                              "name":  "anime",
+                                                                              "status":  "online",
+                                                                              "message":  "Anime playback is fully available.",
+                                                                              "retryable":  true,
+                                                                              "details":  {
+
+                                                                                          }
+                                                                          },
+                                                                "manga":  {
+                                                                              "name":  "manga",
+                                                                              "status":  "online",
+                                                                              "message":  "Manga routes are available.",
+                                                                              "retryable":  false,
+                                                                              "details":  {
+
+                                                                                          }
+                                                                          }
+                                                            },
+                                              "fallbacks":  {
+                                                                "movies":  [
+                                                                               "moviebox",
+                                                                               "embed"
+                                                                           ],
+                                                                "tv":  [
+                                                                           "moviebox",
+                                                                           "embed"
+                                                                       ],
+                                                                "anime":  [
+                                                                              "backend-resolved",
+                                                                              "moviebox",
+                                                                              "consumet-watch",
+                                                                              "embed"
+                                                                          ],
+                                                                "manga":  [
+                                                                              "mangadex",
+                                                                              "comick",
+                                                                              "offline-cache"
+                                                                          ]
+                                                            }
+                                          },
+                            "ffmpeg":  {
+                                           "available":  true,
+                                           "path":  "C:\\ffmpeg\\bin\\ffmpeg.EXE"
+                                       },
+                            "storage":  {
+                                            "total_bytes":  545455303,
+                                            "total_size":  "520.2 MB",
+                                            "file_count":  8,
+                                            "folder":  "C:\\Users\\Ahsan K Mughal\\Downloads\\GRABIX"
+                                        },
+                            "library":  {
+                                            "total_items":  8,
+                                            "broken_items":  0,
+                                            "untracked_items":  8
+                                        },
+                            "queue":  {
+                                          "total":  0,
+                                          "active":  0
+                                      },
+                            "release_gate":  {
+                                                 "ready":  true,
+                                                 "failed_checks":  [
+
+                                                                   ],
+                                                 "checks":  [
+                                                                {
+                                                                    "id":  "database_online",
+                                                                    "label":  "Database is online",
+                                                                    "passed":  true
+                                                                },
+                                                                {
+                                                                    "id":  "downloads_writable",
+                                                                    "label":  "Download folder is writable",
+                                                                    "passed":  true
+                                                                },
+                                                                {
+                                                                    "id":  "backend_reachable",
+                                                                    "label":  "Backend is reachable",
+                                                                    "passed":  true
+                                                                },
+                                                                {
+                                                                    "id":  "library_has_no_broken_items",
+                                                                    "label":  "Library has no broken tracked files",
+                                                                    "passed":  true,
+                                                                    "details":  {
+                                                                                    "broken_items":  0
+                                                                                }
+                                                                },
+                                                                {
+                                                                    "id":  "moviebox_provider_ready",
+                                                                    "label":  "Movie Box provider is ready",
+                                                                    "passed":  true
+                                                                },
+                                                                {
+                                                                    "id":  "anime_fallback_ready",
+                                                                    "label":  "Anime playback has fallback coverage",
+                                                                    "passed":  true
+                                                                },
+                                                                {
+                                                                    "id":  "ffmpeg_ready",
+                                                                    "label":  "FFmpeg is available",
+                                                                    "passed":  true
+                                                                }
+                                                            ]
+                                             }
+                        },
+    "release_readiness":  {
+                              "sidecars_present":  true,
+                              "runtime_reachable":  true,
+                              "backend_tests_passed":  true
+                          }
+}

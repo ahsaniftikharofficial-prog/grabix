@@ -1,5 +1,4 @@
 from datetime import datetime
-import logging
 from urllib.parse import urlparse
 
 import httpx
@@ -31,9 +30,10 @@ from app.services.manga_comick import (
     get_frontpage as get_comick_frontpage,
     search_manga as comick_search_manga,
 )
+from app.services.logging_utils import get_logger
 
 router = APIRouter()
-logger = logging.getLogger("grabix.manga")
+logger = get_logger("manga")
 ALLOWED_MANGA_IMAGE_HOST_TOKENS = (
     "mangadex",
     "comick",

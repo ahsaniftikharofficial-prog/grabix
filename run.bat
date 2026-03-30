@@ -13,8 +13,34 @@ set "ROOT=%~dp0"
 set "BACKEND=%ROOT%backend"
 set "FRONTEND=%ROOT%grabix-ui"
 set "CONSUMET=%ROOT%consumet-local"
+set "SCRIPTS=%ROOT%scripts"
 set "CONSUMET_PORT=3000"
-set "CONSUMET_BASE=http://127.0.0.1:%CONSUMET_PORT%"
+set "BACKEND_PORT=8000"
+set "FRONTEND_PORT=5173"
+set "BACKEND_LOG=%BACKEND%\logs\launcher-backend.log"
+set "CONSUMET_LOG=%BACKEND%\logs\launcher-consumet.log"
+set "FRONTEND_LOG=%BACKEND%\logs\launcher-frontend.log"
+
+echo  [CLEANUP] Closing installed GRABIX processes that can hijack source-mode ports...
+taskkill /IM grabix-ui.exe /F >nul 2>&1
+taskkill /IM grabix-backend.exe /F >nul 2>&1
+taskkill /IM grabix-consumet.exe /F >nul 2>&1
+taskkill /FI "WINDOWTITLE eq GRABIX Backend" /F >nul 2>&1
+taskkill /FI "WINDOWTITLE eq GRABIX Frontend" /F >nul 2>&1
+taskkill /FI "WINDOWTITLE eq GRABIX Consumet" /F >nul 2>&1
+echo  [CLEANUP] Closing stale source-mode GRABIX Python/Node processes...
+powershell -NoProfile -Command ^
+  "$roots=@('H:\\Code\\Project 3\\grabix\\backend\\main.py','H:\\Code\\Project 3\\grabix\\consumet-local','H:\\Code\\Project 3\\grabix\\grabix-ui');" ^
+  "Get-CimInstance Win32_Process | Where-Object { $cmd=$_.CommandLine; $name=$_.Name; $cmd -and ($name -in @('python.exe','pythonw.exe','node.exe','npm.exe','cmd.exe')) -and (($roots | Where-Object { $cmd -like ('*' + $_ + '*') }).Count -gt 0) } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }"
+
+echo  [CLEANUP] Releasing fixed GRABIX dev ports...
+powershell -NoProfile -Command ^
+  "$ports=@(%CONSUMET_PORT%,%BACKEND_PORT%,%FRONTEND_PORT%); foreach($port in $ports){ Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $port -State Listen -ErrorAction SilentlyContinue | ForEach-Object { try { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } catch {} } }"
+
+if not exist "%BACKEND%\logs" mkdir "%BACKEND%\logs" >nul 2>&1
+if exist "%BACKEND_LOG%" del /f /q "%BACKEND_LOG%" >nul 2>&1
+if exist "%CONSUMET_LOG%" del /f /q "%CONSUMET_LOG%" >nul 2>&1
+if exist "%FRONTEND_LOG%" del /f /q "%FRONTEND_LOG%" >nul 2>&1
 
 python --version >nul 2>&1
 if errorlevel 1 (
@@ -79,30 +105,64 @@ if not exist "%CONSUMET%\node_modules\aniwatch\dist\index.js" (
     )
 )
 
+set "CONSUMET_BASE=http://127.0.0.1:%CONSUMET_PORT%"
+set "BACKEND_BASE=http://127.0.0.1:%BACKEND_PORT%"
+set "FRONTEND_BASE=http://127.0.0.1:%FRONTEND_PORT%"
+set "FRONTEND_ENV_FILE=%FRONTEND%\.env.development.local"
+
+> "%FRONTEND_ENV_FILE%" (
+    echo VITE_GRABIX_API_BASE=%BACKEND_BASE%
+)
+
 echo  [START] Launching local Consumet gateway on %CONSUMET_BASE%
-start "GRABIX Consumet" cmd /k "cd /d ""%CONSUMET%"" && set PORT=%CONSUMET_PORT% && npm.cmd start"
+start "GRABIX Consumet" /min cmd /c call "%SCRIPTS%\start-consumet.cmd" "%CONSUMET%" "%CONSUMET_PORT%" "%CONSUMET_LOG%"
 
-timeout /t 4 /nobreak >nul
+echo  [WAIT] Waiting for local Consumet gateway...
+powershell -NoProfile -Command ^
+  "$ready=$false; for($i=0;$i -lt 50;$i++){ Start-Sleep -Milliseconds 400; try { $r=Invoke-WebRequest -Uri '%CONSUMET_BASE%/' -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200){$ready=$true; break} } catch {} }; if(-not $ready){ exit 1 }"
+if errorlevel 1 (
+    echo  [WARN] Consumet did not become ready in time. GRABIX will keep going with fallback providers.
+)
 
-echo  [START] Launching backend on http://127.0.0.1:8000
-start "GRABIX Backend" cmd /k "cd /d ""%BACKEND%"" && call venv\Scripts\activate.bat && set CONSUMET_API_BASE=%CONSUMET_BASE% && uvicorn main:app --reload --port 8000"
+echo  [START] Launching backend on %BACKEND_BASE%
+start "GRABIX Backend" /min cmd /c call "%SCRIPTS%\start-backend.cmd" "%BACKEND%" "%CONSUMET_BASE%" "%BACKEND_PORT%" "%BACKEND_BASE%" "%BACKEND_LOG%"
 
-timeout /t 3 /nobreak >nul
+echo  [WAIT] Waiting for backend health...
+powershell -NoProfile -Command ^
+  "$ready=$false; for($i=0;$i -lt 80;$i++){ Start-Sleep -Milliseconds 400; try { $r=Invoke-RestMethod -Uri '%BACKEND_BASE%/health/ping' -TimeoutSec 2; if($r.ok -and $r.core_ready){$ready=$true; break} } catch {} }; if(-not $ready){ exit 1 }"
+if errorlevel 1 (
+    echo  [ERROR] Backend did not become ready in time.
+    echo  [INFO] Showing last backend log lines:
+    powershell -NoProfile -Command "if(Test-Path '%BACKEND_LOG%'){ Get-Content '%BACKEND_LOG%' -Tail 60 }"
+    pause
+    exit /b 1
+)
 
-echo  [START] Launching frontend on http://localhost:5173
-start "GRABIX Frontend" cmd /k "cd /d ""%FRONTEND%"" && npm.cmd run dev"
+echo  [START] Launching frontend on %FRONTEND_BASE%
+start "GRABIX Frontend" /min cmd /c call "%SCRIPTS%\start-frontend.cmd" "%FRONTEND%" "%FRONTEND_PORT%" "%FRONTEND_LOG%"
+
+echo  [WAIT] Waiting for frontend...
+powershell -NoProfile -Command ^
+  "$ready=$false; for($i=0;$i -lt 80;$i++){ Start-Sleep -Milliseconds 400; try { $r=Invoke-WebRequest -Uri '%FRONTEND_BASE%' -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200){$ready=$true; break} } catch {} }; if(-not $ready){ exit 1 }"
+if errorlevel 1 (
+    echo  [ERROR] Frontend dev server did not become ready in time.
+    echo  [INFO] Showing last frontend log lines:
+    powershell -NoProfile -Command "if(Test-Path '%FRONTEND_LOG%'){ Get-Content '%FRONTEND_LOG%' -Tail 60 }"
+    pause
+    exit /b 1
+)
 
 echo.
 echo  ==========================================
 echo    All services are starting!
 echo.
 echo    Consumet: %CONSUMET_BASE%
-echo    Backend:  http://127.0.0.1:8000
-echo    Frontend: http://localhost:5173
+echo    Backend:  %BACKEND_BASE%
+echo    Frontend: %FRONTEND_BASE%
 echo  ==========================================
 echo.
 
 timeout /t 3 /nobreak >nul
-start http://localhost:5173
+start %FRONTEND_BASE%
 
 exit /b 0

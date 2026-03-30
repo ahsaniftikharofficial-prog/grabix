@@ -35,6 +35,7 @@ class DownloadRequest(BaseModel):
     force_hls: bool = False
     category: str = ""
     tags_csv: str = ""
+    download_engine: str = ""
 
 
 @router.get("/download")
@@ -56,6 +57,7 @@ def start_download(
     force_hls: bool = False,
     category: str = "",
     tags_csv: str = "",
+    download_engine: str = "",
 ):
     main_module = _main_module()
     return main_module.start_download(
@@ -76,6 +78,7 @@ def start_download(
         force_hls=force_hls,
         category=category,
         tags_csv=tags_csv,
+        download_engine=download_engine,
     )
 
 
@@ -100,6 +103,7 @@ def start_download_post(payload: DownloadRequest):
         force_hls=payload.force_hls,
         category=payload.category,
         tags_csv=payload.tags_csv,
+        download_engine=payload.download_engine,
     )
 
 
@@ -125,6 +129,12 @@ def list_downloads():
 def open_download_folder(path: str = ""):
     main_module = _main_module()
     return main_module.open_download_folder(path)
+
+
+@router.post("/open-local-file")
+def open_local_file(path: str):
+    main_module = _main_module()
+    return main_module.open_local_file(path)
 
 
 @router.post("/downloads/{dl_id}/action")

@@ -17,6 +17,7 @@ CONSUMET_API_BASE_ENV = "CONSUMET_API_BASE"
 DEFAULT_AUDIO_PRIORITY = ["en", "original", "hi"]
 DEFAULT_SUBTITLE_PRIORITY = ["en", "hi"]
 HTTP_TIMEOUT = 20.0
+HEALTH_TIMEOUT = 0.9
 _CACHE: dict[str, tuple[float, Any]] = {}
 
 
@@ -127,9 +128,38 @@ async def _fetch_consumet_json(
     *,
     params: dict[str, Any] | None = None,
     ttl_seconds: int = 300,
+    timeout: float | None = None,
 ) -> Any:
     base = get_consumet_api_base()
-    return await _fetch_json_url(f"{base}{path}", params=params, ttl_seconds=ttl_seconds)
+    if timeout is None or timeout == HTTP_TIMEOUT:
+        return await _fetch_json_url(f"{base}{path}", params=params, ttl_seconds=ttl_seconds)
+
+    filtered = {key: value for key, value in (params or {}).items() if value is not None and value != ""}
+    key = _cache_key("json-timeout", f"{base}{path}", filtered, timeout)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+
+    headers = {
+        "User-Agent": "GRABIX/1.0 (+https://github.com/consumet/api.consumet.org)",
+        "Accept": "application/json, text/plain;q=0.9, */*;q=0.8",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
+            response = await client.get(f"{base}{path}", params=filtered)
+    except Exception as exc:
+        raise _http_error(f"Consumet request failed: {exc}") from exc
+
+    if response.status_code >= 400:
+        detail = response.text.strip() or f"Consumet request failed with {response.status_code}"
+        raise _http_error(detail, response.status_code if response.status_code in {401, 403, 404, 429, 500, 503} else 502)
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise _http_error(f"Consumet returned invalid JSON from {base}{path}: {exc}") from exc
+
+    return _cache_set(key, data, ttl_seconds)
 
 
 async def fetch_proxy_response(url: str) -> tuple[bytes, str | None]:
@@ -742,21 +772,24 @@ async def get_health_status() -> dict[str, Any]:
 
     base = get_consumet_api_base()
     try:
-        discover_payload = await _fetch_consumet_json("/anime/hianime/top10", params={"period": "daily"}, ttl_seconds=120)
-        search_payload = await _fetch_consumet_json("/anime/hianime/naruto", params={"page": 1}, ttl_seconds=120)
+        discover_payload = await _fetch_consumet_json(
+            "/anime/hianime/top10",
+            params={"period": "daily"},
+            ttl_seconds=45,
+            timeout=HEALTH_TIMEOUT,
+        )
         discover_items = [item for item in _payload_items(discover_payload) if isinstance(item, dict)]
-        search_items = [item for item in _payload_items(search_payload) if isinstance(item, dict)]
 
-        if discover_items or search_items:
+        if discover_items:
             healthy = True
             message = "Consumet is reachable for Hianime anime playback."
         else:
             healthy = False
-            message = "Consumet is running, but Hianime returned no anime data. Playback will use fallback providers."
+            message = "Consumet is running, but Hianime returned no anime data yet. GRABIX fallback playback is ready."
     except HTTPException as exc:
         healthy = False
         _ = exc
-        message = "Consumet is unavailable right now, so GRABIX will use its built-in anime fallbacks."
+        message = "Consumet is still warming up. GRABIX can already use built-in anime fallbacks."
 
     return {
         "configured": True,

@@ -5,14 +5,16 @@ import { useState, useEffect, useRef } from "react";
 import { IconSearch, IconStar, IconPlay, IconDownload, IconX } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
+import { PageEmptyState, PageErrorState } from "../components/PageStates";
 import { useFavorites } from "../context/FavoritesContext";
 import { useContentFilter } from "../context/ContentFilterContext";
 import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
 import { filterAdultContent } from "../lib/contentFilter";
 import { BACKEND_API } from "../lib/api";
+import { getCachedJson } from "../lib/cache";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
 import VidSrcPlayer from "../components/VidSrcPlayer";
-import { fetchMovieBoxSources, getArchiveMovieSources, getMovieSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
+import { fetchMovieBoxSources, getArchiveMovieSources, getMovieSources, resolveMoviePlaybackSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
 
 const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzdWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
 const TMDB     = "https://api.themoviedb.org/3";
@@ -40,6 +42,7 @@ export default function MoviesPage() {
   const [movies, setMovies] = useState<Movie[]>([]);
   const [free, setFree]     = useState<ArchiveItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [pageError, setPageError] = useState("");
   const [search, setSearch] = useState("");
   const [query, setQuery]   = useState("");
   const [detail, setDetail] = useState<Movie | null>(null);
@@ -49,32 +52,67 @@ export default function MoviesPage() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  const tf = async (ep: string) => (await fetch(`${TMDB}${ep}`, { headers: HEADERS })).json();
+  const tf = async (ep: string) => await getCachedJson<any>({
+    key: `tmdb:${ep}`,
+    url: `${TMDB}${ep}`,
+    ttlMs: 180_000,
+    scope: "session",
+    init: { headers: HEADERS },
+  });
 
   const fetchTMDB = async (t: Tab, p = 1) => {
     setLoading(true);
+    setPageError("");
     try {
       const eps: Record<string, string> = { trending: `/trending/movie/week?page=${p}`, popular: `/movie/popular?page=${p}`, toprated: `/movie/top_rated?page=${p}` };
       const d = await tf(eps[t]);
       setMovies(p === 1 ? (d.results ?? []) : prev => [...prev, ...(d.results ?? [])]);
-    } catch { setMovies([]); } finally { setLoading(false); }
+    } catch {
+      setMovies([]);
+      setPageError("Movies could not be loaded right now.");
+    } finally { setLoading(false); }
   };
 
   const fetchFree = async () => {
     setLoading(true);
+    setPageError("");
     try {
-      const r = await fetch(`https://archive.org/advancedsearch.php?q=mediatype:movies+AND+subject:feature+film&fl[]=identifier,title,year,description&rows=24&output=json&sort[]=downloads+desc`);
-      const d = await r.json();
+      const d = await getCachedJson<any>({
+        key: "archive:free-movies",
+        url: "https://archive.org/advancedsearch.php?q=mediatype:movies+AND+subject:feature+film&fl[]=identifier,title,year,description&rows=24&output=json&sort[]=downloads+desc",
+        ttlMs: 300_000,
+        scope: "session",
+      });
       setFree((d.response?.docs ?? []).map((doc: any) => ({ identifier: doc.identifier, title: doc.title ?? "Unknown", year: doc.year, description: doc.description, thumb: `https://archive.org/services/img/${doc.identifier}` })));
-    } catch { setFree([]); } finally { setLoading(false); }
+    } catch {
+      setFree([]);
+      setPageError("Free movie sources could not be loaded right now.");
+    } finally { setLoading(false); }
   };
 
   const searchMovies = async (q: string, p = 1) => {
     setLoading(true);
+    setPageError("");
     try {
       const d = await tf(`/search/movie?query=${encodeURIComponent(q)}&page=${p}`);
       setMovies(p === 1 ? (d.results ?? []) : prev => [...prev, ...(d.results ?? [])]);
-    } catch { setMovies([]); } finally { setLoading(false); }
+    } catch {
+      setMovies([]);
+      setPageError("Movie search could not be completed right now.");
+    } finally { setLoading(false); }
+  };
+
+  const retryCurrentView = () => {
+    setPage(1);
+    if (query) {
+      void searchMovies(query, 1);
+      return;
+    }
+    if (tab === "free") {
+      void fetchFree();
+      return;
+    }
+    void fetchTMDB(tab, 1);
   };
 
   useEffect(() => {
@@ -141,14 +179,25 @@ export default function MoviesPage() {
 
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
         {loading && (tab === "free" ? filteredFree.length === 0 : filteredMovies.length === 0) ? <LoadingGrid /> :
-         tab === "free" ? (
+         pageError ? (
+          <PageErrorState
+            title="Movies are unavailable right now"
+            subtitle={pageError}
+            onRetry={retryCurrentView}
+          />
+         ) : tab === "free" ? (
           <>
             <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>Public domain films from Archive.org — free to stream and download legally.</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 }}>
               {filteredFree.map(m => <FreeCard key={m.identifier} movie={m} onClick={() => setFD(m)} />)}
             </div>
           </>
-         ) : filteredMovies.length === 0 ? <div className="empty-state"><IconSearch size={36} /><p>No results</p></div> : (
+         ) : filteredMovies.length === 0 ? (
+          <PageEmptyState
+            title={query ? "No movies matched that search" : "No movies are available here yet"}
+            subtitle={query ? "Try a different title, year, or spelling." : "Try another section or refresh this page."}
+          />
+         ) : (
           <>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 }}>
               {filteredMovies.map(m => <MovieCard key={m.id} movie={m} onClick={() => setDetail(m)} />)}
@@ -222,6 +271,7 @@ function ActionButtons({ onPlay, onDownload, onHindi, favId, favItem }: { onPlay
 function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: () => void; tf: (e: string) => Promise<any>; onPlay: (player: { title: string; subtitle?: string; poster?: string; sources: StreamSource[] }) => void }) {
   const [full, setFull]       = useState<Movie | null>(null);
   const [altTitles, setAltTitles] = useState<string[]>([]);
+  const [prefetchedPlaybackSources, setPrefetchedPlaybackSources] = useState<StreamSource[]>([]);
   const [hindiNotice, setHindiNotice] = useState("");
   const [downloadDialogOpen, setDownloadDialogOpen] = useState(false);
   const [downloadLanguage, setDownloadLanguage] = useState<"english" | "hindi">("english");
@@ -255,6 +305,30 @@ function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: ()
   const movieYear = d.release_date ? Number(d.release_date.slice(0, 4)) : undefined;
   const poster = d.poster_path ? `${IMG_BASE}${d.poster_path}` : "";
   const fallbackSources = getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id });
+
+  useEffect(() => {
+    let cancelled = false;
+    resolveMoviePlaybackSources({
+      tmdbId: movie.id,
+      imdbId: d.imdb_id,
+      title: d.title,
+      altTitles,
+      year: Number.isFinite(movieYear) ? movieYear : undefined,
+    })
+      .then((sources) => {
+        if (!cancelled) {
+          setPrefetchedPlaybackSources(sources);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPrefetchedPlaybackSources([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [altTitles, d.imdb_id, d.title, movie.id, movieYear]);
 
   const loadMovieBoxSources = async () => {
     const titles = [d.title, ...altTitles];
@@ -348,13 +422,13 @@ function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: ()
     void loadDownloadOptions(downloadLanguage);
   }, [downloadDialogOpen, downloadLanguage, d.title, movieYear]);
 
-  const handlePlay = async () => {
+  const handlePlay = () => {
     setHindiNotice("");
     onPlay({
       title: d.title,
-      subtitle: "Movie playback with GRABIX servers",
+      subtitle: "Movie playback with Movie Box primary and embed fallbacks",
       poster: poster || undefined,
-      sources: fallbackSources,
+      sources: prefetchedPlaybackSources.length > 0 ? prefetchedPlaybackSources : fallbackSources,
     });
   };
 

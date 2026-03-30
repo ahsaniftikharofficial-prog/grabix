@@ -7,6 +7,30 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules")) {
+            if (id.includes("react")) return "vendor-react";
+            if (id.includes("@tauri-apps")) return "vendor-tauri";
+            if (id.includes("hls.js")) return "vendor-player";
+            return "vendor";
+          }
+          if (id.includes("/src/pages/AnimePage")) return "page-anime";
+          if (id.includes("/src/pages/MangaPage")) return "page-manga";
+          if (id.includes("/src/pages/MovieBoxPage")) return "page-moviebox";
+          if (id.includes("/src/pages/MoviesPage")) return "page-movies";
+          if (id.includes("/src/pages/TVSeriesPage")) return "page-series";
+          if (id.includes("/src/pages/ExplorePage")) return "page-explore";
+          if (id.includes("/src/pages/LibraryPage")) return "page-library";
+          if (id.includes("/src/pages/DownloaderPage")) return "page-downloader";
+          if (id.includes("/src/pages/SettingsPage")) return "page-settings";
+          return undefined;
+        },
+      },
+    },
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

@@ -7,13 +7,16 @@ import {
   IconGrid,
   IconImage,
   IconList,
+  IconPlay,
   IconRefresh,
   IconSearch,
   IconTrash,
   IconVideo,
   IconX,
 } from "../components/Icons";
+import { PageEmptyState, PageErrorState } from "../components/PageStates";
 import { BACKEND_API } from "../lib/api";
+import { deleteOfflineMangaRecord, listOfflineMangaRecords, type OfflineMangaRecord } from "../lib/mangaOffline";
 
 const API = BACKEND_API;
 
@@ -23,7 +26,7 @@ interface LibItem {
   title: string;
   thumbnail: string;
   channel: string;
-  type: "video" | "audio" | "thumbnail" | "subtitle";
+  type: "video" | "audio" | "thumbnail" | "subtitle" | "manga";
   file_path: string;
   file_size: number;
   file_size_label: string;
@@ -33,6 +36,19 @@ interface LibItem {
   tags: string;
   category: string;
   status: string;
+  broken: boolean;
+  local_available: boolean;
+  source_type: "history" | "untracked" | "offline-manga";
+  offline_key: string;
+  chapter_count: number;
+  storage_label: string;
+}
+
+interface ConfirmState {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  action: () => Promise<void>;
 }
 
 type ViewMode = "grid" | "list";
@@ -77,7 +93,7 @@ function formatDuration(seconds: number): string {
 }
 
 function toLibItem(row: Record<string, unknown>): LibItem {
-  const type = (["video", "audio", "thumbnail", "subtitle"].includes(String(row.dl_type || ""))
+  const type = (["video", "audio", "thumbnail", "subtitle", "manga"].includes(String(row.dl_type || ""))
     ? row.dl_type
     : "video") as LibItem["type"];
   const createdAt = String(row.created_at || "");
@@ -96,7 +112,41 @@ function toLibItem(row: Record<string, unknown>): LibItem {
     raw_date: createdAt,
     tags: String(row.tags || ""),
     category: String(row.category || ""),
-    status: String(row.status || ""),
+    status: String(row.library_status || row.status || ""),
+    broken: Boolean(row.broken),
+    local_available: Boolean(row.local_available ?? true),
+    source_type: (["history", "untracked", "offline-manga"].includes(String(row.source_type || ""))
+      ? row.source_type
+      : "history") as LibItem["source_type"],
+    offline_key: String(row.offline_key || ""),
+    chapter_count: Number(row.chapter_count || 0),
+    storage_label: String(row.storage_label || ""),
+  };
+}
+
+function toOfflineMangaLibItem(row: OfflineMangaRecord): LibItem {
+  return {
+    id: `offline-manga:${row.key}`,
+    url: "",
+    title: row.item.title,
+    thumbnail: row.item.cover_image || "",
+    channel: row.chapterSource ? `Offline • ${row.chapterSource}` : "Offline manga",
+    type: "manga",
+    file_path: "",
+    file_size: 0,
+    file_size_label: "",
+    duration: "",
+    date: row.downloadedAt ? new Date(row.downloadedAt).toLocaleDateString() : "",
+    raw_date: row.downloadedAt || "",
+    tags: "offline,manga",
+    category: "manga",
+    status: "offline",
+    broken: false,
+    local_available: true,
+    source_type: "offline-manga",
+    offline_key: row.key,
+    chapter_count: Array.isArray(row.chapters) ? row.chapters.length : 0,
+    storage_label: `${Array.isArray(row.chapters) ? row.chapters.length : 0} chapter(s) offline`,
   };
 }
 
@@ -160,19 +210,23 @@ function categoryAccent(id: CategoryId): string {
 function typeIcon(type: LibItem["type"]) {
   if (type === "audio") return <IconAudio size={14} color="currentColor" />;
   if (type === "thumbnail") return <IconImage size={14} color="currentColor" />;
+  if (type === "manga") return <IconImage size={14} color="currentColor" />;
   return <IconVideo size={14} color="currentColor" />;
 }
 
 export default function LibraryPage() {
   const [items, setItems] = useState<LibItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [pageError, setPageError] = useState("");
   const [search, setSearch] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [activeCategory, setActiveCategory] = useState<CategoryId>("all");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState("");
   const [editItem, setEditItem] = useState<LibItem | null>(null);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [organizing, setOrganizing] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
 
   const showToast = (message: string) => {
     setToast(message);
@@ -181,13 +235,19 @@ export default function LibraryPage() {
 
   const load = useCallback(() => {
     setLoading(true);
-    fetch(`${API}/history/full`)
-      .then((response) => response.json())
-      .then((rows: Array<Record<string, unknown>>) => {
-        setItems((rows || []).map(toLibItem));
+    setPageError("");
+    Promise.all([
+      fetch(`${API}/library/index`).then((response) => response.json() as Promise<Array<Record<string, unknown>>>),
+      listOfflineMangaRecords().catch(() => []),
+    ])
+      .then(([rows, offlineManga]) => {
+        const backendItems = (rows || []).map(toLibItem);
+        const offlineItems = (offlineManga || []).map(toOfflineMangaLibItem);
+        setItems([...offlineItems, ...backendItems]);
       })
       .catch(() => {
         setItems([]);
+        setPageError("Library items could not be loaded right now.");
       })
       .finally(() => setLoading(false));
   }, []);
@@ -240,6 +300,8 @@ export default function LibraryPage() {
   }, [filteredItems]);
 
   const totalSize = enhancedItems.reduce((sum, item) => sum + item.file_size, 0);
+  const brokenCount = enhancedItems.filter((item) => item.broken).length;
+  const offlineMangaCount = enhancedItems.filter((item) => item.source_type === "offline-manga").length;
   const totalSizeLabel = totalSize > 1024 ** 3
     ? `${(totalSize / 1024 ** 3).toFixed(1)} GB`
     : totalSize > 1024 ** 2
@@ -256,6 +318,15 @@ export default function LibraryPage() {
   };
 
   const openFolder = async (item: LibItem) => {
+    if (item.source_type === "offline-manga") {
+      window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "manga" } }));
+      showToast("Opened Manga page. This title is available offline there.");
+      return;
+    }
+    if (!item.file_path) {
+      showToast("This item has no local file path to reveal.");
+      return;
+    }
     try {
       await fetch(`${API}/open-download-folder?path=${encodeURIComponent(item.file_path)}`, { method: "POST" });
     } catch {
@@ -263,27 +334,93 @@ export default function LibraryPage() {
     }
   };
 
-  const deleteItem = async (id: string) => {
-    if (!window.confirm("Delete this file from disk and library?")) return;
-    await fetch(`${API}/history/${id}?delete_file=true`, { method: "DELETE" });
-    setItems((current) => current.filter((item) => item.id !== id));
+  const playItem = async (item: LibItem) => {
+    if (item.source_type === "offline-manga") {
+      window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "manga" } }));
+      showToast("Opened Manga page for offline reading.");
+      return;
+    }
+    if (!item.local_available || item.broken || !item.file_path) {
+      showToast("This item is not available to open locally.");
+      return;
+    }
+    try {
+      const response = await fetch(`${API}/open-local-file?path=${encodeURIComponent(item.file_path)}`, { method: "POST" });
+      if (!response.ok) {
+        throw new Error(`Open failed with ${response.status}`);
+      }
+    } catch {
+      showToast("Could not open the local file.");
+    }
+  };
+
+  const executeDeleteItem = async (item: LibItem) => {
+    if (item.source_type === "offline-manga") {
+      await deleteOfflineMangaRecord(item.offline_key);
+    } else if (item.source_type === "untracked") {
+      await fetch(`${API}/library/file?path=${encodeURIComponent(item.file_path)}`, { method: "DELETE" });
+    } else if (item.source_type === "history" && item.broken) {
+      await fetch(`${API}/library/stale/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+    } else {
+      await fetch(`${API}/history/${item.id}?delete_file=true`, { method: "DELETE" });
+    }
+    setItems((current) => current.filter((entry) => entry.id !== item.id));
     setSelectedIds((current) => {
       const next = new Set(current);
-      next.delete(id);
+      next.delete(item.id);
       return next;
     });
     showToast("Removed from library.");
   };
 
-  const deleteSelected = async () => {
-    if (!selectedIds.size) return;
-    if (!window.confirm(`Delete ${selectedIds.size} selected item(s)?`)) return;
-    await Promise.all(
-      [...selectedIds].map((id) => fetch(`${API}/history/${id}?delete_file=true`, { method: "DELETE" }))
-    );
+  const deleteItem = async (item: LibItem) => {
+    const confirmMessage = item.source_type === "offline-manga"
+      ? "Delete this offline manga from the app?"
+      : item.source_type === "history" && item.broken
+        ? "Remove this missing item from the library?"
+        : "Delete this file from disk and library?";
+    setConfirmState({
+      title: "Confirm Delete",
+      message: confirmMessage,
+      confirmLabel: "Delete",
+      action: async () => {
+        await executeDeleteItem(item);
+      },
+    });
+  };
+
+  const executeDeleteSelected = async () => {
+    const selectedItems = items.filter((item) => selectedIds.has(item.id));
+    await Promise.all(selectedItems.map(async (item) => {
+      if (item.source_type === "offline-manga") {
+        await deleteOfflineMangaRecord(item.offline_key);
+        return;
+      }
+      if (item.source_type === "untracked") {
+        await fetch(`${API}/library/file?path=${encodeURIComponent(item.file_path)}`, { method: "DELETE" });
+        return;
+      }
+      if (item.source_type === "history" && item.broken) {
+        await fetch(`${API}/library/stale/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+        return;
+      }
+      await fetch(`${API}/history/${item.id}?delete_file=true`, { method: "DELETE" });
+    }));
     setItems((current) => current.filter((item) => !selectedIds.has(item.id)));
     setSelectedIds(new Set());
     showToast("Selected items deleted.");
+  };
+
+  const deleteSelected = async () => {
+    if (!selectedIds.size) return;
+    setConfirmState({
+      title: "Delete Selected Items",
+      message: `Delete ${selectedIds.size} selected item(s) from your library?`,
+      confirmLabel: `Delete ${selectedIds.size}`,
+      action: async () => {
+        await executeDeleteSelected();
+      },
+    });
   };
 
   const organizeLibrary = async () => {
@@ -300,8 +437,28 @@ export default function LibraryPage() {
     }
   };
 
+  const reconcileLibrary = async () => {
+    setReconciling(true);
+    try {
+      const response = await fetch(`${API}/library/reconcile`, { method: "POST" });
+      const payload = (await response.json()) as {
+        marked_missing?: number;
+        restored?: number;
+        untracked?: number;
+      };
+      showToast(
+        `Reconciled library • ${payload.marked_missing || 0} missing • ${payload.restored || 0} restored • ${payload.untracked || 0} untracked`
+      );
+      load();
+    } catch {
+      showToast("Library reconcile failed.");
+    } finally {
+      setReconciling(false);
+    }
+  };
+
   const saveMetadata = async (tags: string, category: string) => {
-    if (!editItem) return;
+    if (!editItem || editItem.source_type !== "history") return;
     await fetch(
       `${API}/history/${editItem.id}?tags=${encodeURIComponent(tags)}&category=${encodeURIComponent(category)}`,
       { method: "PATCH" }
@@ -323,8 +480,9 @@ export default function LibraryPage() {
               item={item}
               selected={selectedIds.has(item.id)}
               onSelect={() => toggleSelected(item.id)}
+              onPlay={() => void playItem(item)}
               onOpen={() => void openFolder(item)}
-              onDelete={() => void deleteItem(item.id)}
+              onDelete={() => void deleteItem(item)}
               onEdit={() => setEditItem(item)}
             />
           ))}
@@ -340,8 +498,9 @@ export default function LibraryPage() {
             item={item}
             selected={selectedIds.has(item.id)}
             onSelect={() => toggleSelected(item.id)}
+            onPlay={() => void playItem(item)}
             onOpen={() => void openFolder(item)}
-            onDelete={() => void deleteItem(item.id)}
+            onDelete={() => void deleteItem(item)}
             onEdit={() => setEditItem(item)}
           />
         ))}
@@ -386,7 +545,7 @@ export default function LibraryPage() {
         <div>
           <div style={{ fontSize: 17, fontWeight: 700 }}>Library</div>
           <div style={{ marginTop: 2, fontSize: 12, color: "var(--text-muted)" }}>
-            {loading ? "Refreshing downloads..." : `${enhancedItems.length} items • ${totalSizeLabel}`}
+            {loading ? "Refreshing library..." : `${enhancedItems.length} items • ${totalSizeLabel}${brokenCount ? ` • ${brokenCount} broken` : ""}${offlineMangaCount ? ` • ${offlineMangaCount} offline manga` : ""}`}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -397,6 +556,9 @@ export default function LibraryPage() {
           ) : null}
           <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => void organizeLibrary()} disabled={organizing}>
             <IconFolder size={13} /> {organizing ? "Organizing..." : "Organize"}
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => void reconcileLibrary()} disabled={reconciling}>
+            <IconCheck size={13} /> {reconciling ? "Reconciling..." : "Reconcile"}
           </button>
           <button className="btn-icon" title="Refresh" onClick={load}>
             <IconRefresh size={15} />
@@ -441,12 +603,18 @@ export default function LibraryPage() {
           ))}
         </div>
 
-        {!loading && filteredItems.length === 0 ? (
-          <div className="empty-state">
-            <IconFolder size={40} />
-            <p>No library items found</p>
-            <span>{search ? "Try another search." : "Downloads will appear here once they finish."}</span>
-          </div>
+        {!loading && pageError ? (
+          <PageErrorState
+            title="Library is unavailable right now"
+            subtitle={pageError}
+            onRetry={load}
+          />
+        ) : !loading && filteredItems.length === 0 ? (
+          <PageEmptyState
+            title={search ? "No library items matched that search" : "No library items found yet"}
+            subtitle={search ? "Try another title, tag, or category." : "Downloads and offline content will appear here once they finish."}
+            icon={<IconFolder size={40} />}
+          />
         ) : null}
 
         {activeCategory === "all"
@@ -477,6 +645,21 @@ export default function LibraryPage() {
 
       {editItem ? (
         <EditLibraryModal item={editItem} onClose={() => setEditItem(null)} onSave={saveMetadata} />
+      ) : null}
+      {confirmState ? (
+        <ConfirmActionModal
+          title={confirmState.title}
+          message={confirmState.message}
+          confirmLabel={confirmState.confirmLabel}
+          onClose={() => setConfirmState(null)}
+          onConfirm={async () => {
+            try {
+              await confirmState.action();
+            } finally {
+              setConfirmState(null);
+            }
+          }}
+        />
       ) : null}
     </div>
   );
@@ -527,6 +710,7 @@ function LibraryCard({
   item,
   selected,
   onSelect,
+  onPlay,
   onOpen,
   onDelete,
   onEdit,
@@ -534,11 +718,14 @@ function LibraryCard({
   item: LibItem & { inferredCategory?: CategoryId };
   selected: boolean;
   onSelect: () => void;
+  onPlay: () => void;
   onOpen: () => void;
   onDelete: () => void;
   onEdit: () => void;
 }) {
   const inferred = item.inferredCategory || inferCategory(item);
+  const canEdit = item.source_type === "history";
+  const canPlay = item.source_type === "offline-manga" || (item.local_available && !item.broken && !!item.file_path);
   return (
     <div
       className="card"
@@ -555,6 +742,19 @@ function LibraryCard({
         <div style={{ position: "absolute", top: 10, left: 10 }}>
           <CategoryPill id={inferred} />
         </div>
+        {item.broken ? (
+          <div style={{ position: "absolute", left: 10, bottom: 10, borderRadius: 999, background: "rgba(160, 32, 32, 0.88)", color: "white", padding: "4px 9px", fontSize: 11, fontWeight: 700 }}>
+            Broken
+          </div>
+        ) : item.source_type === "untracked" ? (
+          <div style={{ position: "absolute", left: 10, bottom: 10, borderRadius: 999, background: "rgba(63, 99, 191, 0.88)", color: "white", padding: "4px 9px", fontSize: 11, fontWeight: 700 }}>
+            Untracked
+          </div>
+        ) : item.source_type === "offline-manga" ? (
+          <div style={{ position: "absolute", left: 10, bottom: 10, borderRadius: 999, background: "rgba(56, 122, 82, 0.9)", color: "white", padding: "4px 9px", fontSize: 11, fontWeight: 700 }}>
+            Offline
+          </div>
+        ) : null}
         {selected ? (
           <div style={{ position: "absolute", right: 10, top: 10, width: 28, height: 28, borderRadius: 999, background: "rgba(0,0,0,0.65)", display: "flex", alignItems: "center", justifyContent: "center" }}>
             <IconCheck size={15} color="white" />
@@ -565,14 +765,18 @@ function LibraryCard({
         <div style={{ fontSize: 13, fontWeight: 700, lineHeight: 1.4, minHeight: 36 }}>{item.title}</div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>
           {item.file_size_label ? <span>{item.file_size_label}</span> : null}
+          {item.storage_label ? <span>{item.storage_label}</span> : null}
           {item.duration ? <span>{item.duration}</span> : null}
           {item.date ? <span>{item.date}</span> : null}
         </div>
         <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
-          <button className="btn-icon" onClick={(event) => { event.stopPropagation(); onOpen(); }} title="Open folder">
+          <button className="btn-icon" disabled={!canPlay} onClick={(event) => { event.stopPropagation(); if (canPlay) onPlay(); }} title={item.source_type === "offline-manga" ? "Open for offline reading" : "Open local file"} style={{ opacity: canPlay ? 1 : 0.4 }}>
+            <IconPlay size={14} />
+          </button>
+          <button className="btn-icon" onClick={(event) => { event.stopPropagation(); onOpen(); }} title={item.source_type === "offline-manga" ? "Open Manga page" : "Open folder"}>
             <IconFolder size={14} />
           </button>
-          <button className="btn-icon" onClick={(event) => { event.stopPropagation(); onEdit(); }} title="Edit library info">
+          <button className="btn-icon" disabled={!canEdit} onClick={(event) => { event.stopPropagation(); if (canEdit) onEdit(); }} title={canEdit ? "Edit library info" : "Only tracked downloads can be edited"} style={{ opacity: canEdit ? 1 : 0.4 }}>
             <IconFilter size={14} />
           </button>
           <button className="btn-icon" onClick={(event) => { event.stopPropagation(); onDelete(); }} title="Delete" style={{ color: "var(--text-danger)" }}>
@@ -588,6 +792,7 @@ function LibraryRow({
   item,
   selected,
   onSelect,
+  onPlay,
   onOpen,
   onDelete,
   onEdit,
@@ -595,11 +800,14 @@ function LibraryRow({
   item: LibItem & { inferredCategory?: CategoryId };
   selected: boolean;
   onSelect: () => void;
+  onPlay: () => void;
   onOpen: () => void;
   onDelete: () => void;
   onEdit: () => void;
 }) {
   const inferred = item.inferredCategory || inferCategory(item);
+  const canEdit = item.source_type === "history";
+  const canPlay = item.source_type === "offline-manga" || (item.local_available && !item.broken && !!item.file_path);
   const tags = item.tags
     .split(",")
     .map((value) => value.trim())
@@ -630,10 +838,14 @@ function LibraryRow({
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <div style={{ fontSize: 14, fontWeight: 700, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</div>
           <CategoryPill id={inferred} />
+          {item.broken ? <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-danger)" }}>Broken</span> : null}
+          {item.source_type === "untracked" ? <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-accent)" }}>Untracked</span> : null}
+          {item.source_type === "offline-manga" ? <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-success)" }}>Offline</span> : null}
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>{typeIcon(item.type)} {item.type}</span>
           {item.file_size_label ? <span>{item.file_size_label}</span> : null}
+          {item.storage_label ? <span>{item.storage_label}</span> : null}
           {item.duration ? <span>{item.duration}</span> : null}
           {item.channel ? <span>{item.channel}</span> : null}
           {item.date ? <span>{item.date}</span> : null}
@@ -645,10 +857,13 @@ function LibraryRow({
         </div>
       </div>
       <div style={{ display: "flex", gap: 6 }} onClick={(event) => event.stopPropagation()}>
-        <button className="btn-icon" onClick={onOpen} title="Open folder">
+        <button className="btn-icon" disabled={!canPlay} onClick={canPlay ? onPlay : undefined} title={item.source_type === "offline-manga" ? "Open for offline reading" : "Open local file"} style={{ opacity: canPlay ? 1 : 0.4 }}>
+          <IconPlay size={14} />
+        </button>
+        <button className="btn-icon" onClick={onOpen} title={item.source_type === "offline-manga" ? "Open Manga page" : "Open folder"}>
           <IconFolder size={14} />
         </button>
-        <button className="btn-icon" onClick={onEdit} title="Edit">
+        <button className="btn-icon" disabled={!canEdit} onClick={canEdit ? onEdit : undefined} title={canEdit ? "Edit" : "Only tracked downloads can be edited"} style={{ opacity: canEdit ? 1 : 0.4 }}>
           <IconFilter size={14} />
         </button>
         <button className="btn-icon" onClick={onDelete} title="Delete" style={{ color: "var(--text-danger)" }}>
@@ -707,6 +922,57 @@ function EditLibraryModal({
             }}
           >
             {saving ? "Saving..." : "Save"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmActionModal({
+  title,
+  message,
+  confirmLabel,
+  onClose,
+  onConfirm,
+}: {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.74)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 320 }}
+      onClick={onClose}
+    >
+      <div className="card" style={{ width: "100%", maxWidth: 460, padding: 20, border: "1px solid var(--border)" }} onClick={(event) => event.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontSize: 17, fontWeight: 700 }}>{title}</div>
+          <button className="btn-icon" onClick={onClose}>
+            <IconX size={15} />
+          </button>
+        </div>
+        <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.6 }}>{message}</div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 18 }}>
+          <button className="btn btn-ghost" onClick={onClose} disabled={submitting}>Cancel</button>
+          <button
+            className="btn btn-primary"
+            style={{ background: "var(--text-danger)", borderColor: "var(--text-danger)" }}
+            disabled={submitting}
+            onClick={async () => {
+              setSubmitting(true);
+              try {
+                await onConfirm();
+              } finally {
+                setSubmitting(false);
+              }
+            }}
+          >
+            {submitting ? "Deleting..." : confirmLabel}
           </button>
         </div>
       </div>

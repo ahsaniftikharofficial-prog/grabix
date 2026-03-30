@@ -1,5 +1,6 @@
 import { useTheme } from "../context/ThemeContext";
 import { IconBrowse, IconConvert, IconDownload, IconLibrary, IconSettings, IconSun, IconMoon, IconHeart } from "./Icons";
+import type { RuntimeHealthPayload, RuntimeState } from "../lib/api";
 
 const IconFilm = ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -34,7 +35,8 @@ interface Props {
   page: Page;
   setPage: (p: Page) => void;
   activeDownloads: number;
-  backendOk: boolean;
+  runtimeState: RuntimeState;
+  runtimeHealth: RuntimeHealthPayload | null;
 }
 
 const GROUPS = [
@@ -66,8 +68,20 @@ const GROUPS = [
   },
 ];
 
-export default function Sidebar({ page, setPage, activeDownloads, backendOk }: Props) {
+export default function Sidebar({ page, setPage, activeDownloads, runtimeState, runtimeHealth }: Props) {
   const { theme, toggle } = useTheme();
+  const degradedCount = runtimeHealth?.summary.degraded_services.length ?? 0;
+  const backendOk = runtimeState !== "offline" && runtimeState !== "starting";
+  const statusText =
+    runtimeState === "starting"
+      ? "Starting local services"
+      : runtimeState === "recovering"
+        ? "Recovering local services"
+        : runtimeState === "degraded"
+          ? `${degradedCount} service${degradedCount === 1 ? "" : "s"} degraded`
+          : runtimeState === "ready"
+            ? "All core services ready"
+            : "Backend offline";
 
   return (
     <aside style={{ width: "var(--sidebar-w)", background: "var(--bg-sidebar)", borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", flexShrink: 0, height: "100vh" }}>
@@ -105,7 +119,9 @@ export default function Sidebar({ page, setPage, activeDownloads, backendOk }: P
       <div style={{ padding: "10px 8px", borderTop: "1px solid var(--border)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", marginBottom: 4 }}>
           <span className={`status-dot ${backendOk ? "online" : "offline"}`} />
-          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{backendOk ? "Backend connected" : "Backend offline"}</span>
+          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+            {statusText}
+          </span>
         </div>
         <div className="nav-item" onClick={toggle} style={{ gap: 10 }}>
           {theme === "dark" ? <IconSun size={16} /> : <IconMoon size={16} />}

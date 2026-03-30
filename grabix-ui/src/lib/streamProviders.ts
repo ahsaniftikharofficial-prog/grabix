@@ -1,5 +1,6 @@
 import { BACKEND_API } from "./api";
 export { BACKEND_API } from "./api";
+import { getCachedJson } from "./cache";
 
 export type StreamKind = "embed" | "direct" | "hls" | "local";
 
@@ -129,6 +130,50 @@ export interface StreamVariant {
   bandwidth?: string;
 }
 
+const MOVIEBOX_CACHE_VERSION = "v2";
+
+export interface ProviderSourceGroup {
+  id: string;
+  label: string;
+  sources: StreamSource[];
+}
+
+interface ProviderResolutionAttempt {
+  provider: string;
+  operation: string;
+  success: boolean;
+  message: string;
+  fallback_used: boolean;
+  retryable: boolean;
+}
+
+interface ProviderResolutionError {
+  code: string;
+  message: string;
+  retryable: boolean;
+  provider: string;
+  fallback_used: boolean;
+  correlation_id: string;
+  user_action: string;
+}
+
+interface ProviderResolutionResponse {
+  correlation_id: string;
+  primary_provider: string;
+  fallback_used: boolean;
+  sources: StreamSource[];
+  attempts: ProviderResolutionAttempt[];
+  error?: ProviderResolutionError | null;
+}
+
+export interface AnimePlaybackCandidate {
+  provider: string;
+  animeId: string;
+  episodeId?: string;
+  title?: string;
+  altTitle?: string;
+}
+
 const EMBED_PROVIDERS: ProviderDef[] = [
   {
     id: "vidsrc-mov",
@@ -189,6 +234,65 @@ const EMBED_PROVIDERS: ProviderDef[] = [
 
 function makeSource(source: StreamSource): StreamSource {
   return source;
+}
+
+function sourceDedupKey(source: StreamSource): string {
+  return [
+    source.provider.trim().toLowerCase(),
+    (source.externalUrl || source.url).trim().toLowerCase(),
+    (source.language || "").trim().toLowerCase(),
+  ].join("|");
+}
+
+export function mergeProviderSourceGroups(groups: ProviderSourceGroup[]): StreamSource[] {
+  const merged: StreamSource[] = [];
+  const seen = new Set<string>();
+
+  for (const group of groups) {
+    for (const source of group.sources) {
+      const key = sourceDedupKey(source);
+      if (!source.url || seen.has(key)) continue;
+      seen.add(key);
+      merged.push({
+        ...source,
+        description: source.description || `${group.label} source`,
+      });
+    }
+  }
+
+  return merged;
+}
+
+async function readProviderResolutionError(response: Response): Promise<string> {
+  try {
+    const payload = (await response.json()) as { error?: ProviderResolutionError; detail?: unknown };
+    const message =
+      payload.error?.message ||
+      (typeof payload.detail === "string" ? payload.detail : "") ||
+      `Request failed with ${response.status}`;
+    const action = payload.error?.user_action ? ` ${payload.error.user_action}` : "";
+    return `${message}${action}`.trim();
+  } catch {
+    return `Request failed with ${response.status}`;
+  }
+}
+
+async function resolveProviderPlayback(
+  path: string,
+  payload: Record<string, unknown>
+): Promise<StreamSource[]> {
+  const response = await fetch(`${BACKEND_API}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(await readProviderResolutionError(response));
+  }
+
+  const data = (await response.json()) as ProviderResolutionResponse;
+  return data.sources ?? [];
 }
 
 function mapMovieBoxSource(
@@ -401,6 +505,78 @@ export function getAnimeEpisodeSources(
   return sources;
 }
 
+export async function resolveMoviePlaybackSources(options: {
+  tmdbId: number;
+  imdbId?: string;
+  title: string;
+  altTitles?: string[];
+  year?: number;
+}): Promise<StreamSource[]> {
+  return await resolveProviderPlayback("/providers/resolve/movie", {
+    tmdb_id: options.tmdbId,
+    imdb_id: options.imdbId || null,
+    title: options.title,
+    alt_titles: options.altTitles ?? [],
+    year: options.year ?? null,
+  });
+}
+
+export async function resolveTvPlaybackSources(options: {
+  tmdbId: number;
+  imdbId?: string;
+  title: string;
+  altTitles?: string[];
+  year?: number;
+  season: number;
+  episode: number;
+}): Promise<StreamSource[]> {
+  return await resolveProviderPlayback("/providers/resolve/tv", {
+    tmdb_id: options.tmdbId,
+    imdb_id: options.imdbId || null,
+    title: options.title,
+    alt_titles: options.altTitles ?? [],
+    year: options.year ?? null,
+    season: options.season,
+    episode: options.episode,
+  });
+}
+
+export async function resolveAnimePlaybackSources(options: {
+  title: string;
+  altTitle?: string;
+  altTitles?: string[];
+  tmdbId?: number | null;
+  fallbackSeason?: number;
+  fallbackEpisode?: number;
+  episodeNumber: number;
+  audio: string;
+  server: string;
+  isMovie?: boolean;
+  purpose?: "play" | "download";
+  candidates?: AnimePlaybackCandidate[];
+}): Promise<StreamSource[]> {
+  return await resolveProviderPlayback("/providers/resolve/anime", {
+    title: options.title,
+    alt_title: options.altTitle || "",
+    alt_titles: options.altTitles ?? [],
+    tmdb_id: options.tmdbId ?? null,
+    fallback_season: options.fallbackSeason ?? 1,
+    fallback_episode: options.fallbackEpisode ?? options.episodeNumber,
+    episode_number: options.episodeNumber,
+    audio: options.audio,
+    server: options.server,
+    is_movie: Boolean(options.isMovie),
+    purpose: options.purpose ?? "play",
+    candidates: (options.candidates ?? []).map((candidate) => ({
+      provider: candidate.provider,
+      anime_id: candidate.animeId,
+      episode_id: candidate.episodeId,
+      title: candidate.title,
+      alt_title: candidate.altTitle,
+    })),
+  });
+}
+
 export function getArchiveMovieSources(identifier: string): StreamSource[] {
   return [
     makeSource({
@@ -418,11 +594,12 @@ export function getArchiveMovieSources(identifier: string): StreamSource[] {
 }
 
 export async function fetchMovieBoxDiscover(): Promise<MovieBoxDiscoverResponse> {
-  const response = await fetch(`${BACKEND_API}/moviebox/discover`);
-  if (!response.ok) {
-    throw new Error(`Movie Box discover failed with ${response.status}`);
-  }
-  return (await response.json()) as MovieBoxDiscoverResponse;
+  return await getCachedJson<MovieBoxDiscoverResponse>({
+    key: `${MOVIEBOX_CACHE_VERSION}:moviebox:discover`,
+    url: `${BACKEND_API}/moviebox/discover`,
+    ttlMs: 180_000,
+    scope: "local",
+  });
 }
 
 export async function searchMovieBox(options: {
@@ -446,11 +623,12 @@ export async function searchMovieBox(options: {
     sort_by: options.sortBy ?? "search",
   });
 
-  const response = await fetch(`${BACKEND_API}/moviebox/search-items?${params.toString()}`);
-  if (!response.ok) {
-    throw new Error(`Movie Box search failed with ${response.status}`);
-  }
-  return (await response.json()) as MovieBoxSearchResponse;
+  return await getCachedJson<MovieBoxSearchResponse>({
+    key: `${MOVIEBOX_CACHE_VERSION}:moviebox:search:${params.toString()}`,
+    url: `${BACKEND_API}/moviebox/search-items?${params.toString()}`,
+    ttlMs: 120_000,
+    scope: "local",
+  });
 }
 
 export async function fetchMovieBoxDetails(options: {
@@ -467,12 +645,12 @@ export async function fetchMovieBoxDetails(options: {
   if (options.title) params.set("title", options.title);
   if (options.year) params.set("year", String(options.year));
 
-  const response = await fetch(`${BACKEND_API}/moviebox/details?${params.toString()}`);
-  if (!response.ok) {
-    throw new Error(`Movie Box details failed with ${response.status}`);
-  }
-
-  const data = (await response.json()) as MovieBoxDetailsResponse;
+  const data = await getCachedJson<MovieBoxDetailsResponse>({
+    key: `${MOVIEBOX_CACHE_VERSION}:moviebox:details:${params.toString()}`,
+    url: `${BACKEND_API}/moviebox/details?${params.toString()}`,
+    ttlMs: 300_000,
+    scope: "local",
+  });
   return data.item;
 }
 
@@ -496,12 +674,12 @@ export async function fetchMovieBoxSources(options: {
     params.set("episode", String(options.episode ?? 1));
   }
 
-  const response = await fetch(`${BACKEND_API}/moviebox/sources?${params.toString()}`);
-  if (!response.ok) {
-    throw new Error(`Movie Box request failed with ${response.status}`);
-  }
-
-  const data = (await response.json()) as MovieBoxSourcesResponse;
+  const data = await getCachedJson<MovieBoxSourcesResponse>({
+    key: `${MOVIEBOX_CACHE_VERSION}:moviebox:sources:${params.toString()}`,
+    url: `${BACKEND_API}/moviebox/sources?${params.toString()}`,
+    ttlMs: 90_000,
+    scope: "session",
+  });
   return (data.sources ?? []).map((source, index) => mapMovieBoxSource(options.mediaType, source, index));
 }
 
@@ -510,10 +688,11 @@ export async function fetchStreamVariants(url: string, headers?: Record<string, 
   if (headers && Object.keys(headers).length > 0) {
     params.set("headers_json", JSON.stringify(headers));
   }
-  const response = await fetch(`${BACKEND_API}/stream/variants?${params.toString()}`);
-  if (!response.ok) {
-    throw new Error(`Stream variant detection failed with ${response.status}`);
-  }
-  const data = (await response.json()) as { variants?: StreamVariant[] };
+  const data = await getCachedJson<{ variants?: StreamVariant[] }>({
+    key: `stream:variants:${params.toString()}`,
+    url: `${BACKEND_API}/stream/variants?${params.toString()}`,
+    ttlMs: 120_000,
+    scope: "session",
+  });
   return data.variants ?? [];
 }

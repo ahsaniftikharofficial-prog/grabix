@@ -79,3 +79,43 @@ export async function getOfflineChapterPages(mangaKey: string, chapterId: string
   return record?.pages || [];
 }
 
+export async function listOfflineChapterPageKeys(): Promise<string[]> {
+  const records = (await runTransaction<OfflineChapterPagesRecord[]>(PAGE_STORE, "readonly", (store) => store.getAll())) || [];
+  return records
+    .filter((record) => Array.isArray(record.pages) && record.pages.length > 0)
+    .map((record) => record.id);
+}
+
+export async function listOfflineMangaRecords(): Promise<OfflineMangaRecord[]> {
+  return (await runTransaction(MANGA_STORE, "readonly", (store) => store.getAll())) || [];
+}
+
+export async function deleteOfflineMangaRecord(mangaKey: string): Promise<void> {
+  const db = await openDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction([MANGA_STORE, PAGE_STORE], "readwrite");
+    const mangaStore = tx.objectStore(MANGA_STORE);
+    const pageStore = tx.objectStore(PAGE_STORE);
+    const getAllRequest = pageStore.getAll();
+
+    getAllRequest.onerror = () => reject(getAllRequest.error || new Error("Could not read offline manga pages."));
+    getAllRequest.onsuccess = () => {
+      const pageRecords = (getAllRequest.result || []) as OfflineChapterPagesRecord[];
+      mangaStore.delete(mangaKey);
+      for (const record of pageRecords) {
+        if (record.mangaKey === mangaKey) {
+          pageStore.delete(record.id);
+        }
+      }
+    };
+
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error || new Error("Could not delete offline manga record."));
+    };
+  });
+}

@@ -1,0 +1,3 @@
+[console_scripts]
+tbust = throttlebuster.cli:main 
+throttlebuster = throttlebuster.cli:main
