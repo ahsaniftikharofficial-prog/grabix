@@ -18,6 +18,14 @@ DEFAULT_AUDIO_PRIORITY = ["en", "original", "hi"]
 DEFAULT_SUBTITLE_PRIORITY = ["en", "hi"]
 HTTP_TIMEOUT = 20.0
 HEALTH_TIMEOUT = 0.9
+JIKAN_API_BASE = "https://api.jikan.moe/v4"
+TMDB_API_BASE = "https://api.themoviedb.org/3"
+TMDB_BEARER_TOKEN = (
+    "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIs"
+    "Im5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzdWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLC"
+    "JzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7"
+    "953kJZy7mw"
+)
 _CACHE: dict[str, tuple[float, Any]] = {}
 
 
@@ -52,6 +60,10 @@ def get_consumet_api_base() -> str:
             "Consumet is not configured. Set CONSUMET_API_BASE to your self-hosted instance."
         )
     return base
+
+
+def _consumet_configured() -> bool:
+    return bool(os.getenv(CONSUMET_API_BASE_ENV, "").strip())
 
 
 def _http_error(detail: str, status_code: int = 502) -> HTTPException:
@@ -121,6 +133,37 @@ async def _fetch_text_url(
         raise _http_error(detail, response.status_code if response.status_code in {401, 403, 404, 429, 500, 503} else 502)
 
     return _cache_set(key, response.text, ttl_seconds)
+
+
+async def _fetch_tmdb_json(path: str, *, params: dict[str, Any] | None = None, ttl_seconds: int = 600) -> Any:
+    filtered = {key: value for key, value in (params or {}).items() if value is not None and value != ""}
+    key = _cache_key("tmdb-json", path, filtered)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+
+    headers = {
+        "User-Agent": "GRABIX/1.0",
+        "Accept": "application/json, text/plain;q=0.9, */*;q=0.8",
+        "Authorization": f"Bearer {TMDB_BEARER_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True, headers=headers) as client:
+            response = await client.get(f"{TMDB_API_BASE}{path}", params=filtered)
+    except Exception as exc:
+        raise _http_error(f"TMDB request failed: {exc}") from exc
+
+    if response.status_code >= 400:
+        detail = response.text.strip() or f"TMDB request failed with {response.status_code}"
+        raise _http_error(detail, response.status_code if response.status_code in {401, 403, 404, 429, 500, 503} else 502)
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise _http_error(f"TMDB returned invalid JSON from {path}: {exc}") from exc
+
+    return _cache_set(key, data, ttl_seconds)
 
 
 async def _fetch_consumet_json(
@@ -214,6 +257,181 @@ def _extract_title(item: dict[str, Any]) -> str:
         item.get("englishTitle"),
         item.get("romanjiTitle"),
     )
+
+
+def _normalize_jikan_anime_item(item: dict[str, Any], provider: str) -> dict[str, Any]:
+    images = item.get("images") or {}
+    jpg = images.get("jpg") if isinstance(images, dict) else {}
+    trailer = item.get("trailer") or {}
+    return {
+        "id": str(item.get("mal_id") or ""),
+        "provider": provider,
+        "type": "anime",
+        "title": _first_non_empty(item.get("title_english"), item.get("title")),
+        "alt_title": _first_non_empty(item.get("title"), item.get("title_japanese")),
+        "image": _first_non_empty(
+            (jpg.get("large_image_url") if isinstance(jpg, dict) else ""),
+            (jpg.get("image_url") if isinstance(jpg, dict) else ""),
+        ),
+        "description": _first_non_empty(item.get("synopsis"), item.get("background")),
+        "year": _coerce_int(item.get("year") or item.get("aired", {}).get("prop", {}).get("from", {}).get("year")),
+        "rating": float(item.get("score")) if item.get("score") is not None else None,
+        "status": _first_non_empty(item.get("status")),
+        "genres": [
+            genre.get("name")
+            for genre in item.get("genres") or []
+            if isinstance(genre, dict) and genre.get("name")
+        ],
+        "languages": ["original"],
+        "url": _first_non_empty(item.get("url")),
+        "mal_id": item.get("mal_id"),
+        "episodes_count": _coerce_int(item.get("episodes")),
+        "trailer_url": _first_non_empty(trailer.get("embed_url")) if isinstance(trailer, dict) else "",
+        "raw": item,
+    }
+
+
+def _normalize_jikan_episode_item(
+    item: dict[str, Any],
+    *,
+    provider: str,
+    anime_id: str,
+    fallback_number: int,
+) -> dict[str, Any]:
+    number = _coerce_int(item.get("mal_id")) or _coerce_int(item.get("episode_id")) or fallback_number
+    return {
+        "id": f"{provider}:{anime_id}:{number}",
+        "provider": provider,
+        "number": number,
+        "title": _first_non_empty(item.get("title"), item.get("title_japanese")) or f"Episode {number}",
+        "is_filler": False,
+        "languages": ["original"],
+        "raw": item,
+    }
+
+
+async def _search_jikan_anime(query: str, page: int = 1, provider: str = "jikan") -> dict[str, Any]:
+    payload = await _fetch_json_url(
+        f"{JIKAN_API_BASE}/anime",
+        params={"q": query, "page": page, "limit": 20, "sfw": "true"},
+        ttl_seconds=600,
+    )
+    items = [
+        _normalize_jikan_anime_item(item, provider)
+        for item in payload.get("data") or []
+        if isinstance(item, dict)
+    ]
+    return {"domain": "anime", "provider": provider, "query": query, "page": page, "items": items}
+
+
+async def _fetch_jikan_anime_full(media_id: str, provider: str) -> dict[str, Any]:
+    payload = await _fetch_json_url(
+        f"{JIKAN_API_BASE}/anime/{quote(media_id)}/full",
+        ttl_seconds=1800,
+    )
+    item = payload.get("data") if isinstance(payload, dict) else {}
+    if not isinstance(item, dict):
+        raise _http_error("Anime details were not found.", 404)
+    return {"domain": "anime", "provider": provider, "item": _normalize_jikan_anime_item(item, provider), "raw": item}
+
+
+async def _fetch_jikan_anime_episodes(media_id: str, provider: str) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    page = 1
+    while page <= 6:
+        payload = await _fetch_json_url(
+            f"{JIKAN_API_BASE}/anime/{quote(media_id)}/episodes",
+            params={"page": page},
+            ttl_seconds=1800,
+        )
+        batch = payload.get("data") or []
+        for index, item in enumerate(batch):
+            if isinstance(item, dict):
+                items.append(
+                    _normalize_jikan_episode_item(
+                        item,
+                        provider=provider,
+                        anime_id=media_id,
+                        fallback_number=len(items) + index + 1,
+                    )
+                )
+        pagination = payload.get("pagination") or {}
+        if not isinstance(pagination, dict) or not pagination.get("has_next_page"):
+            break
+        page += 1
+    return {"provider": provider, "id": media_id, "items": items}
+
+
+async def _fetch_tmdb_meta_search(query: str, media_type: str = "movie") -> dict[str, Any]:
+    path = "movie" if media_type == "movie" else "tv"
+    payload = await _fetch_tmdb_json(
+        f"/search/{path}",
+        params={"query": query, "page": 1},
+        ttl_seconds=600,
+    )
+    results: list[dict[str, Any]] = []
+    for item in payload.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        title = _first_non_empty(item.get("title"), item.get("name"))
+        poster = _first_non_empty(item.get("poster_path"))
+        backdrop = _first_non_empty(item.get("backdrop_path"))
+        image = f"https://image.tmdb.org/t/p/w500{poster}" if poster else (f"https://image.tmdb.org/t/p/w780{backdrop}" if backdrop else "")
+        release = _first_non_empty(item.get("release_date"), item.get("first_air_date"))
+        results.append(
+            {
+                "id": str(item.get("id") or ""),
+                "provider": "tmdb",
+                "type": media_type,
+                "title": title,
+                "alt_title": "",
+                "image": image,
+                "description": _first_non_empty(item.get("overview")),
+                "year": _coerce_int(release[:4]) if len(release) >= 4 else None,
+                "rating": float(item.get("vote_average")) if item.get("vote_average") is not None else None,
+                "status": "",
+                "genres": [],
+                "languages": [],
+                "url": "",
+                "raw": item,
+            }
+        )
+    return {"query": query, "type": media_type, "items": results}
+
+
+async def _fetch_tmdb_meta_info(item_id: str, media_type: str = "movie") -> dict[str, Any]:
+    path = "movie" if media_type == "movie" else "tv"
+    payload = await _fetch_tmdb_json(
+        f"/{path}/{quote(item_id)}",
+        ttl_seconds=1800,
+    )
+    if not isinstance(payload, dict):
+        raise _http_error("TMDB details were not found.", 404)
+    title = _first_non_empty(payload.get("title"), payload.get("name"))
+    poster = _first_non_empty(payload.get("poster_path"))
+    backdrop = _first_non_empty(payload.get("backdrop_path"))
+    image = f"https://image.tmdb.org/t/p/w500{poster}" if poster else (f"https://image.tmdb.org/t/p/w780{backdrop}" if backdrop else "")
+    item = {
+        "id": str(payload.get("id") or item_id),
+        "provider": "tmdb",
+        "type": media_type,
+        "title": title,
+        "alt_title": "",
+        "image": image,
+        "description": _first_non_empty(payload.get("overview")),
+        "year": _coerce_int(_first_non_empty(payload.get("release_date"), payload.get("first_air_date"))[:4]),
+        "rating": float(payload.get("vote_average")) if payload.get("vote_average") is not None else None,
+        "status": _first_non_empty(payload.get("status")),
+        "genres": [
+            genre.get("name")
+            for genre in payload.get("genres") or []
+            if isinstance(genre, dict) and genre.get("name")
+        ],
+        "languages": [],
+        "url": "",
+        "raw": payload,
+    }
+    return {"id": item_id, "type": media_type, "item": item, "raw": payload}
 
 
 def _extract_alt_title(item: dict[str, Any]) -> str:
@@ -759,13 +977,13 @@ def normalize_watch_payload(
 
 
 async def get_health_status() -> dict[str, Any]:
-    configured = bool(os.getenv(CONSUMET_API_BASE_ENV, "").strip())
+    configured = _consumet_configured()
     if not configured:
         return {
             "configured": False,
-            "healthy": False,
+            "healthy": True,
             "api_base": "",
-            "message": f"Set {CONSUMET_API_BASE_ENV} to your self-hosted Consumet instance.",
+            "message": "Anime providers are handled inside the Python backend. Built-in fallbacks are ready.",
             "default_audio_priority": DEFAULT_AUDIO_PRIORITY,
             "default_subtitle_priority": DEFAULT_SUBTITLE_PRIORITY,
         }
@@ -954,8 +1172,13 @@ async def search_domain(
             pass
 
     if domain == "anime":
-        path = f"/anime/{provider}/{quote(query)}"
-        payload = await _fetch_consumet_json(path, params={"page": page}, ttl_seconds=600)
+        if not _consumet_configured():
+            return await _search_jikan_anime(query, page, provider)
+        try:
+            path = f"/anime/{provider}/{quote(query)}"
+            payload = await _fetch_consumet_json(path, params={"page": page}, ttl_seconds=600)
+        except (HTTPException, ConsumetConfigError):
+            return await _search_jikan_anime(query, page, provider)
     elif domain == "manga":
         path = f"/manga/{provider}/{quote(query)}"
         payload = await _fetch_consumet_json(path, ttl_seconds=600)
@@ -979,12 +1202,30 @@ async def fetch_domain_info(domain: str, provider: str, media_id: str) -> dict[s
     if provider == "openlibrary" or domain in {"books", "comics", "light-novels"}:
         return await _fetch_openlibrary_info(domain, media_id)
 
+    if domain == "anime" and provider in {"zoro", "hianime", "gogoanime"} and not _consumet_configured():
+        detail = await _fetch_jikan_anime_full(media_id, provider)
+        episodes = await _fetch_jikan_anime_episodes(media_id, provider)
+        detail["item"]["episodes"] = episodes.get("items") or []
+        return detail
+
     if domain == "anime" and provider in {"zoro", "hianime"}:
-        path = f"/anime/{provider}/info"
-        payload = await _fetch_consumet_json(path, params={"id": media_id}, ttl_seconds=1800)
+        try:
+            path = f"/anime/{provider}/info"
+            payload = await _fetch_consumet_json(path, params={"id": media_id}, ttl_seconds=1800)
+        except (HTTPException, ConsumetConfigError):
+            detail = await _fetch_jikan_anime_full(media_id, provider)
+            episodes = await _fetch_jikan_anime_episodes(media_id, provider)
+            detail["item"]["episodes"] = episodes.get("items") or []
+            return detail
     elif domain == "anime":
-        path = f"/anime/{provider}/info/{quote(media_id)}"
-        payload = await _fetch_consumet_json(path, ttl_seconds=1800)
+        try:
+            path = f"/anime/{provider}/info/{quote(media_id)}"
+            payload = await _fetch_consumet_json(path, ttl_seconds=1800)
+        except (HTTPException, ConsumetConfigError):
+            detail = await _fetch_jikan_anime_full(media_id, provider)
+            episodes = await _fetch_jikan_anime_episodes(media_id, provider)
+            detail["item"]["episodes"] = episodes.get("items") or []
+            return detail
     elif domain == "manga":
         path = f"/manga/{provider}/info/{quote(media_id)}"
         payload = await _fetch_consumet_json(path, ttl_seconds=1800)
@@ -1019,12 +1260,17 @@ async def fetch_domain_info(domain: str, provider: str, media_id: str) -> dict[s
 
 
 async def fetch_anime_episodes(provider: str, media_id: str) -> dict[str, Any]:
-    detail = await fetch_domain_info("anime", provider, media_id)
-    return {
-        "provider": provider,
-        "id": media_id,
-        "items": detail["item"].get("episodes") or [],
-    }
+    if not _consumet_configured():
+        return await _fetch_jikan_anime_episodes(media_id, provider)
+    try:
+        detail = await fetch_domain_info("anime", provider, media_id)
+        return {
+            "provider": provider,
+            "id": media_id,
+            "items": detail["item"].get("episodes") or [],
+        }
+    except (HTTPException, ConsumetConfigError):
+        return await _fetch_jikan_anime_episodes(media_id, provider)
 
 
 async def fetch_manga_chapters(provider: str, media_id: str) -> dict[str, Any]:
@@ -1045,65 +1291,91 @@ async def fetch_anime_watch(
 ) -> dict[str, Any]:
     requested_audio = (audio or "hi").strip().lower()
 
-    if provider == "hianime":
-        categories = ["dub", "sub"] if requested_audio in {"hi", "en"} else ["sub", "dub"]
-        servers = [server] if server else ["vidstreaming", "vidcloud"]
-        last_error: HTTPException | None = None
-        for category in categories:
-            for server_name in servers:
-                try:
-                    payload = await _fetch_consumet_json(
-                        f"/anime/{provider}/watch/{quote(episode_id)}",
-                        params={"server": server_name, "category": category},
-                        ttl_seconds=180,
-                    )
-                    normalized = normalize_watch_payload(
-                        payload,
-                        provider=provider,
-                        requested_audio=requested_audio if category == "dub" else "original",
-                        server=server_name,
-                    )
-                    if normalized["sources"]:
-                        normalized["category"] = category
-                        return normalized
-                except HTTPException as exc:
-                    last_error = exc
-                    continue
-        if last_error:
-            raise last_error
-        raise _http_error("Hianime did not return any playable anime sources.")
+    if not _consumet_configured():
+        return {
+            "provider": provider,
+            "requested_audio": requested_audio,
+            "available_audio": [requested_audio],
+            "selected_server": server or "fallback",
+            "headers": {},
+            "download": "",
+            "sources": [],
+            "subtitles": [],
+            "raw": {"fallback_only": True},
+        }
 
-    if provider == "zoro":
-        categories = ["dub", "sub"] if requested_audio in {"hi", "en"} else ["sub", "dub"]
-        servers = [server] if server else ["hd-1", "hd-2", "streamsb", "streamtape"]
-        last_error: HTTPException | None = None
-        for category in categories:
-            for server_name in servers:
-                try:
-                    payload = await _fetch_consumet_json(
-                        f"/anime/{provider}/watch/{quote(episode_id)}",
-                        params={"server": server_name, "category": category},
-                        ttl_seconds=180,
-                    )
-                    normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio if category == "dub" else "original", server=server_name)
-                    if normalized["sources"]:
-                        normalized["category"] = category
-                        return normalized
-                except HTTPException as exc:
-                    last_error = exc
-                    continue
-        if last_error:
-            raise last_error
-        raise _http_error("Consumet did not return any playable anime sources.")
+    try:
+        if provider == "hianime":
+            categories = ["dub", "sub"] if requested_audio in {"hi", "en"} else ["sub", "dub"]
+            servers = [server] if server else ["vidstreaming", "vidcloud"]
+            last_error: HTTPException | None = None
+            for category in categories:
+                for server_name in servers:
+                    try:
+                        payload = await _fetch_consumet_json(
+                            f"/anime/{provider}/watch/{quote(episode_id)}",
+                            params={"server": server_name, "category": category},
+                            ttl_seconds=180,
+                        )
+                        normalized = normalize_watch_payload(
+                            payload,
+                            provider=provider,
+                            requested_audio=requested_audio if category == "dub" else "original",
+                            server=server_name,
+                        )
+                        if normalized["sources"]:
+                            normalized["category"] = category
+                            return normalized
+                    except HTTPException as exc:
+                        last_error = exc
+                        continue
+            if last_error:
+                raise last_error
+            raise _http_error("Hianime did not return any playable anime sources.")
 
-    payload = await _fetch_consumet_json(
-        f"/anime/{provider}/watch/{quote(episode_id)}",
-        ttl_seconds=180,
-    )
-    normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio, server=server)
-    if not normalized["sources"]:
-        raise _http_error("Consumet did not return any playable anime sources.")
-    return normalized
+        if provider == "zoro":
+            categories = ["dub", "sub"] if requested_audio in {"hi", "en"} else ["sub", "dub"]
+            servers = [server] if server else ["hd-1", "hd-2", "streamsb", "streamtape"]
+            last_error: HTTPException | None = None
+            for category in categories:
+                for server_name in servers:
+                    try:
+                        payload = await _fetch_consumet_json(
+                            f"/anime/{provider}/watch/{quote(episode_id)}",
+                            params={"server": server_name, "category": category},
+                            ttl_seconds=180,
+                        )
+                        normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio if category == "dub" else "original", server=server_name)
+                        if normalized["sources"]:
+                            normalized["category"] = category
+                            return normalized
+                    except HTTPException as exc:
+                        last_error = exc
+                        continue
+            if last_error:
+                raise last_error
+            raise _http_error("Consumet did not return any playable anime sources.")
+
+        payload = await _fetch_consumet_json(
+            f"/anime/{provider}/watch/{quote(episode_id)}",
+            ttl_seconds=180,
+        )
+        normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio, server=server)
+        if not normalized["sources"]:
+            raise _http_error("Consumet did not return any playable anime sources.")
+        return normalized
+    except (HTTPException, ConsumetConfigError):
+        return {
+            "provider": provider,
+            "requested_audio": requested_audio,
+            "available_audio": [requested_audio],
+            "selected_server": server or "fallback",
+            "headers": {},
+            "download": "",
+            "sources": [],
+            "subtitles": [],
+            "raw": {"fallback_only": True},
+        }
 
 
 async def fetch_manga_read(provider: str, chapter_id: str) -> dict[str, Any]:
@@ -1215,28 +1487,38 @@ async def fetch_news_article(article_id: str) -> dict[str, Any]:
 
 
 async def fetch_meta_search(query: str, media_type: str = "movie") -> dict[str, Any]:
-    payload = await _fetch_consumet_json(
-        f"/meta/tmdb/{quote(query)}",
-        params={"type": media_type} if media_type else None,
-        ttl_seconds=600,
-    )
-    items = [
-        _normalize_media_item(item, media_type, "tmdb")
-        for item in _payload_items(payload)
-        if isinstance(item, dict)
-    ]
-    return {"query": query, "type": media_type, "items": items}
+    if not _consumet_configured():
+        return await _fetch_tmdb_meta_search(query, media_type)
+    try:
+        payload = await _fetch_consumet_json(
+            f"/meta/tmdb/{quote(query)}",
+            params={"type": media_type} if media_type else None,
+            ttl_seconds=600,
+        )
+        items = [
+            _normalize_media_item(item, media_type, "tmdb")
+            for item in _payload_items(payload)
+            if isinstance(item, dict)
+        ]
+        return {"query": query, "type": media_type, "items": items}
+    except (HTTPException, ConsumetConfigError):
+        return await _fetch_tmdb_meta_search(query, media_type)
 
 
 async def fetch_meta_info(item_id: str, media_type: str = "movie") -> dict[str, Any]:
-    payload = await _fetch_consumet_json(
-        f"/meta/tmdb/info/{quote(item_id)}",
-        params={"type": media_type},
-        ttl_seconds=1800,
-    )
-    return {
-        "id": item_id,
-        "type": media_type,
-        "item": _normalize_media_item(payload if isinstance(payload, dict) else {}, media_type, "tmdb"),
-        "raw": payload,
-    }
+    if not _consumet_configured():
+        return await _fetch_tmdb_meta_info(item_id, media_type)
+    try:
+        payload = await _fetch_consumet_json(
+            f"/meta/tmdb/info/{quote(item_id)}",
+            params={"type": media_type},
+            ttl_seconds=1800,
+        )
+        return {
+            "id": item_id,
+            "type": media_type,
+            "item": _normalize_media_item(payload if isinstance(payload, dict) else {}, media_type, "tmdb"),
+            "raw": payload,
+        }
+    except (HTTPException, ConsumetConfigError):
+        return await _fetch_tmdb_meta_info(item_id, media_type)

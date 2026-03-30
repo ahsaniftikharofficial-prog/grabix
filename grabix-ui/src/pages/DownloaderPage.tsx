@@ -15,6 +15,7 @@ const API = BACKEND_API;
 type FileType = "video" | "audio" | "thumbnail" | "subtitle";
 type Status = "idle" | "loading" | "ok" | "error";
 type DownloadEngine = "standard" | "aria2";
+type ProgressMode = "determinate" | "activity" | "processing";
 
 interface VideoInfo {
   title: string;
@@ -49,6 +50,21 @@ interface QueueItem {
   downloadEngine: DownloadEngine;
   requestedEngine: DownloadEngine;
   engineNote: string;
+  bytesDownloaded: number;
+  bytesTotal: number;
+  progressMode: ProgressMode;
+  stageLabel: string;
+  variantLabel: string;
+}
+
+interface RuntimeDependency {
+  id: string;
+  label: string;
+  available: boolean;
+  path?: string;
+  description?: string;
+  install_supported?: boolean;
+  job?: { status?: string; message?: string };
 }
 
 function toQueueItem(serverItem: any, previous?: QueueItem): QueueItem {
@@ -56,10 +72,10 @@ function toQueueItem(serverItem: any, previous?: QueueItem): QueueItem {
   return {
     id: serverItem.id ?? previous?.id ?? uid(),
     serverId: serverItem.id ?? previous?.serverId ?? "",
-    url: previous?.url ?? "",
+    url: serverItem.url ?? previous?.url ?? "",
     title: serverItem.title || previous?.title || "Preparing download...",
     thumbnail: serverItem.thumbnail || previous?.thumbnail || "",
-    format: previous?.format || fileType,
+    format: serverItem.variant_label || previous?.format || fileType,
     fileType,
     status: serverItem.status ?? previous?.status ?? "queued",
     percent: serverItem.percent ?? previous?.percent ?? 0,
@@ -78,6 +94,11 @@ function toQueueItem(serverItem: any, previous?: QueueItem): QueueItem {
     downloadEngine: serverItem.download_engine === "aria2" ? "aria2" : previous?.downloadEngine ?? "standard",
     requestedEngine: serverItem.download_engine_requested === "aria2" ? "aria2" : previous?.requestedEngine ?? "standard",
     engineNote: serverItem.engine_note ?? previous?.engineNote ?? "",
+    bytesDownloaded: Number(serverItem.bytes_downloaded ?? previous?.bytesDownloaded ?? 0),
+    bytesTotal: Number(serverItem.bytes_total ?? previous?.bytesTotal ?? 0),
+    progressMode: (serverItem.progress_mode as ProgressMode) ?? previous?.progressMode ?? "activity",
+    stageLabel: serverItem.stage_label ?? previous?.stageLabel ?? "",
+    variantLabel: serverItem.variant_label ?? previous?.variantLabel ?? "",
   };
 }
 
@@ -109,6 +130,45 @@ function formatDisplaySpeed(speed: string): string {
   return clean;
 }
 
+function parseDisplayedBytes(value: string): number {
+  const clean = value.trim();
+  if (!clean) return 0;
+
+  const match = clean.match(/^([\d.]+)\s*(B|KB|MB|GB|TB|KIB|MIB|GIB|TIB)$/i);
+  if (!match) return 0;
+
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount < 0) return 0;
+
+  const unit = match[2].toUpperCase();
+  const multipliers: Record<string, number> = {
+    B: 1,
+    KB: 1000,
+    MB: 1000 ** 2,
+    GB: 1000 ** 3,
+    TB: 1000 ** 4,
+    KIB: 1024,
+    MIB: 1024 ** 2,
+    GIB: 1024 ** 3,
+    TIB: 1024 ** 4,
+  };
+
+  return Math.round(amount * (multipliers[unit] ?? 1));
+}
+
+function variantLabelForRequest(
+  fileType: FileType,
+  quality: string,
+  audioFormat: string,
+  subtitleLang: string,
+  thumbnailFormat: string,
+): string {
+  if (fileType === "video") return quality;
+  if (fileType === "audio") return `${audioFormat}-192`;
+  if (fileType === "subtitle") return `${subtitleLang}-subtitle`;
+  return thumbnailFormat;
+}
+
 export default function DownloaderPage() {
   const [url, setUrl] = useState("");
   const [batchMode, setBatchMode] = useState(false);
@@ -120,14 +180,19 @@ export default function DownloaderPage() {
   const [quality, setQuality] = useState("1080p");
   const [downloadEngine, setDownloadEngine] = useState<DownloadEngine>("standard");
   const [aria2Available, setAria2Available] = useState(false);
+  const [dependencies, setDependencies] = useState<Record<string, RuntimeDependency>>({});
   const [audioFormat, setAudioFormat] = useState("mp3");
   const [subtitleLang, setSubtitleLang] = useState("en");
+  const [thumbnailFormat, setThumbnailFormat] = useState("jpg");
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(0);
   const [trimOpen, setTrimOpen] = useState(false);
   const [useCpu, setUseCpu] = useState(false);
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const pollingRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+  const visibleDependencies = Object.values(dependencies).filter(
+    (dependency) => !dependency.available || dependency.job?.status === "installing" || dependency.job?.status === "failed"
+  );
 
   useEffect(() => {
     let active = true;
@@ -142,11 +207,31 @@ export default function DownloaderPage() {
         setQueue((prev) => {
           const previousById = new Map(prev.map((item) => [item.serverId || item.id, item]));
           const synced = data.map((serverItem) => toQueueItem(serverItem, previousById.get(serverItem.id)));
-          const pendingLocal = prev.filter((item) => !item.serverId);
+          const pendingLocal = prev.filter((item) => {
+            if (item.serverId) return false;
+            return !synced.some((serverItem) =>
+              serverItem.url === item.url &&
+              serverItem.fileType === item.fileType &&
+              serverItem.variantLabel === item.variantLabel
+            );
+          });
           return [...pendingLocal, ...synced];
         });
       } catch {
         // Ignore sync failures while backend is offline.
+      }
+    };
+
+    const syncDependencies = async () => {
+      try {
+        const response = await fetch(`${API}/runtime/dependencies`);
+        if (!response.ok) return;
+        const data = (await response.json()) as { dependencies?: Record<string, RuntimeDependency> };
+        if (!active) return;
+        setDependencies(data.dependencies ?? {});
+        setAria2Available(Boolean(data.dependencies?.aria2?.available));
+      } catch {
+        if (!active) return;
       }
     };
 
@@ -160,21 +245,15 @@ export default function DownloaderPage() {
       })
       .catch(() => undefined);
 
-    fetch(`${API}/download-engines`)
-      .then((response) => response.json())
-      .then((data: { engines?: Array<{ id?: string; available?: boolean }> }) => {
-        if (!active) return;
-        const aria2 = data.engines?.find((entry) => entry.id === "aria2");
-        setAria2Available(Boolean(aria2?.available));
-      })
-      .catch(() => setAria2Available(false));
-
     void syncBackendQueue();
+    void syncDependencies();
     const interval = setInterval(syncBackendQueue, 1000);
+    const depInterval = setInterval(syncDependencies, 2500);
 
     return () => {
       active = false;
       clearInterval(interval);
+      clearInterval(depInterval);
       pollingRef.current.forEach((timer) => clearInterval(timer));
       pollingRef.current.clear();
     };
@@ -241,16 +320,47 @@ export default function DownloaderPage() {
     }
   };
 
+  const handleBatchPasteBtn = async () => {
+    try {
+      let text = "";
+      try {
+        text = await navigator.clipboard.readText();
+      } catch {
+        text = await invoke<string>("read_clipboard_text");
+      }
+      if (!text.trim()) {
+        setErrMsg("Clipboard is empty.");
+        setStatus("error");
+        return;
+      }
+      setBatchUrls((prev) => [prev.trim(), text.trim()].filter(Boolean).join("\n"));
+    } catch {
+      setErrMsg("Clipboard access denied. Use Ctrl+V if another app is blocking clipboard access.");
+      setStatus("error");
+    }
+  };
+
+  const installDependency = async (depId: string) => {
+    try {
+      await fetch(`${API}/runtime/dependencies/install?dep_id=${encodeURIComponent(depId)}`, { method: "POST" });
+    } catch {
+      setErrMsg(`Could not start ${depId} installation.`);
+      setStatus("error");
+    }
+  };
+
   const startDownload = async () => {
     if (!info) return;
     const taskId = uid();
+    const effectiveDownloadEngine: DownloadEngine = fileType === "thumbnail" || fileType === "subtitle" ? "standard" : downloadEngine;
+    const variantLabel = variantLabelForRequest(fileType, quality, audioFormat, subtitleLang, thumbnailFormat);
     const newItem: QueueItem = {
       id: taskId,
       serverId: "",
       url: url,
       title: info.title,
       thumbnail: info.thumbnail,
-      format: fileType === "video" ? quality : fileType,
+      format: variantLabel,
       fileType,
       status: "queued",
       percent: 0,
@@ -266,15 +376,20 @@ export default function DownloaderPage() {
       recoverable: false,
       retryCount: 0,
       failureCode: "",
-      downloadEngine,
-      requestedEngine: downloadEngine,
+      downloadEngine: effectiveDownloadEngine,
+      requestedEngine: effectiveDownloadEngine,
       engineNote: "",
+      bytesDownloaded: 0,
+      bytesTotal: 0,
+      progressMode: "activity",
+      stageLabel: "Queued",
+      variantLabel,
     };
     setQueue(prev => [newItem, ...prev]);
 
     try {
       const trimEnabled = trimOpen && trimEnd - trimStart < info!.duration;
-      const res = await fetch(`${API}/download?url=${encodeURIComponent(url)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(downloadEngine)}`);
+      const res = await fetch(`${API}/download?url=${encodeURIComponent(url)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`);
       const data = await res.json();
       const serverTaskId = data.task_id ?? taskId;
 
@@ -295,8 +410,14 @@ export default function DownloaderPage() {
                 total: pd.total ?? "",
                 size: pd.size ?? "",
                 filePath: pd.file_path ?? "",
+                partialFilePath: pd.partial_file_path ?? q.partialFilePath,
                 error: pd.error ?? "",
                 canPause: pd.can_pause ?? q.canPause,
+                bytesDownloaded: pd.bytes_downloaded ?? q.bytesDownloaded,
+                bytesTotal: pd.bytes_total ?? q.bytesTotal,
+                progressMode: pd.progress_mode ?? q.progressMode,
+                stageLabel: pd.stage_label ?? q.stageLabel,
+                variantLabel: pd.variant_label ?? q.variantLabel,
               }
             : q
           ));
@@ -327,21 +448,28 @@ export default function DownloaderPage() {
     if (!urls.length) return;
     for (const bUrl of urls) {
       const taskId = uid();
+      const effectiveDownloadEngine: DownloadEngine = fileType === "thumbnail" || fileType === "subtitle" ? "standard" : downloadEngine;
+      const variantLabel = variantLabelForRequest(fileType, quality, audioFormat, subtitleLang, thumbnailFormat);
       const newItem: QueueItem = {
         id: taskId, serverId: "", url: bUrl,
         title: bUrl.length > 60 ? bUrl.slice(0, 57) + "…" : bUrl,
-        thumbnail: "", format: fileType === "video" ? quality : fileType,
+        thumbnail: "", format: variantLabel,
         fileType, status: "queued", percent: 0, speed: "", eta: "",
         downloaded: "", total: "", size: "", filePath: "", error: "", canPause: false,
         partialFilePath: "", recoverable: false, retryCount: 0, failureCode: "",
-        downloadEngine,
-        requestedEngine: downloadEngine,
+        downloadEngine: effectiveDownloadEngine,
+        requestedEngine: effectiveDownloadEngine,
         engineNote: "",
+        bytesDownloaded: 0,
+        bytesTotal: 0,
+        progressMode: "activity",
+        stageLabel: "Queued",
+        variantLabel,
       };
       setQueue(prev => [newItem, ...prev]);
       try {
         const trimEnabled = trimOpen && info && trimEnd - trimStart < info.duration;
-        const res = await fetch(`${API}/download?url=${encodeURIComponent(bUrl)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(downloadEngine)}`);
+        const res = await fetch(`${API}/download?url=${encodeURIComponent(bUrl)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`);
         const data = await res.json();
         const serverTaskId = data.task_id ?? taskId;
       setQueue(prev => prev.map(q => q.id === taskId ? { ...q, id: serverTaskId, serverId: serverTaskId } : q));
@@ -360,8 +488,14 @@ export default function DownloaderPage() {
                   total: pd.total ?? "",
                   size: pd.size ?? "",
                   filePath: pd.file_path ?? "",
+                  partialFilePath: pd.partial_file_path ?? q.partialFilePath,
                   error: pd.error ?? "",
                   canPause: pd.can_pause ?? q.canPause,
+                  bytesDownloaded: pd.bytes_downloaded ?? q.bytesDownloaded,
+                  bytesTotal: pd.bytes_total ?? q.bytesTotal,
+                  progressMode: pd.progress_mode ?? q.progressMode,
+                  stageLabel: pd.stage_label ?? q.stageLabel,
+                  variantLabel: pd.variant_label ?? q.variantLabel,
                 }
               : q
             ));
@@ -522,6 +656,14 @@ export default function DownloaderPage() {
               />
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
                 <button
+                  className="btn btn-ghost"
+                  onClick={handleBatchPasteBtn}
+                  style={{ height: 36 }}
+                >
+                  <IconPaste size={14} />
+                  Paste
+                </button>
+                <button
                   className="btn btn-primary"
                   onClick={startBatch}
                   disabled={!batchUrls.trim()}
@@ -666,23 +808,52 @@ export default function DownloaderPage() {
               </div>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 <button
-                  className={`quality-chip${downloadEngine === "standard" ? " active" : ""}`}
+                  className={`quality-chip${(fileType === "thumbnail" || fileType === "subtitle" || downloadEngine === "standard") ? " active" : ""}`}
                   onClick={() => setDownloadEngine("standard")}
                 >
                   Standard (stable)
                 </button>
-                <button
-                  className={`quality-chip${downloadEngine === "aria2" ? " active" : ""}`}
-                  onClick={() => setDownloadEngine("aria2")}
-                >
-                  aria2 (fast)
-                </button>
+                {fileType !== "thumbnail" && fileType !== "subtitle" && (
+                  <button
+                    className={`quality-chip${downloadEngine === "aria2" ? " active" : ""}`}
+                    onClick={() => setDownloadEngine("aria2")}
+                  >
+                    aria2 (fast)
+                  </button>
+                )}
               </div>
               <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)" }}>
-                {aria2Available
+                {fileType === "thumbnail" || fileType === "subtitle"
+                  ? "Small files always use the Standard downloader so GRABIX can keep them simple and reliable."
+                  : aria2Available
                   ? "aria2 is best for direct-file downloads. GRABIX automatically falls back to Standard for unsupported cases."
                   : "aria2 is not installed right now, so Standard remains the active downloader."}
               </div>
+              {visibleDependencies.length > 0 && (
+                <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                  {visibleDependencies.map((dependency) => (
+                    <div key={dependency.id} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "8px 10px", background: "var(--bg-surface2)", borderRadius: 10 }}>
+                      <div style={{ flex: 1, minWidth: 220 }}>
+                        <div style={{ fontSize: 12, fontWeight: 600 }}>{dependency.label}</div>
+                        <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                          {dependency.available ? (dependency.path || "Installed") : (dependency.description || "Not installed")}
+                        </div>
+                        {dependency.job?.message && (
+                          <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{dependency.job.message}</div>
+                        )}
+                      </div>
+                      <span style={{ fontSize: 11, fontWeight: 600, color: dependency.available ? "var(--text-success)" : "var(--text-warning)" }}>
+                        {dependency.available ? "Installed" : (dependency.job?.status === "installing" ? "Installing..." : dependency.job?.status === "failed" ? "Install failed" : "Missing")}
+                      </span>
+                      {!dependency.available && dependency.install_supported !== false && dependency.job?.status !== "installing" && (
+                        <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={() => void installDependency(dependency.id)}>
+                          {dependency.job?.status === "failed" ? "Retry install" : "Install"}
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {fileType === "video" && (
@@ -754,6 +925,25 @@ export default function DownloaderPage() {
               </div>
             )}
 
+            {fileType === "thumbnail" && (
+              <div style={{ marginBottom: 14 }} className="fade-in">
+                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, letterSpacing: 0.5, textTransform: "uppercase" }}>
+                  Thumbnail Format
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {(["jpg", "png", "webp"] as const).map((format) => (
+                    <button
+                      key={format}
+                      className={`quality-chip${thumbnailFormat === format ? " active" : ""}`}
+                      onClick={() => setThumbnailFormat(format)}
+                    >
+                      {format.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* ── TRIM TOGGLE + PANEL (Video only) ── */}
             {fileType === "video" && (
               <div className="fade-in" style={{ marginBottom: 14 }}>
@@ -802,7 +992,7 @@ export default function DownloaderPage() {
                       style={{ fontSize: 11, gap: 5 }}
                       onClick={() => setUseCpu(false)}
                     >
-                      ⚡ No CPU
+                      No CPU
                     </button>
                     <span className="tooltip-box" style={{ width: 190, whiteSpace: "normal", lineHeight: 1.5 }}>
                       ✅ Recommended. Instant, no re-encode. Trim snaps to nearest keyframe (±2s). No FFmpeg needed.
@@ -815,7 +1005,7 @@ export default function DownloaderPage() {
                       style={{ fontSize: 11, gap: 5 }}
                       onClick={() => setUseCpu(true)}
                     >
-                      🔧 With CPU
+                      With CPU
                     </button>
                     <span className="tooltip-box" style={{ width: 190, whiteSpace: "normal", lineHeight: 1.5 }}>
                       Frame-accurate trim. Re-encodes with FFmpeg — slower, uses CPU. Requires FFmpeg installed.
@@ -827,8 +1017,8 @@ export default function DownloaderPage() {
               <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
                 {fileType === "video" && `Saves as MP4 · ${quality}`}
                 {fileType === "audio" && `Saves as ${audioFormat.toUpperCase()} · 192kbps`}
-                {fileType === "thumbnail" && "Saves as JPG"}
-                {fileType === "subtitle" && `Saves as SRT · ${subtitleLang.toUpperCase()}`}
+                {fileType === "thumbnail" && `Saves as ${thumbnailFormat.toUpperCase()}`}
+                {fileType === "subtitle" && `Saves as available subtitle · ${subtitleLang.toUpperCase()}`}
               </div>
             </div>
           </div>
@@ -893,9 +1083,18 @@ function QueueCard({
 
   // Clean up raw speed string: strip ANSI codes and extra whitespace
   const cleanSpeed = formatDisplaySpeed(item.speed);
-  const showIndeterminateProgress = item.status === "downloading" && item.percent <= 0 && Boolean(item.downloaded || item.size);
+  const progressMode = item.progressMode || (item.status === "processing" ? "processing" : item.total ? "determinate" : "activity");
+  const showProcessingProgress = progressMode === "processing";
+  const showDeterminateProgress = progressMode === "determinate" && !showProcessingProgress;
+  const activityBytes = item.bytesDownloaded || parseDisplayedBytes(item.downloaded || item.size);
+  const activityFillPercent = activityBytes > 0
+    ? Math.min(92, Math.max(12, 92 * (1 - Math.exp(-activityBytes / (96 * 1024 * 1024)))))
+    : 28;
+  const progressLabel = showDeterminateProgress
+    ? `${item.percent}%`
+    : item.stageLabel || (showProcessingProgress ? "Processing" : item.status === "queued" ? "Queued" : "Downloading");
   const statsSummary = [
-    showIndeterminateProgress ? "LIVE" : `${item.percent}%`,
+    showDeterminateProgress ? progressLabel : item.stageLabel || "",
     cleanSpeed || "",
     item.eta && item.eta !== "0s" ? `${item.eta} remaining` : "",
   ].filter(Boolean).join(" — ");
@@ -930,7 +1129,7 @@ function QueueCard({
         {/* ── Action buttons ── */}
         <div style={{ display: "flex", gap: 4, alignItems: "center", flexShrink: 0 }}>
           {/* Pause — only while downloading */}
-          {isActive && item.status === "downloading" && item.canPause && (
+          {isActive && item.canPause && item.status !== "queued" && (
             <div className="tooltip-wrap">
               <button className="btn-icon" style={{ width: 28, height: 28 }} onClick={() => onAction(item, "pause")}>
                 <IconPause size={13} />
@@ -999,8 +1198,8 @@ function QueueCard({
           {/* Progress bar */}
           <div className="progress-bar-bg">
             <div
-              className={`progress-bar-fill${showIndeterminateProgress ? " indeterminate" : ""}`}
-              style={{ width: showIndeterminateProgress ? "28%" : `${item.percent}%`, opacity: isPaused ? 0.5 : 1 }}
+              className={`progress-bar-fill${showProcessingProgress ? " indeterminate" : ""}`}
+              style={{ width: showDeterminateProgress ? `${item.percent}%` : `${activityFillPercent}%`, opacity: isPaused ? 0.5 : 1 }}
             />
           </div>
           {/* Stats row */}
@@ -1010,7 +1209,7 @@ function QueueCard({
               fontSize: 11, fontWeight: 700, color: "var(--text-accent)",
               background: "var(--accent-light)", padding: "2px 7px", borderRadius: 99, marginRight: 8,
             }}>
-              {showIndeterminateProgress ? "LIVE" : `${item.percent}%`}
+              {progressLabel}
             </span>
             {/* Downloaded / Total */}
             {item.downloaded && (

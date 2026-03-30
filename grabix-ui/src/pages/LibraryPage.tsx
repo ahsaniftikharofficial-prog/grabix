@@ -42,6 +42,7 @@ interface LibItem {
   offline_key: string;
   chapter_count: number;
   storage_label: string;
+  display_layout: "poster" | "landscape" | "square";
 }
 
 interface ConfirmState {
@@ -121,6 +122,13 @@ function toLibItem(row: Record<string, unknown>): LibItem {
     offline_key: String(row.offline_key || ""),
     chapter_count: Number(row.chapter_count || 0),
     storage_label: String(row.storage_label || ""),
+    display_layout: (["poster", "landscape", "square"].includes(String(row.display_layout || ""))
+      ? row.display_layout
+      : (String(row.dl_type || "") === "audio" || String(row.dl_type || "") === "thumbnail" || String(row.dl_type || "") === "subtitle"
+          ? "square"
+          : (String(row.category || "").toLowerCase().includes("youtube") || String(row.category || "").toLowerCase().includes("tv")
+              ? "landscape"
+              : "poster"))) as LibItem["display_layout"],
   };
 }
 
@@ -147,7 +155,17 @@ function toOfflineMangaLibItem(row: OfflineMangaRecord): LibItem {
     offline_key: row.key,
     chapter_count: Array.isArray(row.chapters) ? row.chapters.length : 0,
     storage_label: `${Array.isArray(row.chapters) ? row.chapters.length : 0} chapter(s) offline`,
+    display_layout: "poster",
   };
+}
+
+function inferDisplayLayout(item: LibItem): LibItem["display_layout"] {
+  if (item.display_layout) return item.display_layout;
+  const inferredCategory = inferCategory(item);
+  if (inferredCategory === "movies" || inferredCategory === "anime" || inferredCategory === "manga") return "poster";
+  if (inferredCategory === "youtube" || inferredCategory === "tv") return "landscape";
+  if (item.type === "audio" || item.type === "thumbnail" || item.type === "subtitle") return "square";
+  return "landscape";
 }
 
 function inferCategory(item: LibItem): CategoryId {
@@ -221,6 +239,7 @@ export default function LibraryPage() {
   const [search, setSearch] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [activeCategory, setActiveCategory] = useState<CategoryId>("all");
+  const [hideMoviesInAll, setHideMoviesInAll] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState("");
   const [editItem, setEditItem] = useState<LibItem | null>(null);
@@ -264,6 +283,7 @@ export default function LibraryPage() {
   const filteredItems = useMemo(() => {
     const query = search.trim().toLowerCase();
     return enhancedItems
+      .filter((item) => !(activeCategory === "all" && hideMoviesInAll && item.inferredCategory === "movies"))
       .filter((item) => activeCategory === "all" || item.inferredCategory === activeCategory)
       .filter((item) => {
         if (!query) return true;
@@ -280,7 +300,7 @@ export default function LibraryPage() {
           .includes(query);
       })
       .sort((left, right) => String(right.raw_date).localeCompare(String(left.raw_date)));
-  }, [activeCategory, enhancedItems, search]);
+  }, [activeCategory, enhancedItems, hideMoviesInAll, search]);
 
   const groupedItems = useMemo(() => {
     const groups = new Map<CategoryId, Array<(typeof filteredItems)[number]>>();
@@ -589,6 +609,14 @@ export default function LibraryPage() {
           <div style={{ fontSize: 12, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6 }}>
             <IconFilter size={13} /> Organized by content type
           </div>
+          {activeCategory === "all" ? (
+            <button
+              className={`quality-chip${hideMoviesInAll ? " active" : ""}`}
+              onClick={() => setHideMoviesInAll((value) => !value)}
+            >
+              {hideMoviesInAll ? "Showing non-movies" : "Hide movies"}
+            </button>
+          ) : null}
         </div>
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
@@ -724,6 +752,8 @@ function LibraryCard({
   onEdit: () => void;
 }) {
   const inferred = item.inferredCategory || inferCategory(item);
+  const displayLayout = inferDisplayLayout(item);
+  const mediaHeight = displayLayout === "poster" ? 250 : displayLayout === "landscape" ? 128 : 170;
   const canEdit = item.source_type === "history";
   const canPlay = item.source_type === "offline-manga" || (item.local_available && !item.broken && !!item.file_path);
   return (
@@ -737,7 +767,7 @@ function LibraryCard({
       }}
       onClick={onSelect}
     >
-      <div style={{ position: "relative", height: 250, background: "var(--bg-surface2)" }}>
+      <div style={{ position: "relative", height: mediaHeight, background: "var(--bg-surface2)" }}>
         <Thumbnail item={{ ...item, inferredCategory: inferred }} />
         <div style={{ position: "absolute", top: 10, left: 10 }}>
           <CategoryPill id={inferred} />
@@ -762,7 +792,7 @@ function LibraryCard({
         ) : null}
       </div>
       <div style={{ padding: "12px 12px 14px" }}>
-        <div style={{ fontSize: 13, fontWeight: 700, lineHeight: 1.4, minHeight: 36 }}>{item.title}</div>
+        <div style={{ fontSize: 13, fontWeight: 700, lineHeight: 1.4, minHeight: displayLayout === "poster" ? 36 : 18 }}>{item.title}</div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>
           {item.file_size_label ? <span>{item.file_size_label}</span> : null}
           {item.storage_label ? <span>{item.storage_label}</span> : null}
@@ -806,6 +836,12 @@ function LibraryRow({
   onEdit: () => void;
 }) {
   const inferred = item.inferredCategory || inferCategory(item);
+  const displayLayout = inferDisplayLayout(item);
+  const thumbSize = displayLayout === "poster"
+    ? { width: 58, height: 82 }
+    : displayLayout === "landscape"
+      ? { width: 96, height: 54 }
+      : { width: 64, height: 64 };
   const canEdit = item.source_type === "history";
   const canPlay = item.source_type === "offline-manga" || (item.local_available && !item.broken && !!item.file_path);
   const tags = item.tags
@@ -831,7 +867,7 @@ function LibraryRow({
       >
         {selected ? <IconCheck size={10} color="white" /> : null}
       </div>
-      <div style={{ width: 82, height: 54, borderRadius: 10, overflow: "hidden", background: "var(--bg-surface2)", flexShrink: 0 }}>
+      <div style={{ ...thumbSize, borderRadius: 10, overflow: "hidden", background: "var(--bg-surface2)", flexShrink: 0 }}>
         <Thumbnail item={{ ...item, inferredCategory: inferred }} />
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>

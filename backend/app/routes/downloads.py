@@ -153,3 +153,15 @@ def delete_download(dl_id: str):
 def stop_all_downloads():
     main_module = _main_module()
     return main_module.stop_all_downloads()
+
+
+@router.get("/runtime/dependencies")
+def get_runtime_dependencies():
+    main_module = _main_module()
+    return main_module.get_runtime_dependencies()
+
+
+@router.post("/runtime/dependencies/install")
+def install_runtime_dependency(dep_id: str):
+    main_module = _main_module()
+    return main_module.install_runtime_dependency(dep_id)

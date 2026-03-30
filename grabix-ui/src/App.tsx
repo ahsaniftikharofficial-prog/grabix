@@ -35,6 +35,7 @@ const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 
 function Inner() {
   const [page, setPage] = useState<Page>("downloader");
+  const [pageRevision, setPageRevision] = useState(0);
   const [runtimeState, setRuntimeState] = useState<RuntimeState>("starting");
   const [bootstrapping, setBootstrapping] = useState(true);
   const [backendCoreReady, setBackendCoreReady] = useState(false);
@@ -121,8 +122,14 @@ function Inner() {
 
     const handleNavigate = (event: Event) => {
       const detail = (event as CustomEvent<{ page?: Page }>).detail;
-      if (detail?.page) {
-        setPage(detail.page);
+      const nextPage = detail?.page;
+      if (nextPage) {
+        setPage((current) => {
+          if (current === nextPage) {
+            setPageRevision((value) => value + 1);
+          }
+          return nextPage;
+        });
       }
     };
 
@@ -202,13 +209,24 @@ function Inner() {
     }
   };
 
+  const navigateToPage = (nextPage: Page, options?: { refresh?: boolean }) => {
+    setPage((current) => {
+      if (current === nextPage || options?.refresh) {
+        setPageRevision((value) => value + 1);
+      }
+      return nextPage;
+    });
+  };
+
   return (
     <div style={{ display: "flex", height: "100vh", width: "100vw", overflow: "hidden" }}>
-      <Sidebar page={page} setPage={setPage} activeDownloads={activeDownloads} runtimeState={runtimeState} runtimeHealth={runtimeHealth} />
-      <main style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", background: "var(--bg-app)" }}>
+      <Sidebar page={page} setPage={navigateToPage} activeDownloads={activeDownloads} runtimeState={runtimeState} runtimeHealth={runtimeHealth} />
+      <main style={{ flex: 1, minWidth: 0, overflow: "hidden", display: "flex", flexDirection: "column", background: "var(--bg-app)" }}>
         <RuntimeHealthProvider value={{ health: runtimeHealth, runtimeState, refreshHealth: refreshRuntimeHealth }}>
           <Suspense fallback={<PageLoadingState page={page} />}>
-            {pages[page]}
+            <div key={`${page}:${pageRevision}`} style={{ display: "flex", flexDirection: "column", flex: 1, width: "100%", minWidth: 0, minHeight: 0 }}>
+              {pages[page]}
+            </div>
           </Suspense>
         </RuntimeHealthProvider>
       </main>

@@ -4,7 +4,7 @@ import logging
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-import yt_dlp, os, uuid, sqlite3, shutil, threading, subprocess, time, json, re, hashlib, socket, ipaddress
+import yt_dlp, os, uuid, sqlite3, shutil, threading, subprocess, time, json, re, hashlib, socket, ipaddress, tempfile, zipfile
 import ctypes
 from pathlib import Path
 from datetime import datetime
@@ -100,6 +100,7 @@ playback_logger = get_logger("playback")
 DOWNLOAD_DIR = str(Path.home() / "Downloads" / "GRABIX")
 DB_PATH = str(Path.home() / "Downloads" / "GRABIX" / "grabix.db")
 SETTINGS_PATH = str(Path.home() / "Downloads" / "GRABIX" / "grabix_settings.json")
+RUNTIME_TOOLS_DIR = Path(DOWNLOAD_DIR) / "runtime-tools"
 
 # Always create the download directory before any DB or file operations
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -109,7 +110,6 @@ downloads: dict = {}
 download_controls: dict = {}
 FFMPEG_PATH = shutil.which("ffmpeg")
 ARIA2_PATH = shutil.which("aria2c")
-HIANIME_LOCAL_BASE = os.getenv("CONSUMET_API_BASE", "http://127.0.0.1:3000").rstrip("/")
 SELF_BASE_URL = os.getenv("GRABIX_PUBLIC_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 STREAM_EXTRACT_CACHE_TTL_SECONDS = 900
 stream_extract_cache: dict[str, tuple[float, dict]] = {}
@@ -132,6 +132,33 @@ ANIME_RESOLVE_CACHE_TTL_SECONDS = 300
 anime_resolve_cache: dict[str, tuple[float, dict]] = {}
 CONSUMET_HEALTH_CACHE_TTL_SECONDS = 15
 consumet_health_cache: tuple[float, dict] | None = None
+dependency_install_jobs: dict[str, dict] = {}
+
+
+def refresh_runtime_tools() -> None:
+    global FFMPEG_PATH, ARIA2_PATH
+    FFMPEG_PATH = _resolve_runtime_binary("ffmpeg", ["ffmpeg.exe", "ffmpeg"])
+    ARIA2_PATH = _resolve_runtime_binary("aria2", ["aria2c.exe", "aria2c"])
+    for tool_path in {Path(path).parent for path in [FFMPEG_PATH, ARIA2_PATH] if path}:
+        existing = os.environ.get("PATH", "")
+        normalized = str(tool_path)
+        if normalized and normalized.lower() not in existing.lower():
+            os.environ["PATH"] = f"{normalized}{os.pathsep}{existing}" if existing else normalized
+
+
+def _resolve_runtime_binary(tool_id: str, names: list[str]) -> str | None:
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+
+    managed_dir = RUNTIME_TOOLS_DIR / tool_id
+    if managed_dir.exists():
+        for name in names:
+            candidates = list(managed_dir.rglob(name))
+            if candidates:
+                return str(candidates[0])
+    return None
 
 
 def _is_internal_managed_file(path: Path) -> bool:
@@ -351,7 +378,7 @@ def _normalize_category_label(value: str) -> str:
 
 def _infer_download_category(url: str, title: str, dl_type: str, category: str = "") -> str:
     normalized = _normalize_category_label(category)
-    if normalized:
+    if normalized and normalized not in {"Video", "Videos"}:
         return normalized
 
     haystack = f"{title} {url}".lower()
@@ -373,7 +400,25 @@ def _infer_download_category(url: str, title: str, dl_type: str, category: str =
         return "Subtitles"
     if dl_type == "audio":
         return "Audio"
-    return "Videos"
+    if dl_type == "thumbnail":
+        return "Other"
+    return "Movies"
+
+
+def _infer_library_display_layout(
+    url: str,
+    title: str,
+    dl_type: str,
+    category: str = "",
+) -> str:
+    inferred_category = _infer_download_category(url, title, dl_type, category)
+    if inferred_category in {"Movies", "Anime", "Manga", "Books", "Comics", "Light Novels"}:
+        return "poster"
+    if inferred_category in {"YouTube", "TV Series"}:
+        return "landscape"
+    if dl_type in {"audio", "subtitle", "thumbnail"}:
+        return "square"
+    return "landscape"
 
 
 def _normalize_tags_csv(tags_csv: str = "", category: str = "", dl_type: str = "") -> str:
@@ -1210,52 +1255,17 @@ def anime_resolve_source(payload: AnimeResolveRequest):
         return cached
 
     tried: list[dict] = []
-    category = _map_audio_category(payload.audio)
     episode_id = payload.episodeId.strip()
     if not episode_id:
         raise HTTPException(status_code=400, detail="episodeId is required")
 
-    watch_url = episode_id if episode_id.startswith("http") else f"https://aniwatchtv.to/watch/{episode_id}"
-    for server in _anime_server_order(payload.server):
-        try:
-            data = _fetch_json(
-                f"{HIANIME_LOCAL_BASE}/anime/hianime/watch/{quote(episode_id, safe='')}"
-                f"?{urlencode({'server': server, 'category': category})}"
-            )
-            direct_result = _convert_hianime_source_payload(data, server, tried)
-            if direct_result:
-                _set_cached_anime_resolution(payload, direct_result)
-                return direct_result
-
-            sources = data.get("sources") or []
-            embed_url = ""
-            for item in sources:
-                if not isinstance(item, dict):
-                    continue
-                item_url = str(item.get("url") or item.get("file") or item.get("src") or "").strip()
-                item_type = str(item.get("type") or "").lower()
-                if item_type == "embed" or (item_url and not item.get("isM3U8") and ("embed" in item_url or "megacloud" in item_url)):
-                    embed_url = item_url
-                    break
-            if embed_url:
-                if payload.purpose == "play":
-                    embed_result = _normalize_resolved_source(
-                        source_url=embed_url,
-                        kind="embed",
-                        provider="HiAnime",
-                        selected_server=server,
-                        strategy="hianime-protected-embed",
-                        headers=data.get("headers") or {},
-                        subtitles=data.get("subtitles") or [],
-                        tried=tried,
-                    )
-                    _set_cached_anime_resolution(payload, embed_result)
-                    return embed_result
-                tried.append({"server": server, "stage": "hianime-protected", "detail": embed_url})
-                continue
-        except Exception as exc:
-            tried.append({"server": server, "stage": "hianime", "detail": str(exc)})
-            continue
+    tried.append(
+        {
+            "server": "internal",
+            "stage": "anime-primary",
+            "detail": "Direct HiAnime sidecar resolution is disabled. Using built-in fallback chain.",
+        }
+    )
 
     fallback_result = _resolve_fallback_provider(
         payload.tmdbId,
@@ -2520,6 +2530,94 @@ def _safe_download_path(base_dir: str, raw_title: str, extension: str, fallback:
     return str(Path(base_dir) / f"{stem}.{ext}")
 
 
+def _normalize_variant_label(label: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", " ", str(label or "")).strip()
+    cleaned = re.sub(r"\s+", "-", cleaned)
+    return cleaned.strip("-_. ")
+
+
+def _variant_label_for_request(
+    dl_type: str,
+    quality: str,
+    audio_format: str,
+    audio_quality: str,
+    subtitle_lang: str,
+    thumbnail_format: str,
+) -> str:
+    if dl_type == "video":
+        return quality or "video"
+    if dl_type == "audio":
+        return f"{audio_format.lower()}-{audio_quality}"
+    if dl_type == "subtitle":
+        return f"{subtitle_lang.lower()}-subtitle"
+    if dl_type == "thumbnail":
+        return thumbnail_format.lower()
+    return dl_type or "download"
+
+
+def _variant_label_for_output(dl_id: str, extension: str = "") -> str:
+    params = (downloads.get(dl_id) or {}).get("params") or {}
+    dl_type = str(params.get("dl_type") or "").lower()
+    quality = str(params.get("quality") or "")
+    audio_format = str(params.get("audio_format") or "mp3")
+    audio_quality = str(params.get("audio_quality") or "192")
+    subtitle_lang = str(params.get("subtitle_lang") or "en")
+    thumbnail_format = str(params.get("thumbnail_format") or "jpg")
+    ext = re.sub(r"[^A-Za-z0-9]+", "", str(extension or "").lstrip(".")) or ""
+
+    if dl_type == "subtitle":
+        return f"{subtitle_lang.lower()}-{(ext or 'subtitle').lower()}"
+    if dl_type == "thumbnail":
+        return (ext or thumbnail_format or "jpg").lower()
+    return _variant_label_for_request(
+        dl_type,
+        quality,
+        audio_format,
+        audio_quality,
+        subtitle_lang,
+        thumbnail_format,
+    )
+
+
+def _safe_variant_download_path(
+    base_dir: str | Path,
+    raw_title: str,
+    extension: str,
+    fallback: str,
+    variant_label: str = "",
+) -> str:
+    stem = _safe_download_stem(raw_title, fallback)
+    ext = re.sub(r"[^A-Za-z0-9]+", "", str(extension or "").lstrip(".")) or "bin"
+    variant = _normalize_variant_label(variant_label)
+    base_name = f"{stem} [{variant}]" if variant else stem
+    directory = Path(base_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    candidate = directory / f"{base_name}.{ext}"
+    suffix = 2
+    while candidate.exists():
+        candidate = directory / f"{base_name} ({suffix}).{ext}"
+        suffix += 1
+    return str(candidate)
+
+
+def _job_workspace(dl_id: str) -> Path:
+    return Path(tempfile.gettempdir()) / "grabix-jobs" / dl_id
+
+
+def _prepare_job_workspace(dl_id: str) -> Path:
+    workspace = _job_workspace(dl_id)
+    if workspace.exists():
+        shutil.rmtree(workspace, ignore_errors=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    return workspace
+
+
+def _cleanup_job_workspace(dl_id: str) -> None:
+    workspace = _job_workspace(dl_id)
+    if workspace.exists():
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
 def _yt_dlp_output_template(dl_id: str, url: str) -> str:
     fallback = f"grabix-{dl_id}"
     target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or fallback
@@ -2527,7 +2625,188 @@ def _yt_dlp_output_template(dl_id: str, url: str) -> str:
     return str(Path(DOWNLOAD_DIR) / f"{safe_stem}.%(ext)s")
 
 
-def _download_direct_media(dl_id: str, url: str, headers: dict[str, str] | None = None) -> str:
+def _yt_dlp_output_stem(dl_id: str, url: str) -> str:
+    fallback = f"grabix-{dl_id}"
+    target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or fallback
+    return _safe_download_stem(target_title, fallback)
+
+
+def _estimate_requested_total_bytes(info: dict | None) -> int:
+    if not isinstance(info, dict):
+        return 0
+
+    total = 0
+    sources = []
+    requested_downloads = info.get("requested_downloads")
+    if isinstance(requested_downloads, list) and requested_downloads:
+        sources.extend(item for item in requested_downloads if isinstance(item, dict))
+    requested_formats = info.get("requested_formats")
+    if isinstance(requested_formats, list) and requested_formats:
+        sources.extend(item for item in requested_formats if isinstance(item, dict))
+    if not sources:
+        sources.append(info)
+
+    for item in sources:
+        for key in ("filesize", "filesize_approx"):
+            value = item.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                total += int(value)
+                break
+    return total
+
+
+def _quality_label_to_height(label: str) -> int:
+    match = re.search(r"(\d{3,4})", str(label or ""))
+    return int(match.group(1)) if match else 1080
+
+
+def _pick_format_size(item: dict | None) -> int:
+    if not isinstance(item, dict):
+        return 0
+    for key in ("filesize", "filesize_approx"):
+        value = item.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return int(value)
+    return 0
+
+
+def _estimate_total_bytes_for_request(info: dict | None, dl_type: str, quality: str) -> int:
+    if not isinstance(info, dict):
+        return 0
+
+    precomputed = _estimate_requested_total_bytes(info)
+    if precomputed > 0:
+        return precomputed
+
+    formats = [entry for entry in (info.get("formats") or []) if isinstance(entry, dict)]
+    if not formats:
+        return 0
+
+    normalized_type = str(dl_type or "").lower()
+    if normalized_type == "audio":
+        audio_formats = [entry for entry in formats if entry.get("acodec") != "none"]
+        ranked_audio = sorted(audio_formats, key=lambda entry: (_pick_format_size(entry), entry.get("abr") or 0), reverse=True)
+        return _pick_format_size(ranked_audio[0]) if ranked_audio else 0
+
+    if normalized_type != "video":
+        return 0
+
+    target_height = _quality_label_to_height(quality)
+    video_only = [
+        entry for entry in formats
+        if entry.get("vcodec") != "none" and entry.get("acodec") == "none" and isinstance(entry.get("height"), int)
+    ]
+    progressive = [
+        entry for entry in formats
+        if entry.get("vcodec") != "none" and entry.get("acodec") != "none" and isinstance(entry.get("height"), int)
+    ]
+    audio_only = [entry for entry in formats if entry.get("vcodec") == "none" and entry.get("acodec") != "none"]
+
+    def rank_video(entry: dict) -> tuple[int, int]:
+        height = int(entry.get("height") or 0)
+        if height <= target_height:
+            return (2, height)
+        return (1, -height)
+
+    total = 0
+    ranked_video_only = sorted(video_only, key=rank_video, reverse=True)
+    if ranked_video_only:
+        total += _pick_format_size(ranked_video_only[0])
+    else:
+        ranked_progressive = sorted(progressive, key=rank_video, reverse=True)
+        if ranked_progressive:
+            return _pick_format_size(ranked_progressive[0])
+
+    ranked_audio_only = sorted(audio_only, key=lambda entry: (_pick_format_size(entry), entry.get("abr") or 0), reverse=True)
+    if ranked_audio_only:
+        total += _pick_format_size(ranked_audio_only[0])
+    return total
+
+
+def _start_external_downloader_progress_monitor(
+    dl_id: str,
+    base_dir: str | Path,
+    expected_total_bytes: int = 0,
+) -> tuple[threading.Event, threading.Thread]:
+    stop_event = threading.Event()
+    workspace = Path(base_dir)
+
+    def worker():
+        last_size = 0
+        peak_size = 0
+        last_ts = time.monotonic()
+        smoothed_speed = 0.0
+        while not stop_event.is_set():
+            try:
+                partial_candidates = [
+                    path for path in workspace.rglob("*")
+                    if path.is_file() and ".aria2" not in path.name.lower() and (
+                        path.name.endswith(".part")
+                        or ".part." in path.name
+                        or path.suffix in {".ytdl", ".part"}
+                    )
+                ]
+                total_downloaded = 0
+                primary_partial = ""
+                if partial_candidates:
+                    total_downloaded = sum(path.stat().st_size for path in partial_candidates if path.exists())
+                    primary_partial = str(max(partial_candidates, key=lambda path: path.stat().st_size))
+                    peak_size = max(peak_size, total_downloaded)
+                elif peak_size > 0:
+                    total_downloaded = peak_size
+                current_ts = time.monotonic()
+                elapsed = max(current_ts - last_ts, 0.001)
+                delta = max(0, total_downloaded - last_size)
+                speed_label = downloads[dl_id].get("speed", "")
+                eta_label = downloads[dl_id].get("eta", "")
+                if delta > 0 and elapsed >= 0.5:
+                    instant_speed = delta / elapsed
+                    smoothed_speed = instant_speed if smoothed_speed <= 0 else ((smoothed_speed * 0.65) + (instant_speed * 0.35))
+                    speed_label = f"{_format_bytes(smoothed_speed)}/s"
+                    if expected_total_bytes > 0 and smoothed_speed > 0:
+                        remaining = max(expected_total_bytes - total_downloaded, 0)
+                        eta_label = _format_eta(remaining / smoothed_speed)
+                    last_size = total_downloaded
+                    last_ts = current_ts
+                elif total_downloaded > 0 and last_size == 0:
+                    last_size = total_downloaded
+                    last_ts = current_ts
+
+                if total_downloaded > 0:
+                    previous_percent = float(downloads[dl_id].get("percent", 0) or 0)
+                    trustworthy_total = expected_total_bytes > 0 and total_downloaded <= int(expected_total_bytes * 1.02)
+                    pct = round((total_downloaded / expected_total_bytes) * 100, 1) if trustworthy_total else previous_percent
+                    downloads[dl_id].update({
+                        "percent": max(previous_percent, min(pct, 100.0)) if trustworthy_total else 0,
+                        "downloaded": _format_bytes(total_downloaded),
+                        "total": _format_bytes(expected_total_bytes) if trustworthy_total else "",
+                        "size": _format_bytes(expected_total_bytes if trustworthy_total else total_downloaded),
+                        "bytes_downloaded": total_downloaded,
+                        "bytes_total": expected_total_bytes if trustworthy_total else 0,
+                        "progress_mode": "determinate" if trustworthy_total else "activity",
+                        "stage_label": "Downloading",
+                        "speed": speed_label,
+                        "eta": eta_label,
+                        "partial_file_path": primary_partial or downloads[dl_id].get("partial_file_path", ""),
+                    })
+                    if not trustworthy_total:
+                        downloads[dl_id]["eta"] = ""
+                    _persist_download_record(dl_id)
+            except Exception:
+                pass
+            stop_event.wait(0.6)
+
+    monitor = threading.Thread(target=worker, daemon=True)
+    monitor.start()
+    return stop_event, monitor
+
+
+def _download_direct_media(
+    dl_id: str,
+    url: str,
+    headers: dict[str, str] | None = None,
+    output_dir: str | Path | None = None,
+) -> str:
     fallback = f"grabix-{dl_id}"
     target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or fallback
 
@@ -2539,13 +2818,25 @@ def _download_direct_media(dl_id: str, url: str, headers: dict[str, str] | None 
         initial_length = int(response.headers.get("Content-Length", "0") or 0)
         ext = _guess_media_extension(url, content_type)
 
-    output_path = _safe_download_path(DOWNLOAD_DIR, target_title, ext, fallback)
+    output_path = _safe_variant_download_path(
+        output_dir or DOWNLOAD_DIR,
+        target_title,
+        ext,
+        fallback,
+        variant_label=downloads[dl_id].get("variant_label", ""),
+    )
     part_path = f"{output_path}.part"
     downloaded_bytes = Path(part_path).stat().st_size if Path(part_path).exists() else 0
     total_bytes = initial_length if initial_length > 0 else 0
     controls = download_controls[dl_id]
-    downloads[dl_id]["file_path"] = output_path
-    downloads[dl_id]["partial_file_path"] = part_path
+    downloads[dl_id].update({
+        "file_path": output_path,
+        "partial_file_path": part_path,
+        "progress_mode": "determinate" if total_bytes > 0 else "activity",
+        "stage_label": "Downloading",
+        "bytes_downloaded": downloaded_bytes,
+        "bytes_total": total_bytes,
+    })
     _persist_download_record(dl_id, force=True)
 
     while True:
@@ -2575,6 +2866,10 @@ def _download_direct_media(dl_id: str, url: str, headers: dict[str, str] | None 
                     "downloaded": "",
                     "total": "",
                     "size": "",
+                    "bytes_downloaded": 0,
+                    "bytes_total": 0,
+                    "progress_mode": "activity",
+                    "stage_label": "Downloading",
                     "file_path": output_path,
                     "partial_file_path": part_path,
                 })
@@ -2606,6 +2901,10 @@ def _download_direct_media(dl_id: str, url: str, headers: dict[str, str] | None 
                         "downloaded": _format_bytes(downloaded_bytes),
                         "total": _format_bytes(total_bytes),
                         "size": _format_bytes(total_bytes or downloaded_bytes),
+                        "bytes_downloaded": downloaded_bytes,
+                        "bytes_total": total_bytes,
+                        "progress_mode": "determinate" if total_bytes > 0 else "activity",
+                        "stage_label": "Downloading",
                         "file_path": output_path,
                         "partial_file_path": part_path,
                     })
@@ -2623,6 +2922,10 @@ def _download_direct_media(dl_id: str, url: str, headers: dict[str, str] | None 
         "downloaded": _format_bytes(total_bytes or downloaded_bytes),
         "total": _format_bytes(total_bytes or downloaded_bytes),
         "size": _format_bytes(total_bytes or downloaded_bytes),
+        "bytes_downloaded": total_bytes or downloaded_bytes,
+        "bytes_total": total_bytes or downloaded_bytes,
+        "progress_mode": "determinate",
+        "stage_label": "Finalizing",
         "file_path": output_path,
         "partial_file_path": "",
     })
@@ -2630,7 +2933,12 @@ def _download_direct_media(dl_id: str, url: str, headers: dict[str, str] | None 
     return output_path
 
 
-def _download_direct_subtitle(dl_id: str, url: str, headers: dict[str, str] | None = None) -> str:
+def _download_direct_subtitle(
+    dl_id: str,
+    url: str,
+    headers: dict[str, str] | None = None,
+    output_dir: str | Path | None = None,
+) -> str:
     fallback = f"grabix-{dl_id}"
     target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or fallback
 
@@ -2641,11 +2949,23 @@ def _download_direct_subtitle(dl_id: str, url: str, headers: dict[str, str] | No
         content_type = response.headers.get("Content-Type", "text/vtt")
         total_bytes = int(response.headers.get("Content-Length", "0") or 0)
         ext = _guess_subtitle_extension(url, content_type)
-        output_path = _safe_download_path(DOWNLOAD_DIR, target_title, ext, fallback)
+        output_path = _safe_variant_download_path(
+            output_dir or DOWNLOAD_DIR,
+            target_title,
+            ext,
+            fallback,
+            variant_label=downloads[dl_id].get("variant_label", ""),
+        )
         controls = download_controls[dl_id]
         downloaded_bytes = 0
-        downloads[dl_id]["file_path"] = output_path
-        downloads[dl_id]["partial_file_path"] = ""
+        downloads[dl_id].update({
+            "file_path": output_path,
+            "partial_file_path": "",
+            "progress_mode": "determinate" if total_bytes > 0 else "activity",
+            "stage_label": "Downloading",
+            "bytes_downloaded": 0,
+            "bytes_total": total_bytes,
+        })
         _persist_download_record(dl_id, force=True)
 
         with open(output_path, "wb") as file_obj:
@@ -2666,6 +2986,10 @@ def _download_direct_subtitle(dl_id: str, url: str, headers: dict[str, str] | No
                     "downloaded": _format_bytes(downloaded_bytes),
                     "total": _format_bytes(total_bytes),
                     "size": _format_bytes(total_bytes or downloaded_bytes),
+                    "bytes_downloaded": downloaded_bytes,
+                    "bytes_total": total_bytes,
+                    "progress_mode": "determinate" if total_bytes > 0 else "activity",
+                    "stage_label": "Downloading",
                     "file_path": output_path,
                 })
                 _persist_download_record(dl_id)
@@ -2675,6 +2999,10 @@ def _download_direct_subtitle(dl_id: str, url: str, headers: dict[str, str] | No
         "downloaded": _format_bytes(total_bytes or downloaded_bytes),
         "total": _format_bytes(total_bytes or downloaded_bytes),
         "size": _format_bytes(total_bytes or downloaded_bytes),
+        "bytes_downloaded": total_bytes or downloaded_bytes,
+        "bytes_total": total_bytes or downloaded_bytes,
+        "progress_mode": "determinate",
+        "stage_label": "Finalizing",
         "file_path": output_path,
     })
     _persist_download_record(dl_id, force=True)
@@ -2686,6 +3014,7 @@ def _download_via_aria2(
     url: str,
     dl_type: str,
     headers: dict[str, str] | None = None,
+    output_dir: str | Path | None = None,
 ) -> str:
     if not has_aria2():
         raise RuntimeError("aria2 is not installed. Switch to the standard downloader or install aria2c.")
@@ -2709,13 +3038,23 @@ def _download_via_aria2(
     except Exception:
         ext = _guess_subtitle_extension(url, "") if dl_type == "subtitle" else _guess_media_extension(url, "")
 
-    output_path = _safe_download_path(DOWNLOAD_DIR, target_title, ext, fallback)
+    output_path = _safe_variant_download_path(
+        output_dir or DOWNLOAD_DIR,
+        target_title,
+        ext,
+        fallback,
+        variant_label=downloads[dl_id].get("variant_label", ""),
+    )
     controls = download_controls[dl_id]
     downloads[dl_id].update({
         "file_path": output_path,
         "partial_file_path": output_path,
         "total": _format_bytes(total_bytes),
         "size": _format_bytes(total_bytes),
+        "bytes_downloaded": 0,
+        "bytes_total": total_bytes,
+        "progress_mode": "determinate" if total_bytes > 0 else "activity",
+        "stage_label": "Downloading",
     })
     _persist_download_record(dl_id, force=True)
 
@@ -2730,7 +3069,7 @@ def _download_via_aria2(
         "--summary-interval=0",
         "--console-log-level=warn",
         "--dir",
-        DOWNLOAD_DIR,
+        str(output_dir or DOWNLOAD_DIR),
         "--out",
         Path(output_path).name,
     ]
@@ -2803,6 +3142,10 @@ def _download_via_aria2(
                 "downloaded": _format_bytes(current_size),
                 "total": _format_bytes(total_bytes),
                 "size": _format_bytes(total_bytes or current_size),
+                "bytes_downloaded": current_size,
+                "bytes_total": total_bytes,
+                "progress_mode": "determinate" if total_bytes > 0 else "activity",
+                "stage_label": "Downloading",
                 "speed": speed,
                 "eta": eta,
                 "file_path": output_path,
@@ -2827,6 +3170,10 @@ def _download_via_aria2(
             "downloaded": total_label,
             "total": total_label,
             "size": total_label,
+            "bytes_downloaded": total_bytes or final_size,
+            "bytes_total": total_bytes or final_size,
+            "progress_mode": "determinate",
+            "stage_label": "Finalizing",
             "file_path": output_path,
             "partial_file_path": "",
             "speed": "",
@@ -2841,13 +3188,144 @@ def _download_via_aria2(
             process.stderr.close()
 
 
-def _download_hls_media(dl_id: str, url: str, headers: dict[str, str] | None = None) -> str:
+def _trim_downloaded_media(
+    dl_id: str,
+    input_path: str,
+    trim_start: float,
+    trim_end: float,
+    use_cpu: bool,
+) -> str:
+    if not has_ffmpeg():
+        raise RuntimeError("FFmpeg is required for trimmed video downloads. Install FFmpeg and try again.")
+
+    source = Path(input_path)
+    if not source.exists():
+        raise RuntimeError("Downloaded source file for trimming was not found.")
+
+    controls = download_controls[dl_id]
+    requested_length = max(0.1, float(trim_end) - float(trim_start))
+    trimmed_path = str(source.with_name(f"{source.stem}.trimmed{source.suffix or '.mp4'}"))
+    partial_path = f"{trimmed_path}.part"
+
+    command = [FFMPEG_PATH, "-y", "-ss", str(max(0.0, float(trim_start))), "-to", str(max(float(trim_start), float(trim_end))), "-i", str(source)]
+    if use_cpu:
+        command.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "192k"])
+    else:
+        command.extend(["-c", "copy", "-avoid_negative_ts", "1"])
+    command.append(partial_path)
+
+    downloads[dl_id].update({
+        "status": "processing",
+        "error": "",
+        "partial_file_path": partial_path,
+        "file_path": trimmed_path,
+        "speed": "",
+        "eta": "",
+        "progress_mode": "processing",
+        "stage_label": "Trimming",
+    })
+    _persist_download_record(dl_id, force=True)
+
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=creation_flags,
+    )
+    controls["process"] = process
+    controls["process_kind"] = "ffmpeg"
+    error_tail: list[str] = []
+
+    try:
+        while True:
+            while controls["pause"].is_set() and not controls["cancel"].is_set():
+                time.sleep(0.2)
+            if controls["cancel"].is_set():
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+                raise RuntimeError("Download canceled")
+
+            line = process.stderr.readline() if process.stderr else ""
+            if not line:
+                if process.poll() is not None:
+                    break
+                time.sleep(0.1)
+                continue
+
+            clean_line = line.strip()
+            if clean_line:
+                error_tail.append(clean_line)
+                if len(error_tail) > 12:
+                    error_tail.pop(0)
+
+            match = re.search(r"time=(\d+:\d+:\d+\.\d+)", line)
+            if match:
+                processed_seconds = _parse_timecode_to_seconds(match.group(1))
+                pct = min(100.0, round((processed_seconds / requested_length) * 100, 1)) if requested_length > 0 else 0
+                downloads[dl_id].update({
+                    "percent": pct,
+                    "downloaded": _format_eta(processed_seconds),
+                    "total": _format_eta(requested_length),
+                })
+                _persist_download_record(dl_id)
+
+        return_code = process.wait()
+        if return_code != 0:
+            raise RuntimeError(" | ".join(error_tail[-3:]) or f"FFmpeg trim exited with code {return_code}")
+
+        if Path(trimmed_path).exists():
+            Path(trimmed_path).unlink()
+        Path(partial_path).replace(trimmed_path)
+        try:
+            source.unlink()
+        except Exception:
+            pass
+
+        final_size = Path(trimmed_path).stat().st_size if Path(trimmed_path).exists() else 0
+        downloads[dl_id].update({
+            "status": "done",
+            "percent": 100,
+            "downloaded": _format_eta(requested_length),
+            "total": _format_eta(requested_length),
+            "size": _format_bytes(final_size),
+            "file_path": trimmed_path,
+            "partial_file_path": "",
+            "speed": "",
+            "eta": "0s",
+        })
+        _persist_download_record(dl_id, force=True)
+        return trimmed_path
+    finally:
+        controls["process"] = None
+        controls["process_kind"] = ""
+        if process.stderr:
+            process.stderr.close()
+
+
+def _download_hls_media(
+    dl_id: str,
+    url: str,
+    headers: dict[str, str] | None = None,
+    output_dir: str | Path | None = None,
+) -> str:
     if not has_ffmpeg():
         raise RuntimeError("FFmpeg is required for HLS downloads.")
 
     fallback = f"grabix-{dl_id}"
     target_title = downloads[dl_id].get("title") or Path(urlparse(url).path).stem or fallback
-    final_path = _safe_download_path(DOWNLOAD_DIR, target_title, "mkv", fallback)
+    final_path = _safe_variant_download_path(
+        output_dir or DOWNLOAD_DIR,
+        target_title,
+        "mkv",
+        fallback,
+        variant_label=downloads[dl_id].get("variant_label", ""),
+    )
     output_path = f"{final_path}.part.mkv"
 
     request_headers = {"User-Agent": "Mozilla/5.0"}
@@ -2878,6 +3356,8 @@ def _download_hls_media(dl_id: str, url: str, headers: dict[str, str] | None = N
         "size": "",
         "speed": "",
         "eta": "",
+        "progress_mode": "activity",
+        "stage_label": "Downloading",
     })
     _persist_download_record(dl_id, force=True)
 
@@ -2936,6 +3416,7 @@ def _download_hls_media(dl_id: str, url: str, headers: dict[str, str] | None = N
                             min(100.0, (current_seconds / total_duration_seconds) * 100),
                             1,
                         )
+                        downloads[dl_id]["progress_mode"] = "determinate"
                 speed_match = re.search(r"speed=\s*([0-9.]+)x", line)
                 if speed_match:
                     try:
@@ -2950,6 +3431,7 @@ def _download_hls_media(dl_id: str, url: str, headers: dict[str, str] | None = N
                     downloads[dl_id]["size"] = _format_bytes(current_size)
                     if not downloads[dl_id].get("downloaded"):
                         downloads[dl_id]["downloaded"] = _format_bytes(current_size)
+                    downloads[dl_id]["bytes_downloaded"] = current_size
                     now = time.monotonic()
                     elapsed = max(now - last_sample_ts, 0.001)
                     delta = max(0, current_size - last_size_sample)
@@ -2961,6 +3443,7 @@ def _download_hls_media(dl_id: str, url: str, headers: dict[str, str] | None = N
                     remaining_seconds = max(total_duration_seconds - current_seconds, 0.0)
                     if speed_factor > 0:
                         downloads[dl_id]["eta"] = _format_eta(remaining_seconds / speed_factor)
+                downloads[dl_id]["stage_label"] = "Downloading"
                 _persist_download_record(dl_id)
         finally:
             controls["process"] = None
@@ -2977,6 +3460,8 @@ def _download_hls_media(dl_id: str, url: str, headers: dict[str, str] | None = N
                 "percent": 100,
                 "file_path": final_path,
                 "partial_file_path": "",
+                "progress_mode": "processing",
+                "stage_label": "Finalizing",
             })
             _persist_download_record(dl_id, force=True)
             return final_path
@@ -2997,10 +3482,10 @@ def _download_strategy_for(params: dict | None) -> str:
     if engine == "aria2":
         if dl_type == "video" and _is_direct_media_url(url):
             return "aria2_direct_media"
-        if dl_type == "subtitle" and _is_direct_subtitle_url(url):
-            return "aria2_direct_subtitle"
-        if dl_type == "thumbnail":
-            return "aria2_thumbnail"
+        if dl_type in {"video", "audio"}:
+            return "aria2_yt_dlp"
+        if dl_type in {"subtitle", "thumbnail"}:
+            return "standard_small_asset"
         return "aria2_fallback_standard"
     if dl_type == "subtitle" and _is_direct_subtitle_url(url):
         return "direct_subtitle"
@@ -3032,11 +3517,11 @@ def _effective_download_engine(payload: dict | None) -> str:
         return "standard"
     if force_hls or trim_enabled:
         return "standard"
+    if dl_type in {"subtitle", "thumbnail"}:
+        return "standard"
     if dl_type == "video" and _is_direct_media_url(url):
         return "aria2"
-    if dl_type == "subtitle" and _is_direct_subtitle_url(url):
-        return "aria2"
-    if dl_type == "thumbnail":
+    if dl_type in {"video", "audio"}:
         return "aria2"
     return "standard"
 
@@ -3050,7 +3535,17 @@ def _download_engine_note(payload: dict | None) -> str:
         return ""
     if not has_aria2():
         return "aria2 is not installed, so GRABIX used the standard downloader."
-    return "aria2 currently works only for direct-file video, subtitle, and thumbnail downloads. GRABIX used the standard downloader here."
+    params = payload or {}
+    url = str(params.get("url") or "")
+    trim_enabled = bool(params.get("trim_enabled"))
+    force_hls = bool(params.get("force_hls")) or ".m3u8" in url.lower()
+    if trim_enabled:
+        return "aria2 is disabled when trim is on, so GRABIX used the standard downloader here."
+    if force_hls:
+        return "aria2 is disabled for HLS stream downloads, so GRABIX used the standard downloader here."
+    if str(params.get("dl_type") or "").lower() in {"subtitle", "thumbnail"}:
+        return "Small files always use the standard downloader, even when aria2 is selected."
+    return "aria2 could not be used for this download, so GRABIX used the standard downloader here."
 
 
 def _persist_download_record(dl_id: str, force: bool = False):
@@ -3108,6 +3603,7 @@ def _create_download_controls() -> dict:
 
 def _create_download_record(dl_id: str, title: str = "", params: dict | None = None) -> dict:
     pause_supported = bool((params or {}).get("can_pause", False))
+    estimated_total_bytes = int((params or {}).get("estimated_total_bytes") or 0)
     downloads[dl_id] = {
         "id": dl_id,
         "status": "queued",
@@ -3133,6 +3629,14 @@ def _create_download_record(dl_id: str, title: str = "", params: dict | None = N
         "download_engine": _effective_download_engine(params),
         "download_engine_requested": _requested_download_engine(params),
         "engine_note": _download_engine_note(params),
+        "downloaded": "",
+        "total": _format_bytes(estimated_total_bytes),
+        "size": _format_bytes(estimated_total_bytes),
+        "bytes_downloaded": 0,
+        "bytes_total": estimated_total_bytes,
+        "progress_mode": "activity" if estimated_total_bytes <= 0 else "determinate",
+        "stage_label": "Queued",
+        "variant_label": str((params or {}).get("variant_label") or ""),
     }
     download_controls[dl_id] = _create_download_controls()
     _persist_download_record(dl_id, force=True)
@@ -3142,6 +3646,7 @@ def _create_download_record(dl_id: str, title: str = "", params: dict | None = N
 def _public_download(d: dict) -> dict:
     return {
         "id": d.get("id"),
+        "url": (d.get("params") or {}).get("url", ""),
         "status": d.get("status"),
         "percent": d.get("percent", 0),
         "speed": d.get("speed", ""),
@@ -3165,6 +3670,11 @@ def _public_download(d: dict) -> dict:
         "download_engine": d.get("download_engine", "standard"),
         "download_engine_requested": d.get("download_engine_requested", "standard"),
         "engine_note": d.get("engine_note", ""),
+        "bytes_downloaded": d.get("bytes_downloaded", 0),
+        "bytes_total": d.get("bytes_total", 0),
+        "progress_mode": d.get("progress_mode", "activity"),
+        "stage_label": d.get("stage_label", ""),
+        "variant_label": d.get("variant_label", (d.get("params") or {}).get("variant_label", "")),
     }
 
 
@@ -3243,16 +3753,18 @@ def start_download(
         "download_engine": resolved_engine,
         "category": resolved_category,
         "tags_csv": resolved_tags,
+        "estimated_total_bytes": 0,
+        "variant_label": _variant_label_for_request(
+            dl_type,
+            quality,
+            audio_format,
+            audio_quality,
+            subtitle_lang,
+            thumbnail_format,
+        ),
     }
     effective_engine = _effective_download_engine(params)
-    pause_supported = (
-        dl_type == "video"
-        and (
-            force_hls
-            or _is_direct_media_url(safe_url)
-            or effective_engine == "aria2"
-        )
-    ) or (effective_engine == "aria2" and dl_type in {"subtitle", "thumbnail"})
+    pause_supported = dl_type in {"video", "audio", "subtitle", "thumbnail"}
     params["can_pause"] = pause_supported
     _create_download_record(dl_id, title=title, params=params)
 
@@ -3308,6 +3820,7 @@ def start_download(
                 }
                 downloads[dl_id]["title"] = meta["title"]
                 downloads[dl_id]["thumbnail"] = thumbnail or meta["thumbnail"]
+                params["estimated_total_bytes"] = _estimate_total_bytes_for_request(info, dl_type, quality)
                 db_insert(meta)
     except Exception as e:
         downloads[dl_id]["title"] = fallback_title
@@ -3507,7 +4020,8 @@ def download_action(dl_id: str, action: str):
         process = controls.get("process")
         if process is not None and process.poll() is None:
             _set_ffmpeg_process_state(process.pid, suspend=True)
-        if item["status"] == "downloading":
+        if item["status"] in {"downloading", "processing"}:
+            item["paused_from"] = item["status"]
             item["status"] = "paused"
             item["recoverable"] = True
             item["failure_code"] = "paused"
@@ -3534,10 +4048,11 @@ def download_action(dl_id: str, action: str):
             log_event(downloads_logger, logging.INFO, event="download_resumed", message="Download resumed from paused state.", details={"download_id": dl_id})
             _start_download_thread(dl_id)
         elif item["status"] == "paused":
-            item["status"] = "downloading"
+            resumed_status = str(item.pop("paused_from", "downloading") or "downloading")
+            item["status"] = resumed_status
             item["recoverable"] = False
             item["failure_code"] = ""
-            db_update_status(dl_id, "downloading", item.get("file_path", ""))
+            db_update_status(dl_id, resumed_status, item.get("file_path", ""))
             _persist_download_record(dl_id, force=True)
             log_event(downloads_logger, logging.INFO, event="download_resumed", message="Download process resumed.", details={"download_id": dl_id})
     elif action == "cancel":
@@ -3657,6 +4172,214 @@ def get_download_engines():
     }
 
 
+def _winget_available() -> bool:
+    return shutil.which("winget") is not None
+
+
+def _dependency_catalog() -> dict[str, dict[str, str]]:
+    return {
+        "ffmpeg": {
+            "label": "FFmpeg",
+            "winget_id": "Gyan.FFmpeg",
+            "description": "Required for trimming, converting, and some HLS workflows.",
+        },
+        "aria2": {
+            "label": "aria2",
+            "winget_id": "aria2.aria2",
+            "description": "Optional fast multi-connection downloader for supported direct files.",
+            "fallback_installer": "portable-zip",
+        },
+    }
+
+
+def _download_file(url: str, destination: Path) -> None:
+    request = URLRequest(url, headers={"User-Agent": "GRABIX/1.0"})
+    with urlopen(request, timeout=60) as response, open(destination, "wb") as handle:
+        shutil.copyfileobj(response, handle)
+
+
+def _github_latest_release_asset(repo: str, asset_matcher) -> tuple[str, str]:
+    api_url = f"https://api.github.com/repos/{repo}/releases/latest"
+    request = URLRequest(api_url, headers={"User-Agent": "GRABIX/1.0", "Accept": "application/vnd.github+json"})
+    with urlopen(request, timeout=60) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    for asset in payload.get("assets") or []:
+        name = str(asset.get("name") or "")
+        if asset_matcher(name):
+            return str(asset.get("browser_download_url") or ""), name
+    raise RuntimeError(f"No matching asset was found in the latest {repo} release.")
+
+
+def _install_aria2_portable(job: dict) -> str:
+    runtime_dir = RUNTIME_TOOLS_DIR / "aria2"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    job.update({"status": "downloading", "message": "Downloading aria2 portable package..."})
+    archive_url, archive_name = _github_latest_release_asset(
+        "aria2/aria2",
+        lambda name: name.lower().endswith(".zip") and "win-64bit" in name.lower(),
+    )
+
+    with tempfile.TemporaryDirectory(prefix="grabix-aria2-") as temp_dir_raw:
+        temp_dir = Path(temp_dir_raw)
+        archive_path = temp_dir / (archive_name or "aria2.zip")
+        _download_file(archive_url, archive_path)
+
+        extract_dir = temp_dir / "extract"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        job.update({"status": "installing", "message": "Extracting aria2 portable package..."})
+        with zipfile.ZipFile(archive_path) as archive:
+            archive.extractall(extract_dir)
+
+        binary = next((path for path in extract_dir.rglob("aria2c.exe") if path.is_file()), None)
+        if binary is None:
+            raise RuntimeError("aria2 portable package did not contain aria2c.exe.")
+
+        if runtime_dir.exists():
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+
+        source_root = binary.parent
+        for item in source_root.iterdir():
+            target = runtime_dir / item.name
+            if item.is_dir():
+                shutil.copytree(item, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, target)
+
+    return f"Portable aria2 installed to {runtime_dir}"
+
+
+def _dependency_status_payload() -> dict[str, dict]:
+    refresh_runtime_tools()
+    return {
+        "ffmpeg": {
+            "id": "ffmpeg",
+            "label": "FFmpeg",
+            "available": has_ffmpeg(),
+            "path": FFMPEG_PATH or "",
+            "description": "Required for trimming, converting, and some HLS workflows.",
+            "install_supported": _winget_available(),
+            "job": dependency_install_jobs.get("ffmpeg", {}),
+        },
+        "aria2": {
+            "id": "aria2",
+            "label": "aria2",
+            "available": has_aria2(),
+            "path": ARIA2_PATH or "",
+            "description": "Optional fast multi-connection downloader for supported direct files.",
+            "install_supported": True,
+            "job": dependency_install_jobs.get("aria2", {}),
+        },
+    }
+
+
+def get_runtime_dependencies():
+    return {
+        "winget_available": _winget_available(),
+        "dependencies": _dependency_status_payload(),
+    }
+
+
+def _install_dependency_worker(dep_id: str):
+    catalog = _dependency_catalog().get(dep_id)
+    job = dependency_install_jobs.setdefault(dep_id, {})
+    if not catalog:
+        job.update({"status": "failed", "message": "Unknown dependency."})
+        return
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    install_logs: list[str] = []
+    job.update({"status": "installing", "message": f"Installing {catalog['label']}...", "started_at": datetime.now().isoformat()})
+
+    try:
+        process = None
+        if _winget_available():
+            command = [
+                "winget", "install", "-e", "--id", catalog["winget_id"],
+                "--accept-package-agreements", "--accept-source-agreements",
+                "--disable-interactivity",
+            ]
+            process = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=creation_flags,
+                timeout=1800,
+            )
+            winget_output = "\n".join(
+                [part for part in [process.stdout.strip(), process.stderr.strip()] if part]
+            ).strip()
+            if winget_output:
+                install_logs.append(winget_output[-4000:])
+            refresh_runtime_tools()
+            available = has_ffmpeg() if dep_id == "ffmpeg" else has_aria2()
+            if process.returncode == 0 and available:
+                job.update({
+                    "status": "done",
+                    "message": f"{catalog['label']} is installed.",
+                    "completed_at": datetime.now().isoformat(),
+                    "output": "\n\n".join(install_logs)[-4000:],
+                })
+                return
+
+            if dep_id == "aria2":
+                failed_output = (winget_output or "").lower()
+                if "failed to extract" in failed_output or "archive" in failed_output or not available:
+                    fallback_message = _install_aria2_portable(job)
+                    install_logs.append(fallback_message)
+                    refresh_runtime_tools()
+                    if has_aria2():
+                        job.update({
+                            "status": "done",
+                            "message": "aria2 is installed and ready.",
+                            "completed_at": datetime.now().isoformat(),
+                            "output": "\n\n".join(install_logs)[-4000:],
+                        })
+                        return
+        elif dep_id == "aria2":
+            install_logs.append("winget is unavailable, using bundled portable install flow.")
+            fallback_message = _install_aria2_portable(job)
+            install_logs.append(fallback_message)
+            refresh_runtime_tools()
+            if has_aria2():
+                job.update({
+                    "status": "done",
+                    "message": "aria2 is installed and ready.",
+                    "completed_at": datetime.now().isoformat(),
+                    "output": "\n\n".join(install_logs)[-4000:],
+                })
+                return
+
+        if not _winget_available():
+            raise RuntimeError("winget is not available on this PC.")
+
+        raise RuntimeError("\n\n".join(install_logs).strip() or f"{catalog['label']} installation failed.")
+    except Exception as exc:
+        output = "\n\n".join([part for part in install_logs if part]).strip()
+        message = str(exc).strip() or f"{catalog['label']} installation failed."
+        job.update({
+            "status": "failed",
+            "message": message[-4000:],
+            "completed_at": datetime.now().isoformat(),
+            "output": (f"{output}\n\n{message}".strip())[-4000:],
+        })
+
+
+def install_runtime_dependency(dep_id: str):
+    dep_id = str(dep_id or "").strip().lower()
+    if dep_id not in _dependency_catalog():
+        raise HTTPException(status_code=404, detail="Unsupported dependency")
+    current_job = dependency_install_jobs.get(dep_id) or {}
+    if current_job.get("status") == "installing":
+        return {"started": False, "dependency": dep_id, "job": current_job}
+    dependency_install_jobs[dep_id] = {"status": "queued", "message": f"Queued {dep_id} installation."}
+    threading.Thread(target=_install_dependency_worker, args=(dep_id,), daemon=True).start()
+    return {"started": True, "dependency": dep_id, "job": dependency_install_jobs.get(dep_id, {})}
+
+
 def configure_adult_content(data: AdultContentConfigureRequest):
     password = (data.password or "").strip()
     if len(password) < 6:
@@ -3690,7 +4413,7 @@ def unlock_adult_content(data: AdultContentUnlockRequest, request: Request):
 
 
 # ── Download Task ─────────────────────────────────────────────────────────────
-def _resolve_final_file(raw_path: str, download_dir: str) -> str:
+def _resolve_final_file(raw_path: str, download_dir: str, preferred_ext: str = "") -> str:
     """
     After yt-dlp finishes, return the path to the real output file.
     The progress hook often stores a .part temp filename or a pre-merge filename.
@@ -3702,13 +4425,21 @@ def _resolve_final_file(raw_path: str, download_dir: str) -> str:
             candidate = p.with_suffix("")
             if candidate.exists() and candidate.is_file():
                 return str(candidate)
-        elif p.exists() and p.is_file():
+        elif p.exists() and p.is_file() and p.suffix.lower() not in {".part", ".ytdl", ".tmp", ".temp", ".aria2"}:
             return str(p)
 
-    # Fallback: find the most recently modified non-.part file in DOWNLOAD_DIR
+    # Fallback: find the most recently modified eligible file in the target directory.
     try:
-        files = [f for f in Path(download_dir).iterdir()
-                 if f.is_file() and f.suffix != ".part"]
+        preferred = str(preferred_ext or "").strip().lower().lstrip(".")
+        files = [
+            f for f in Path(download_dir).rglob("*")
+            if f.is_file() and f.suffix.lower() not in {".part", ".ytdl", ".tmp", ".temp", ".aria2"}
+        ]
+        if preferred:
+            preferred_files = [f for f in files if f.suffix.lower() == f".{preferred}"]
+            if preferred_files:
+                newest = max(preferred_files, key=lambda f: f.stat().st_mtime)
+                return str(newest)
         if files:
             newest = max(files, key=lambda f: f.stat().st_mtime)
             return str(newest)
@@ -3716,6 +4447,74 @@ def _resolve_final_file(raw_path: str, download_dir: str) -> str:
         pass
 
     return download_dir
+
+
+def _move_final_output(dl_id: str, source_path: str) -> str:
+    source = Path(source_path)
+    if not source.exists() or not source.is_file():
+        raise RuntimeError("The downloaded file could not be finalized because the output file was not found.")
+
+    fallback = f"grabix-{dl_id}"
+    target_title = downloads[dl_id].get("title") or source.stem or fallback
+    extension = source.suffix.lstrip(".") or "bin"
+    variant_label = _variant_label_for_output(dl_id, extension)
+    final_path = _safe_variant_download_path(
+        DOWNLOAD_DIR,
+        target_title,
+        extension,
+        fallback,
+        variant_label=variant_label,
+    )
+    shutil.move(str(source), final_path)
+    downloads[dl_id]["variant_label"] = variant_label
+    params = dict(downloads[dl_id].get("params") or {})
+    params["variant_label"] = variant_label
+    downloads[dl_id]["params"] = params
+    return final_path
+
+
+def _finalize_download_output(
+    dl_id: str,
+    file_path: str,
+    dl_type: str,
+    trim_enabled: bool,
+    trim_start: float,
+    trim_end: float,
+    use_cpu: bool,
+) -> str:
+    final_source = file_path
+    if dl_type == "video" and trim_enabled and trim_end > trim_start:
+        final_source = _trim_downloaded_media(dl_id, final_source, trim_start, trim_end, use_cpu)
+
+    downloads[dl_id].update({
+        "status": "processing",
+        "progress_mode": "processing",
+        "stage_label": "Finalizing",
+        "speed": "",
+        "eta": "",
+    })
+    _persist_download_record(dl_id, force=True)
+
+    final_path = _move_final_output(dl_id, final_source)
+    final_size = Path(final_path).stat().st_size if Path(final_path).exists() else 0
+    downloads[dl_id].update({
+        "file_path": final_path,
+        "partial_file_path": "",
+        "status": "done",
+        "percent": 100,
+        "downloaded": _format_bytes(final_size),
+        "total": _format_bytes(final_size),
+        "size": _format_bytes(final_size),
+        "bytes_downloaded": final_size,
+        "bytes_total": final_size,
+        "progress_mode": "determinate",
+        "stage_label": "Completed",
+        "speed": "",
+        "eta": "0s",
+    })
+    db_update_status(dl_id, "done", final_path)
+    _persist_download_record(dl_id, force=True)
+    return final_path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3817,7 +4616,13 @@ def _build_library_index() -> list[dict]:
         item["broken"] = broken
         item["source_type"] = "history"
         item["library_status"] = "broken" if broken else (item.get("status") or "done")
-        item["category"] = item.get("category") or _infer_download_category(
+        item["category"] = _infer_download_category(
+            str(item.get("url") or ""),
+            str(item.get("title") or ""),
+            str(item.get("dl_type") or ""),
+            str(item.get("category") or ""),
+        )
+        item["display_layout"] = _infer_library_display_layout(
             str(item.get("url") or ""),
             str(item.get("title") or ""),
             str(item.get("dl_type") or ""),
@@ -3855,6 +4660,7 @@ def _build_library_index() -> list[dict]:
             "created_at": created_at,
             "tags": "untracked,local",
             "category": _infer_download_category("", path.stem, dl_type, ""),
+            "display_layout": _infer_library_display_layout("", path.stem, dl_type, ""),
             "file_size": file_size,
             "file_size_label": _format_bytes_int(file_size),
             "file_exists": True,
@@ -4283,6 +5089,8 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         except Exception:
             request_headers = {}
     effective_engine = downloads[dl_id].get("download_engine") or _effective_download_engine(downloads[dl_id].get("params"))
+    estimated_total_bytes = int((downloads[dl_id].get("params") or {}).get("estimated_total_bytes") or 0)
+    workspace = _prepare_job_workspace(dl_id)
 
     def progress_hook(d):
         while controls["pause"].is_set() and not controls["cancel"].is_set():
@@ -4290,6 +5098,26 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
 
         if controls["cancel"].is_set():
             raise RuntimeError("Download canceled")
+
+        # aria2-backed yt-dlp downloads are tracked by the external file monitor.
+        # Mixing yt-dlp's per-stream events with that monitor causes progress jumps.
+        if effective_engine == "aria2" and dl_type in {"video", "audio"}:
+            if d["status"] == "downloading":
+                filename = d.get("filename", "")
+                if filename:
+                    downloads[dl_id]["file_path"] = filename
+                    downloads[dl_id]["stage_label"] = "Downloading"
+                    _persist_download_record(dl_id)
+            elif d["status"] == "finished":
+                downloads[dl_id].update({
+                    "status": "processing",
+                    "progress_mode": "processing",
+                    "stage_label": "Merging",
+                    "speed": "",
+                    "eta": "",
+                })
+                _persist_download_record(dl_id, force=True)
+            return
 
         if d["status"] == "downloading":
             downloaded_bytes = d.get("downloaded_bytes") or 0
@@ -4307,20 +5135,26 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
                 "downloaded": _format_bytes(downloaded_bytes),
                 "total": _format_bytes(total_bytes),
                 "size": _format_bytes(total_bytes or downloaded_bytes),
+                "bytes_downloaded": downloaded_bytes,
+                "bytes_total": total_bytes,
+                "progress_mode": "determinate" if total_bytes else "activity",
+                "stage_label": "Downloading",
                 "file_path": d.get("filename", downloads[dl_id].get("file_path", "")),
+                "partial_file_path": d.get("filename", downloads[dl_id].get("partial_file_path", "")),
             })
             _persist_download_record(dl_id)
         elif d["status"] == "finished":
-            downloads[dl_id]["percent"] = 100
-            downloads[dl_id]["eta"] = "0s"
-            downloads[dl_id]["speed"] = ""
-            downloads[dl_id]["downloaded"] = downloads[dl_id].get("total") or downloads[dl_id].get("downloaded", "")
-            downloads[dl_id]["size"] = downloads[dl_id].get("total") or downloads[dl_id].get("size", "")
-            downloads[dl_id]["file_path"] = d.get("filename", downloads[dl_id].get("file_path", ""))
-            downloads[dl_id]["partial_file_path"] = ""
+            downloads[dl_id].update({
+                "status": "processing",
+                "progress_mode": "processing",
+                "stage_label": "Finalizing",
+                "eta": "",
+                "speed": "",
+                "file_path": d.get("filename", downloads[dl_id].get("file_path", "")),
+            })
             _persist_download_record(dl_id, force=True)
 
-    template = _yt_dlp_output_template(dl_id, url)
+    template = str(workspace / f"{_yt_dlp_output_stem(dl_id, url)}.%(ext)s")
     opts: dict = {
         "outtmpl": template,
         "noplaylist": True,
@@ -4328,82 +5162,49 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         "continuedl": True,
         "windowsfilenames": True,
     }
+    if effective_engine == "aria2" and has_aria2():
+        opts["external_downloader"] = ARIA2_PATH
+        opts["external_downloader_args"] = {
+            "default": [
+                "--max-connection-per-server=16",
+                "--split=16",
+                "--min-split-size=1M",
+                "--file-allocation=none",
+                "--summary-interval=1",
+                "--download-result=hide",
+                "--console-log-level=warn",
+            ]
+        }
+    monitor_stop_event: threading.Event | None = None
+    monitor_thread: threading.Thread | None = None
 
     try:
         if effective_engine == "aria2" and not (force_hls or ".m3u8" in url.lower()):
             if dl_type == "video" and _is_direct_media_url(url):
-                output_path = _download_via_aria2(dl_id, url, dl_type, request_headers)
-                downloads[dl_id]["file_path"] = output_path
-                downloads[dl_id]["status"] = "done"
-                downloads[dl_id]["percent"] = 100
-                downloads[dl_id]["partial_file_path"] = ""
-                db_update_status(dl_id, "done", output_path)
-                _persist_download_record(dl_id, force=True)
-                return
-            if dl_type == "subtitle" and _is_direct_subtitle_url(url):
-                output_path = _download_via_aria2(dl_id, url, dl_type, request_headers)
-                downloads[dl_id]["file_path"] = output_path
-                downloads[dl_id]["status"] = "done"
-                downloads[dl_id]["percent"] = 100
-                downloads[dl_id]["partial_file_path"] = ""
-                db_update_status(dl_id, "done", output_path)
-                _persist_download_record(dl_id, force=True)
-                return
-            if dl_type == "thumbnail":
-                output_path = _download_via_aria2(dl_id, url, dl_type, request_headers)
-                downloads[dl_id]["file_path"] = output_path
-                downloads[dl_id]["status"] = "done"
-                downloads[dl_id]["percent"] = 100
-                downloads[dl_id]["partial_file_path"] = ""
-                db_update_status(dl_id, "done", output_path)
-                _persist_download_record(dl_id, force=True)
+                output_path = _download_via_aria2(dl_id, url, dl_type, request_headers, output_dir=workspace)
+                _finalize_download_output(dl_id, output_path, dl_type, trim_enabled, trim_start, trim_end, use_cpu)
                 return
 
         if dl_type == "video" and (force_hls or ".m3u8" in url.lower()):
-            output_path = _download_hls_media(dl_id, url, request_headers)
-            downloads[dl_id]["file_path"] = output_path
-            downloads[dl_id]["status"] = "done"
-            downloads[dl_id]["percent"] = 100
-            downloads[dl_id]["partial_file_path"] = ""
-            db_update_status(dl_id, "done", output_path)
-            _persist_download_record(dl_id, force=True)
+            output_path = _download_hls_media(dl_id, url, request_headers, output_dir=workspace)
+            _finalize_download_output(dl_id, output_path, dl_type, trim_enabled, trim_start, trim_end, use_cpu)
             return
 
         if dl_type == "video" and _is_direct_media_url(url):
-            output_path = _download_direct_media(dl_id, url, request_headers)
-            downloads[dl_id]["file_path"] = output_path
-            downloads[dl_id]["status"] = "done"
-            downloads[dl_id]["percent"] = 100
-            downloads[dl_id]["partial_file_path"] = ""
-            db_update_status(dl_id, "done", output_path)
-            _persist_download_record(dl_id, force=True)
+            output_path = _download_direct_media(dl_id, url, request_headers, output_dir=workspace)
+            _finalize_download_output(dl_id, output_path, dl_type, trim_enabled, trim_start, trim_end, use_cpu)
             return
 
         if dl_type == "subtitle" and _is_direct_subtitle_url(url):
-            output_path = _download_direct_subtitle(dl_id, url, request_headers)
-            downloads[dl_id]["file_path"] = output_path
-            downloads[dl_id]["status"] = "done"
-            downloads[dl_id]["percent"] = 100
-            downloads[dl_id]["partial_file_path"] = ""
-            db_update_status(dl_id, "done", output_path)
-            _persist_download_record(dl_id, force=True)
+            output_path = _download_direct_subtitle(dl_id, url, request_headers, output_dir=workspace)
+            _finalize_download_output(dl_id, output_path, dl_type, trim_enabled, trim_start, trim_end, use_cpu)
             return
 
         if dl_type == "video":
             opts["format"] = _build_video_format_selector(quality)
             if trim_enabled and trim_end > trim_start:
-                # Always set the download range — this is what actually restricts what yt-dlp fetches
-                opts["download_ranges"] = yt_dlp.utils.download_range_func(
-                    None, [(float(trim_start), float(trim_end))]
-                )
-                if use_cpu:
-                    # Precise cut: re-encode with FFmpeg for frame-accurate trim
-                    if not has_ffmpeg():
-                        raise RuntimeError("Precise trim (With CPU) requires FFmpeg. Switch to 'No CPU' mode or install FFmpeg.")
-                    opts["force_keyframes_at_cuts"] = True
-                else:
-                    # Fast cut: no re-encode, trim aligns to nearest keyframe (±2s)
-                    opts["force_keyframes_at_cuts"] = False
+                if not has_ffmpeg():
+                    raise RuntimeError("Trimmed video downloads require FFmpeg. Install FFmpeg from the downloader tools panel and try again.")
 
         elif dl_type == "audio":
             opts["format"] = "bestaudio/best"
@@ -4430,18 +5231,29 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
             opts["http_headers"] = request_headers
 
         with yt_dlp.YoutubeDL(opts) as ydl:
+            if effective_engine == "aria2" and dl_type in {"video", "audio"}:
+                try:
+                    monitor_stop_event, monitor_thread = _start_external_downloader_progress_monitor(
+                        dl_id,
+                        workspace,
+                        expected_total_bytes=estimated_total_bytes,
+                    )
+                except Exception:
+                    monitor_stop_event, monitor_thread = _start_external_downloader_progress_monitor(
+                        dl_id,
+                        workspace,
+                        expected_total_bytes=estimated_total_bytes,
+                    )
             ydl.download([url])
 
-        # Resolve real output file — progress hook stores temp/partial path,
-        # after merge/postprocessing the final file may have a different name.
+        preferred_ext = ""
+        if dl_type == "audio" and has_ffmpeg():
+            preferred_ext = audio_format
+        elif dl_type == "thumbnail":
+            preferred_ext = thumbnail_format
         raw_path = downloads[dl_id].get("file_path", "")
-        file_path = _resolve_final_file(raw_path, DOWNLOAD_DIR)
-        downloads[dl_id]["file_path"] = file_path
-        downloads[dl_id]["status"] = "done"
-        downloads[dl_id]["percent"] = 100
-        downloads[dl_id]["partial_file_path"] = ""
-        db_update_status(dl_id, "done", file_path)
-        _persist_download_record(dl_id, force=True)
+        file_path = _resolve_final_file(raw_path, str(workspace), preferred_ext=preferred_ext)
+        _finalize_download_output(dl_id, file_path, dl_type, trim_enabled, trim_start, trim_end, use_cpu)
 
     except Exception as e:
         status = "canceled" if controls["cancel"].is_set() else "failed"
@@ -4452,9 +5264,16 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         downloads[dl_id]["error"] = error_text
         downloads[dl_id]["recoverable"] = status == "failed"
         downloads[dl_id]["failure_code"] = "download_canceled" if status == "canceled" else "download_failed"
+        downloads[dl_id]["progress_mode"] = "activity"
+        downloads[dl_id]["stage_label"] = "Canceled" if status == "canceled" else "Failed"
         db_update_status(dl_id, status, downloads[dl_id].get("file_path", ""))
         _persist_download_record(dl_id, force=True)
     finally:
+        if monitor_stop_event is not None:
+          monitor_stop_event.set()
+        if monitor_thread is not None and monitor_thread.is_alive():
+          monitor_thread.join(timeout=1.0)
+        _cleanup_job_workspace(dl_id)
         controls["pause"].clear()
         controls["process"] = None
         controls["process_kind"] = ""
@@ -4723,7 +5542,7 @@ async def health_services() -> dict:
     anime = _service_payload(
         "anime",
         "online" if consumet_health.get("healthy") else "degraded",
-        "Anime playback is fully available." if consumet_health.get("healthy") else "Anime will use fallback providers until Consumet recovers.",
+        "Anime playback is fully available." if consumet_health.get("healthy") else "Anime playback is running on the built-in fallback stack.",
         True,
     )
     ffmpeg = _service_payload(

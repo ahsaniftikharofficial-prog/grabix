@@ -1291,21 +1291,6 @@ async def resolve_anime_playback(
                 )
             )
 
-    moviebox_sources = await _resolve_moviebox_sources_by_title(
-        registry=registry,
-        correlation_id=correlation_id,
-        titles=title_candidates,
-        media_type="movie" if is_movie else "anime",
-        season=max(1, fallback_season),
-        episode=max(1, fallback_episode or episode_number),
-        prefer_hindi=False,
-        anime_only=not is_movie,
-        attempts=attempts,
-        fallback_used=not bool(groups),
-    )
-    if moviebox_sources:
-        groups.append({"id": "moviebox", "label": "Movie Box fallback", "sources": moviebox_sources})
-
     for candidate in candidate_items:
         provider_name = str(candidate.get("provider") or "zoro").strip() or "zoro"
         anime_id = str(candidate.get("anime_id") or candidate.get("animeId") or candidate.get("id") or "").strip()
@@ -1349,6 +1334,21 @@ async def resolve_anime_playback(
                     retryable=error.retryable,
                 )
             )
+
+    moviebox_sources = await _resolve_moviebox_sources_by_title(
+        registry=registry,
+        correlation_id=correlation_id,
+        titles=title_candidates,
+        media_type="movie" if is_movie else "anime",
+        season=max(1, fallback_season),
+        episode=max(1, fallback_episode or episode_number),
+        prefer_hindi=False,
+        anime_only=not is_movie,
+        attempts=attempts,
+        fallback_used=not bool(groups),
+    )
+    if moviebox_sources:
+        groups.append({"id": "moviebox", "label": "Movie Box fallback", "sources": moviebox_sources})
 
     if tmdb_id:
         try:

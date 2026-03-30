@@ -33,7 +33,7 @@ export type Page = "downloader" | "converter" | "library" | "anime" | "manga" | 
 
 interface Props {
   page: Page;
-  setPage: (p: Page) => void;
+  setPage: (p: Page, options?: { refresh?: boolean }) => void;
   activeDownloads: number;
   runtimeState: RuntimeState;
   runtimeHealth: RuntimeHealthPayload | null;
@@ -102,7 +102,7 @@ export default function Sidebar({ page, setPage, activeDownloads, runtimeState, 
           <div key={group.label} style={{ marginBottom: 6 }}>
             <div style={{ fontSize: 10, fontWeight: 600, color: "var(--text-muted)", letterSpacing: 1, padding: "8px 12px 4px", textTransform: "uppercase" }}>{group.label}</div>
             {group.items.map(({ id, label, Icon }) => (
-              <div key={id} className={`nav-item${page === id ? " active" : ""}`} onClick={() => setPage(id)}>
+              <div key={id} className={`nav-item${page === id ? " active" : ""}`} onClick={() => setPage(id, { refresh: page === id })}>
                 {id === "favorites" ? (
                   <IconHeart size={16} color={page === id ? "currentColor" : "var(--text-danger)"} filled />
                 ) : (

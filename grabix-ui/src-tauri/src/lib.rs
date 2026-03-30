@@ -214,6 +214,21 @@ fn spawn_process(program: &Path, envs: &[(&str, &str)]) -> Result<Child, String>
     command.spawn().map_err(|error| error.to_string())
 }
 
+fn terminate_child_process(child: &mut Child) {
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("taskkill");
+        let _ = command
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(0x08000000)
+            .status();
+    }
+
+    let _ = child.kill();
+}
+
 fn sidecar_ready(port: u16, health_path: &str, timeout_secs: u64) -> bool {
     if !health_path.is_empty() && wait_for_http_ok(port, health_path, timeout_secs) {
         return true;
@@ -389,19 +404,17 @@ fn initial_diagnostics(app: &AppHandle) -> StartupDiagnostics {
         consumet: SidecarDiagnostic {
             name: String::from("consumet"),
             status: if cfg!(debug_assertions) {
-                String::from("development")
+                String::from("internal")
             } else {
-                String::from("starting")
+                String::from("internal")
             },
             message: if cfg!(debug_assertions) {
-                String::from("Debug mode uses the local development consumet service.")
+                String::from("Anime provider logic is handled inside the Python backend during development.")
             } else {
-                String::from("Waiting for the packaged anime provider sidecar.")
+                String::from("Anime provider logic is handled inside the packaged Python backend.")
             },
-            port: 3000,
-            binary_path: resource_bin(app, "grabix-consumet.exe")
-                .map(|path| path.display().to_string())
-                .unwrap_or_default(),
+            port: 0,
+            binary_path: String::new(),
         },
     }
 }
@@ -410,15 +423,11 @@ fn start_sidecars(app: &AppHandle) -> StartupOutcome {
     let mut children = Vec::new();
     let mut diagnostics = initial_diagnostics(app);
     let backend_path = resource_bin(app, "grabix-backend.exe");
-    let consumet_path = resource_bin(app, "grabix-consumet.exe");
     diagnostics.backend.binary_path = backend_path
         .as_ref()
         .map(|path| path.display().to_string())
         .unwrap_or_default();
-    diagnostics.consumet.binary_path = consumet_path
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
+    diagnostics.consumet.binary_path = String::new();
 
     if wait_for_http_ok(8000, "/health/ping", 2) || wait_for_port(8000, 2) {
         diagnostics.backend.status = String::from("reused");
@@ -432,7 +441,7 @@ fn start_sidecars(app: &AppHandle) -> StartupOutcome {
             app,
             &mut diagnostics.backend,
             &path,
-            &[("CONSUMET_API_BASE", "http://127.0.0.1:3000")],
+            &[],
             "/health/ping",
             12,
             "Backend is healthy on port 8000.",
@@ -446,31 +455,10 @@ fn start_sidecars(app: &AppHandle) -> StartupOutcome {
         log_sidecar(app, "Backend sidecar binary was not found.");
     }
 
-    if wait_for_http_ok(3000, "/", 1) {
-        diagnostics.consumet.status = String::from("reused");
-        diagnostics.consumet.message = String::from("Consumet service is already running on port 3000.");
-        log_sidecar(app, "Consumet port 3000 already active. Reusing existing service.");
-    } else if let Some(path) = consumet_path {
-        diagnostics.consumet.status = String::from("starting");
-        diagnostics.consumet.message =
-            String::from("Launching the anime provider in the background. GRABIX can open before it finishes.");
-        log_sidecar(app, &format!("Launching packaged provider from {} in background mode.", path.display()));
-        match spawn_process(&path, &[("PORT", "3000")]) {
-            Ok(child) => {
-                children.push(child);
-            }
-            Err(error) => {
-                diagnostics.consumet.status = String::from("failed");
-                diagnostics.consumet.message = format!("Consumet could not be launched: {}", error);
-                log_sidecar(app, &diagnostics.consumet.message);
-            }
-        }
-    } else {
-        diagnostics.consumet.status = String::from("missing");
-        diagnostics.consumet.message =
-            String::from("Packaged consumet sidecar was not found in the installer resources.");
-        log_sidecar(app, "Consumet sidecar binary was not found.");
-    }
+    diagnostics.consumet.status = String::from("internal");
+    diagnostics.consumet.message =
+        String::from("Anime provider startup is no longer a separate sidecar dependency.");
+    log_sidecar(app, "Anime provider is handled inside the Python backend. No extra sidecar launched.");
 
     diagnostics.startup_ready = diagnostics.backend.status == "started"
         || diagnostics.backend.status == "reused"
@@ -546,7 +534,7 @@ pub fn run() {
             let lock_result = state.children.lock();
             if let Ok(mut children) = lock_result {
                 for child in children.iter_mut() {
-                    let _ = child.kill();
+                    terminate_child_process(child);
                 }
                 children.clear();
             }

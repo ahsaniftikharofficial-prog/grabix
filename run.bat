@@ -12,34 +12,28 @@ echo.
 set "ROOT=%~dp0"
 set "BACKEND=%ROOT%backend"
 set "FRONTEND=%ROOT%grabix-ui"
-set "CONSUMET=%ROOT%consumet-local"
 set "SCRIPTS=%ROOT%scripts"
-set "CONSUMET_PORT=3000"
 set "BACKEND_PORT=8000"
 set "FRONTEND_PORT=5173"
 set "BACKEND_LOG=%BACKEND%\logs\launcher-backend.log"
-set "CONSUMET_LOG=%BACKEND%\logs\launcher-consumet.log"
 set "FRONTEND_LOG=%BACKEND%\logs\launcher-frontend.log"
 
 echo  [CLEANUP] Closing installed GRABIX processes that can hijack source-mode ports...
 taskkill /IM grabix-ui.exe /F >nul 2>&1
 taskkill /IM grabix-backend.exe /F >nul 2>&1
-taskkill /IM grabix-consumet.exe /F >nul 2>&1
 taskkill /FI "WINDOWTITLE eq GRABIX Backend" /F >nul 2>&1
 taskkill /FI "WINDOWTITLE eq GRABIX Frontend" /F >nul 2>&1
-taskkill /FI "WINDOWTITLE eq GRABIX Consumet" /F >nul 2>&1
 echo  [CLEANUP] Closing stale source-mode GRABIX Python/Node processes...
 powershell -NoProfile -Command ^
-  "$roots=@('H:\\Code\\Project 3\\grabix\\backend\\main.py','H:\\Code\\Project 3\\grabix\\consumet-local','H:\\Code\\Project 3\\grabix\\grabix-ui');" ^
+  "$roots=@('H:\\Code\\Project 3\\grabix\\backend\\main.py','H:\\Code\\Project 3\\grabix\\grabix-ui');" ^
   "Get-CimInstance Win32_Process | Where-Object { $cmd=$_.CommandLine; $name=$_.Name; $cmd -and ($name -in @('python.exe','pythonw.exe','node.exe','npm.exe','cmd.exe')) -and (($roots | Where-Object { $cmd -like ('*' + $_ + '*') }).Count -gt 0) } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }"
 
 echo  [CLEANUP] Releasing fixed GRABIX dev ports...
 powershell -NoProfile -Command ^
-  "$ports=@(%CONSUMET_PORT%,%BACKEND_PORT%,%FRONTEND_PORT%); foreach($port in $ports){ Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $port -State Listen -ErrorAction SilentlyContinue | ForEach-Object { try { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } catch {} } }"
+  "$ports=@(%BACKEND_PORT%,%FRONTEND_PORT%); foreach($port in $ports){ Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $port -State Listen -ErrorAction SilentlyContinue | ForEach-Object { try { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } catch {} } }"
 
 if not exist "%BACKEND%\logs" mkdir "%BACKEND%\logs" >nul 2>&1
 if exist "%BACKEND_LOG%" del /f /q "%BACKEND_LOG%" >nul 2>&1
-if exist "%CONSUMET_LOG%" del /f /q "%CONSUMET_LOG%" >nul 2>&1
 if exist "%FRONTEND_LOG%" del /f /q "%FRONTEND_LOG%" >nul 2>&1
 
 python --version >nul 2>&1
@@ -80,32 +74,6 @@ if not exist "%FRONTEND%\node_modules" (
     echo  [SETUP] Frontend packages installed.
 )
 
-if not exist "%CONSUMET%\node_modules" (
-    echo  [SETUP] Installing local Consumet gateway packages ^(first time only, takes a minute^)...
-    cd /d "%CONSUMET%"
-    npm.cmd install --silent
-    if errorlevel 1 (
-        echo  [ERROR] Local Consumet gateway package install failed.
-        pause
-        exit /b 1
-    )
-    echo  [SETUP] Local Consumet gateway packages installed.
-)
-
-if not exist "%CONSUMET%\node_modules\aniwatch\dist\index.js" (
-    echo  [SETUP] Repairing local Consumet gateway packages...
-    cd /d "%CONSUMET%"
-    if exist node_modules rmdir /s /q node_modules
-    if exist package-lock.json del /f /q package-lock.json
-    npm.cmd install --silent
-    if errorlevel 1 (
-        echo  [ERROR] Local Consumet gateway repair failed.
-        pause
-        exit /b 1
-    )
-)
-
-set "CONSUMET_BASE=http://127.0.0.1:%CONSUMET_PORT%"
 set "BACKEND_BASE=http://127.0.0.1:%BACKEND_PORT%"
 set "FRONTEND_BASE=http://127.0.0.1:%FRONTEND_PORT%"
 set "FRONTEND_ENV_FILE=%FRONTEND%\.env.development.local"
@@ -114,18 +82,8 @@ set "FRONTEND_ENV_FILE=%FRONTEND%\.env.development.local"
     echo VITE_GRABIX_API_BASE=%BACKEND_BASE%
 )
 
-echo  [START] Launching local Consumet gateway on %CONSUMET_BASE%
-start "GRABIX Consumet" /min cmd /c call "%SCRIPTS%\start-consumet.cmd" "%CONSUMET%" "%CONSUMET_PORT%" "%CONSUMET_LOG%"
-
-echo  [WAIT] Waiting for local Consumet gateway...
-powershell -NoProfile -Command ^
-  "$ready=$false; for($i=0;$i -lt 50;$i++){ Start-Sleep -Milliseconds 400; try { $r=Invoke-WebRequest -Uri '%CONSUMET_BASE%/' -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200){$ready=$true; break} } catch {} }; if(-not $ready){ exit 1 }"
-if errorlevel 1 (
-    echo  [WARN] Consumet did not become ready in time. GRABIX will keep going with fallback providers.
-)
-
 echo  [START] Launching backend on %BACKEND_BASE%
-start "GRABIX Backend" /min cmd /c call "%SCRIPTS%\start-backend.cmd" "%BACKEND%" "%CONSUMET_BASE%" "%BACKEND_PORT%" "%BACKEND_BASE%" "%BACKEND_LOG%"
+start "GRABIX Backend" /min cmd /c call "%SCRIPTS%\start-backend.cmd" "%BACKEND%" "%BACKEND_PORT%" "%BACKEND_BASE%" "%BACKEND_LOG%"
 
 echo  [WAIT] Waiting for backend health...
 powershell -NoProfile -Command ^
@@ -156,7 +114,6 @@ echo.
 echo  ==========================================
 echo    All services are starting!
 echo.
-echo    Consumet: %CONSUMET_BASE%
 echo    Backend:  %BACKEND_BASE%
 echo    Frontend: %FRONTEND_BASE%
 echo  ==========================================

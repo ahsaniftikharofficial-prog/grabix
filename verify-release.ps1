@@ -22,12 +22,14 @@ $report = [ordered]@{
 }
 
 $expectedBinaries = @(
-  "grabix-backend.exe",
-  "grabix-consumet.exe"
+  "grabix-backend.exe"
 )
 
 foreach ($binary in $expectedBinaries) {
   $binaryPath = Join-Path $tauriBin $binary
+  if (-not (Test-Path $binaryPath) -and $binary -eq "grabix-backend.exe") {
+    $binaryPath = Join-Path $tauriBin "grabix-backend\grabix-backend.exe"
+  }
   if (Test-Path $binaryPath) {
     $hash = Get-FileHash -Algorithm SHA256 -Path $binaryPath
     $report.packaged_binaries[$binary] = [ordered]@{
