@@ -82,3 +82,7 @@ $RECYCLE.BIN/
 *.dmg
 *.AppImage
 grabix-ui/src-tauri/target/
+
+
+
+grabix-ui/src-tauri/bin/grabix-backend/
