@@ -59,7 +59,7 @@ export function useOfflineDetection(backendPingUrl: string): OfflineState {
         return;
       }
       try {
-        const res = await fetch(`${backendPingUrl}/ping`, {
+        const res = await fetch(`${backendPingUrl}/health/ping`, {
           method: "GET",
           signal: AbortSignal.timeout(3000),
           cache: "no-store",

@@ -568,9 +568,9 @@ html, body, #root {
   appearance: none;
   height: 4px;
   border-radius: 999px;
-  background: rgba(255,255,255,0.24);
+  background: linear-gradient(to right, #a855f7 var(--progress, 0%), rgba(255,255,255,0.24) var(--progress, 0%));
   outline: none;
-  transition: transform 0.18s ease, background 0.18s ease;
+  transition: transform 0.18s ease;
 }
 .player-progress-range:hover {
   transform: scaleY(1.35);
