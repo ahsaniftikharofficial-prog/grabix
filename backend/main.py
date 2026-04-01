@@ -584,6 +584,15 @@ def init_db():
                 params_json TEXT DEFAULT '{}'
             )
         """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS provider_status (
+                provider TEXT PRIMARY KEY,
+                available INTEGER DEFAULT 0,
+                last_checked_at TEXT,
+                last_error TEXT DEFAULT '',
+                consecutive_failures INTEGER DEFAULT 0
+            )
+        """)
         con.commit()
         con.close()
         log_event(backend_logger, logging.INFO, event="db_init", message="Database initialized successfully.")
@@ -592,6 +601,115 @@ def init_db():
 
 
 init_db()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Provider Status Persistence + Background Auto-Retry
+# ---------------------------------------------------------------------------
+
+def _save_provider_status_to_db(provider: str, available: bool, error: str = "") -> None:
+    """Persist provider availability to SQLite so restarts remember last known state."""
+    try:
+        con = get_db_connection()
+        con.execute(
+            """
+            INSERT INTO provider_status (provider, available, last_checked_at, last_error, consecutive_failures)
+            VALUES (?, ?, ?, ?, 0)
+            ON CONFLICT(provider) DO UPDATE SET
+                available=excluded.available,
+                last_checked_at=excluded.last_checked_at,
+                last_error=excluded.last_error,
+                consecutive_failures=CASE WHEN excluded.available=1 THEN 0 ELSE consecutive_failures+1 END
+            """,
+            (provider, 1 if available else 0, datetime.utcnow().isoformat(), error),
+        )
+        con.commit()
+        con.close()
+    except Exception:
+        pass  # DB persistence is best-effort — never crash the main thread
+
+
+def _restore_provider_status_from_db() -> None:
+    """On startup, restore last-known provider availability from SQLite."""
+    global MOVIEBOX_AVAILABLE, MOVIEBOX_IMPORT_ERROR
+    try:
+        con = get_db_connection()
+        row = con.execute(
+            "SELECT available, last_error FROM provider_status WHERE provider=?", ("moviebox",)
+        ).fetchone()
+        con.close()
+        if row and row["available"] == 1:
+            # Only restore to "available" if we also succeed loading the module right now
+            result = _ensure_moviebox()
+            if result:
+                log_event(
+                    backend_logger, logging.INFO,
+                    event="moviebox_restored",
+                    message="MovieBox restored as available from last session.",
+                )
+        elif row and row["available"] == 0:
+            log_event(
+                backend_logger, logging.INFO,
+                event="moviebox_last_known_down",
+                message="MovieBox was down last session — background retry will handle recovery.",
+                details={"last_error": row["last_error"] or ""},
+            )
+    except Exception:
+        pass
+
+
+_moviebox_bg_retry_running = False
+_MOVIEBOX_BG_RETRY_INTERVAL = 300  # 5 minutes
+
+
+def _moviebox_bg_retry_worker() -> None:
+    """Background thread: silently ping moviebox every 5 min. Flips status back online automatically."""
+    global _moviebox_bg_retry_running, _moviebox_loaded, _moviebox_last_fail_time
+    global MOVIEBOX_AVAILABLE, MOVIEBOX_IMPORT_ERROR
+    _moviebox_bg_retry_running = True
+    log_event(backend_logger, logging.INFO, event="moviebox_bg_retry_started", message="MovieBox background auto-retry started.")
+    while True:
+        time.sleep(_MOVIEBOX_BG_RETRY_INTERVAL)
+        try:
+            was_available = MOVIEBOX_AVAILABLE
+            # Reset cooldown so _ensure_moviebox() actually tries
+            _moviebox_last_fail_time = 0.0
+            _moviebox_loaded = False
+            result = _ensure_moviebox()
+            if result and not was_available:
+                log_event(
+                    backend_logger, logging.INFO,
+                    event="moviebox_auto_recovered",
+                    message="MovieBox recovered automatically in background — status flipped to online.",
+                )
+                _save_provider_status_to_db("moviebox", True)
+            elif not result and was_available:
+                log_event(
+                    backend_logger, logging.WARNING,
+                    event="moviebox_went_offline",
+                    message="MovieBox went offline — background retry will keep watching.",
+                    details={"error": MOVIEBOX_IMPORT_ERROR or ""},
+                )
+                _save_provider_status_to_db("moviebox", False, MOVIEBOX_IMPORT_ERROR or "")
+            elif result:
+                _save_provider_status_to_db("moviebox", True)
+            else:
+                _save_provider_status_to_db("moviebox", False, MOVIEBOX_IMPORT_ERROR or "")
+        except Exception as exc:
+            log_event(backend_logger, logging.WARNING, event="moviebox_bg_retry_error", message="MovieBox background retry encountered an error.", details={"error": str(exc)})
+
+
+def _start_moviebox_bg_retry() -> None:
+    """Kick off the background retry thread once at startup."""
+    t = threading.Thread(target=_moviebox_bg_retry_worker, daemon=True, name="moviebox-bg-retry")
+    t.start()
+
+
+# Restore last-known state and start background auto-retry
+_restore_provider_status_from_db()
+_start_moviebox_bg_retry()
+
+# ---------------------------------------------------------------------------
 
 
 def db_insert(row: dict):
@@ -1478,7 +1596,12 @@ def _moviebox_assert_available():
     if not MOVIEBOX_AVAILABLE:
         raise HTTPException(
             status_code=503,
-            detail=f"moviebox-api is not available: {MOVIEBOX_IMPORT_ERROR or 'not installed'}",
+            detail={
+                "message": f"moviebox-api is not available: {MOVIEBOX_IMPORT_ERROR or 'not installed'}",
+                "fallbacks": ["embed", "vidsrc"],
+                "auto_retry": True,
+                "retry_interval_seconds": _MOVIEBOX_BG_RETRY_INTERVAL,
+            },
         )
 
 
@@ -5669,9 +5792,14 @@ async def health_services() -> dict:
         else _service_payload(
             "moviebox",
             "degraded",
-            "Movie Box provider is unavailable. Other movie sources can still work.",
+            "Movie Box provider is unavailable. Auto-retry is active — it will recover automatically. Use embed or VidSrc as fallbacks.",
             True,
-            {"import_error": MOVIEBOX_IMPORT_ERROR or ""},
+            {
+                "import_error": MOVIEBOX_IMPORT_ERROR or "",
+                "auto_retry_active": _moviebox_bg_retry_running,
+                "retry_interval_seconds": _MOVIEBOX_BG_RETRY_INTERVAL,
+                "fallbacks": ["embed", "vidsrc"],
+            },
         )
     )
     manga = _service_payload("manga", "online", "Manga routes are available.", False)
