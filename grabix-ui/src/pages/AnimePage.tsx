@@ -112,7 +112,7 @@ async function searchJikanAnime(query: string, page = 1): Promise<AnimeCardItem[
   return (data.data ?? []).map(mapLegacyAnime);
 }
 
-async function fetchJikanDiscover(tab: Tab, page = 1, _period?: string): Promise<AnimeCardItem[]> {
+async function fetchJikanDiscover(tab: Tab, page = 1): Promise<AnimeCardItem[]> {
   const path =
     tab === "popular"
       ? `/top/anime?filter=bypopularity&page=${page}&limit=20`
@@ -122,7 +122,7 @@ async function fetchJikanDiscover(tab: Tab, page = 1, _period?: string): Promise
           ? `/seasons/now?page=${page}&limit=20`
           : tab === "movie"
             ? `/top/anime?type=movie&page=${page}&limit=20`
-            : `/top/anime?filter=airing&page=${page}&limit=10`;
+            : `/top/anime?page=${page}&limit=20`;
   const response = await fetch(`${JIKAN}${path}`);
   const data = (await response.json()) as { data?: LegacyAnime[] };
   return (data.data ?? []).map(mapLegacyAnime);
@@ -299,12 +299,11 @@ export default function AnimePage() {
     setBrowseError("");
     try {
       const nextItems = (await fetchConsumetAnimeDiscover(nextTab, nextPage, nextPeriod)).map(toCardItem);
-      if (nextItems.length === 0) throw new Error("empty");
       setHasMore(nextItems.length > 0);
       setItems((prev) => (nextPage === 1 ? nextItems : dedupeItems([...prev, ...nextItems])));
     } catch {
       try {
-        const fallbackItems = await fetchJikanDiscover(nextTab, nextPage, nextPeriod);
+        const fallbackItems = await fetchJikanDiscover(nextTab, nextPage);
         setHasMore(fallbackItems.length > 0);
         setItems((prev) => (nextPage === 1 ? fallbackItems : dedupeItems([...prev, ...fallbackItems])));
       } catch {
