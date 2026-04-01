@@ -1,4 +1,7 @@
 import { Suspense, lazy, useEffect, useState, type ReactNode } from "react";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { OfflineBanner } from "./components/OfflineBanner";
+import { useOfflineDetection } from "./lib/useOfflineDetection";
 import { ThemeProvider } from "./context/ThemeContext";
 import { FavoritesProvider } from "./context/FavoritesContext";
 import { ContentFilterProvider } from "./context/ContentFilterContext";
@@ -34,6 +37,7 @@ const FavoritesPage = lazy(() => import("./pages/FavoritesPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 
 function Inner() {
+  const offlineState = useOfflineDetection(BACKEND_API);
   const [page, setPage] = useState<Page>("downloader");
   const [pageRevision, setPageRevision] = useState(0);
   const [runtimeState, setRuntimeState] = useState<RuntimeState>("starting");
@@ -185,17 +189,17 @@ function Inner() {
   }, [runtimeHealth]);
 
   const pages: Record<Page, ReactNode> = {
-    downloader: <DownloaderPage />,
-    converter: <ConverterPage />,
-    library: <LibraryPage />,
-    anime: <AnimePage />,
-    manga: <MangaPage />,
-    explore: <ExplorePage />,
-    movies: <MoviesPage />,
-    moviebox: <MovieBoxPage />,
-    series: <TVSeriesPage />,
-    favorites: <FavoritesPage />,
-    settings: <SettingsPage />,
+    downloader: <ErrorBoundary section="Downloader"><DownloaderPage /></ErrorBoundary>,
+    converter:  <ErrorBoundary section="Converter"><ConverterPage /></ErrorBoundary>,
+    library:    <ErrorBoundary section="Library"><LibraryPage /></ErrorBoundary>,
+    anime:      <ErrorBoundary section="Anime"><AnimePage /></ErrorBoundary>,
+    manga:      <ErrorBoundary section="Manga"><MangaPage /></ErrorBoundary>,
+    explore:    <ErrorBoundary section="Explore"><ExplorePage /></ErrorBoundary>,
+    movies:     <ErrorBoundary section="Movies"><MoviesPage /></ErrorBoundary>,
+    moviebox:   <ErrorBoundary section="MovieBox"><MovieBoxPage /></ErrorBoundary>,
+    series:     <ErrorBoundary section="TV Series"><TVSeriesPage /></ErrorBoundary>,
+    favorites:  <ErrorBoundary section="Favorites"><FavoritesPage /></ErrorBoundary>,
+    settings:   <ErrorBoundary section="Settings"><SettingsPage /></ErrorBoundary>,
   };
 
   const refreshRuntimeHealth = async () => {
@@ -220,8 +224,20 @@ function Inner() {
 
   return (
     <div style={{ display: "flex", height: "100vh", width: "100vw", overflow: "hidden" }}>
+      <OfflineBanner offlineState={offlineState} />
       <Sidebar page={page} setPage={navigateToPage} activeDownloads={activeDownloads} runtimeState={runtimeState} runtimeHealth={runtimeHealth} />
-      <main style={{ flex: 1, minWidth: 0, overflow: "hidden", display: "flex", flexDirection: "column", background: "var(--bg-app)" }}>
+      <main
+        style={{
+          flex: 1,
+          minWidth: 0,
+          overflow: "hidden",
+          display: "flex",
+          flexDirection: "column",
+          background: "var(--bg-app)",
+          paddingTop: offlineState.isOffline ? 32 : 0,
+          transition: "padding-top 0.2s ease",
+        }}
+      >
         <RuntimeHealthProvider value={{ health: runtimeHealth, runtimeState, refreshHealth: refreshRuntimeHealth }}>
           <Suspense fallback={<PageLoadingState page={page} />}>
             <div key={`${page}:${pageRevision}`} style={{ display: "flex", flexDirection: "column", flex: 1, width: "100%", minWidth: 0, minHeight: 0 }}>
