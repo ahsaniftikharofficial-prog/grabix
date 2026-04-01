@@ -1,7 +1,9 @@
 import { Suspense, lazy, useEffect, useState, type ReactNode } from "react";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OfflineBanner } from "./components/OfflineBanner";
+import { WatchdogBanner } from "./components/WatchdogBanner";
 import { useOfflineDetection } from "./lib/useOfflineDetection";
+import { useWatchdog } from "./lib/useWatchdog";
 import { ThemeProvider } from "./context/ThemeContext";
 import { FavoritesProvider } from "./context/FavoritesContext";
 import { ContentFilterProvider } from "./context/ContentFilterContext";
@@ -38,6 +40,7 @@ const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 
 function Inner() {
   const offlineState = useOfflineDetection(BACKEND_API);
+  const watchdog = useWatchdog();
   const [page, setPage] = useState<Page>("downloader");
   const [pageRevision, setPageRevision] = useState(0);
   const [runtimeState, setRuntimeState] = useState<RuntimeState>("starting");
@@ -225,6 +228,7 @@ function Inner() {
   return (
     <div style={{ display: "flex", height: "100vh", width: "100vw", overflow: "hidden" }}>
       <OfflineBanner offlineState={offlineState} />
+      <WatchdogBanner status={watchdog.status} isBannerVisible={watchdog.isBannerVisible} />
       <Sidebar page={page} setPage={navigateToPage} activeDownloads={activeDownloads} runtimeState={runtimeState} runtimeHealth={runtimeHealth} />
       <main
         style={{
@@ -234,7 +238,7 @@ function Inner() {
           display: "flex",
           flexDirection: "column",
           background: "var(--bg-app)",
-          paddingTop: offlineState.isOffline ? 32 : 0,
+          paddingTop: (offlineState.isOffline ? 32 : 0) + (watchdog.isBannerVisible && watchdog.status !== "idle" ? 32 : 0),
           transition: "padding-top 0.2s ease",
         }}
       >
