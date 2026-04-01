@@ -34,6 +34,39 @@ from app.services.security import (
     validate_outbound_url as security_validate_outbound_url,
 )
 
+# ── Phase 6: Safe main.py split ───────────────────────────────────────────────
+# db_helpers.py      → DB helpers, settings, format utils, path constants
+# library_helpers.py → Library index, reconcile, history helpers
+#
+# Imported and re-bound here so all existing code inside main.py and any
+# external `from main import X` calls keep working with zero changes.
+from db_helpers import (
+    get_db_connection,
+    db_insert,
+    db_update_status,
+    db_upsert_download_job,
+    db_delete_download_job,
+    db_list_download_jobs,
+    DEFAULT_SETTINGS,
+    load_settings,
+    save_settings_to_disk,
+    _strip_ansi,
+    _format_bytes,
+    _format_bytes_int,
+    _format_eta,
+    _sanitize_download_engine,
+    _get_file_size,
+    _guess_dl_type_from_path,
+    has_ffmpeg,
+    has_aria2,
+)
+from library_helpers import (
+    migrate_db,
+    _build_library_index,
+    _reconcile_library_state,
+)
+# ─────────────────────────────────────────────────────────────────────────────
+
 try:
     import bcrypt
     BCRYPT_AVAILABLE = True
