@@ -1033,8 +1033,7 @@ async def discover_anime(section: str = "trending", page: int = 1, period: str =
                 for item in _payload_items(payload)
                 if isinstance(item, dict)
             ]
-            if items:
-                return {"section": section_key, "period": period_key, "page": page, "items": items if page == 1 else []}
+            return {"section": section_key, "period": period_key, "page": page, "items": items if page == 1 else []}
 
         route_map = {
             "popular": "/anime/hianime/most-popular",
