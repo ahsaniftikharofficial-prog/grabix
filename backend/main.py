@@ -1,6 +1,7 @@
 import asyncio
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -605,6 +606,18 @@ def init_db():
         """)
         con.execute("CREATE INDEX IF NOT EXISTS idx_content_cache_expires ON content_cache(expires_at)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_content_cache_accessed ON content_cache(last_accessed)")
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS health_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                service TEXT NOT NULL,
+                status TEXT NOT NULL,
+                latency_ms REAL DEFAULT NULL,
+                error TEXT DEFAULT '',
+                recorded_at REAL NOT NULL
+            )
+        """)
+        con.execute("CREATE INDEX IF NOT EXISTS idx_health_log_service ON health_log(service)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_health_log_recorded ON health_log(recorded_at)")
         con.commit()
         con.close()
         log_event(backend_logger, logging.INFO, event="db_init", message="Database initialized successfully.")
@@ -900,6 +913,113 @@ def _cache_trigger_bg_refresh(key: str, refresh_coro_factory) -> None:
 
     t = threading.Thread(target=_thread_target, daemon=True, name=f"cache-refresh-{key[:30]}")
     t.start()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Circuit Breaker for Health Checks + Tiered Status + Health Log
+# ---------------------------------------------------------------------------
+
+# Tiered status ladder: online → slow → degraded → offline
+# Circuit breaker: if a service fails 3× in a row → skip pinging for 10 min
+
+_HEALTH_CB_THRESHOLD = 3          # failures before opening circuit
+_HEALTH_CB_COOLDOWN  = 600        # seconds circuit stays open (10 min)
+_HEALTH_SLOW_THRESHOLD_MS = 2000  # latency above this → "slow"
+
+@dataclass
+class _HealthCBState:
+    failures: int = 0
+    open_until: float = 0.0
+    last_status: str = "online"
+    last_latency_ms: float | None = None
+
+# One circuit-breaker state per logical service name
+_health_cb: dict[str, _HealthCBState] = {}
+_health_cb_lock = threading.Lock()
+
+def _get_health_cb(service: str) -> _HealthCBState:
+    with _health_cb_lock:
+        if service not in _health_cb:
+            _health_cb[service] = _HealthCBState()
+        return _health_cb[service]
+
+
+def _health_cb_record_success(service: str, latency_ms: float) -> str:
+    """Record a successful health ping; return tiered status string."""
+    state = _get_health_cb(service)
+    with _health_cb_lock:
+        state.failures = 0
+        state.open_until = 0.0
+        status = "slow" if latency_ms > _HEALTH_SLOW_THRESHOLD_MS else "online"
+        state.last_status = status
+        state.last_latency_ms = latency_ms
+    _health_log_write(service, status, latency_ms)
+    return status
+
+
+def _health_cb_record_failure(service: str, error: str = "") -> str:
+    """Record a failed health ping; return tiered status string."""
+    state = _get_health_cb(service)
+    with _health_cb_lock:
+        state.failures += 1
+        if state.failures >= _HEALTH_CB_THRESHOLD:
+            state.open_until = time.time() + _HEALTH_CB_COOLDOWN
+            status = "offline"
+        else:
+            status = "degraded"
+        state.last_status = status
+    _health_log_write(service, status, error=error)
+    return status
+
+
+def _health_cb_is_open(service: str) -> bool:
+    """True if circuit is open (skip pinging, serve cached status)."""
+    state = _get_health_cb(service)
+    if state.open_until > time.time():
+        return True
+    # Auto-reset after cooldown
+    if state.open_until > 0.0:
+        with _health_cb_lock:
+            state.failures = 0
+            state.open_until = 0.0
+    return False
+
+
+def _health_log_write(service: str, status: str, latency_ms: float | None = None, error: str = "") -> None:
+    """Persist a health event to SQLite health_log. Best-effort."""
+    try:
+        con = get_db_connection()
+        con.execute(
+            "INSERT INTO health_log (service, status, latency_ms, error, recorded_at) VALUES (?, ?, ?, ?, ?)",
+            (service, status, latency_ms, error or "", time.time()),
+        )
+        # Prune entries older than 24 h to keep table small
+        cutoff = time.time() - 86400
+        con.execute("DELETE FROM health_log WHERE recorded_at < ?", (cutoff,))
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+
+async def _timed_ping(coro, service: str) -> tuple[str, float | None, str]:
+    """
+    Await coro, measure latency. Returns (status, latency_ms, error).
+    Uses circuit breaker: if open → returns last known status immediately.
+    """
+    if _health_cb_is_open(service):
+        cached = _get_health_cb(service).last_status
+        return (cached, None, "circuit open — skipping ping")
+    t0 = time.monotonic()
+    try:
+        await coro
+        latency_ms = (time.monotonic() - t0) * 1000
+        status = _health_cb_record_success(service, latency_ms)
+        return (status, latency_ms, "")
+    except Exception as exc:
+        _health_cb_record_failure(service, str(exc))
+        status = _get_health_cb(service).last_status
+        return (status, None, str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -6030,79 +6150,122 @@ def _downloads_health() -> dict:
         return _service_payload("downloads", "offline", "Download folder is unavailable.", True, {"error": str(exc)})
 
 
-async def health_services() -> dict:
-    ffmpeg_available = has_ffmpeg()
-    database = _database_health()
-    downloads_health = _downloads_health()
-    moviebox = (
-        _service_payload("moviebox", "online", "Movie Box provider is available.", False)
-        if MOVIEBOX_AVAILABLE
-        else _service_payload(
-            "moviebox",
-            "degraded",
-            "Movie Box provider is unavailable. Auto-retry is active — it will recover automatically. Use embed or VidSrc as fallbacks.",
-            True,
-            {
-                "import_error": MOVIEBOX_IMPORT_ERROR or "",
-                "auto_retry_active": _moviebox_bg_retry_running,
-                "retry_interval_seconds": _MOVIEBOX_BG_RETRY_INTERVAL,
-                "fallbacks": ["embed", "vidsrc"],
-            },
-        )
-    )
-    manga = _service_payload("manga", "online", "Manga routes are available.", False)
+def _tiered_message(service: str, status: str, ok_msg: str, slow_msg: str, degraded_msg: str, offline_msg: str) -> str:
+    return {
+        "online":   ok_msg,
+        "slow":     slow_msg,
+        "degraded": degraded_msg,
+        "offline":  offline_msg,
+    }.get(status, degraded_msg)
 
-    global consumet_health_cache
-    if consumet_health_cache and consumet_health_cache[0] > time.time():
-        consumet_health = consumet_health_cache[1]
+
+async def health_services() -> dict:
+    # ── database & downloads (sync — no network, no circuit breaker needed) ──
+    database      = _database_health()
+    downloads_health = _downloads_health()
+
+    # ── ffmpeg (local binary — fast, no circuit breaker) ─────────────────────
+    ffmpeg_available = has_ffmpeg()
+    ffmpeg_status = "online" if ffmpeg_available else "degraded"
+    _health_log_write("ffmpeg", ffmpeg_status)
+    ffmpeg = _service_payload(
+        "ffmpeg", ffmpeg_status,
+        "FFmpeg is ready." if ffmpeg_available else "FFmpeg is unavailable — converter and some HLS flows are limited.",
+        True, {"path": FFMPEG_PATH or ""},
+    )
+
+    # ── moviebox (in-process import, no network ping) ─────────────────────────
+    if MOVIEBOX_AVAILABLE:
+        mb_status = "online"
+        mb_msg = "Movie Box provider is available."
+        mb_details: dict = {}
     else:
+        cb_state = _get_health_cb("moviebox")
+        mb_status = "degraded" if not _health_cb_is_open("moviebox") else cb_state.last_status
+        mb_msg = "Movie Box is unavailable — auto-retry active. Using VidSrc/embed as fallbacks."
+        mb_details = {
+            "import_error": MOVIEBOX_IMPORT_ERROR or "",
+            "auto_retry_active": _moviebox_bg_retry_running,
+            "retry_interval_seconds": _MOVIEBOX_BG_RETRY_INTERVAL,
+            "fallbacks": ["embed", "vidsrc"],
+        }
+        _health_log_write("moviebox", mb_status, error=MOVIEBOX_IMPORT_ERROR or "")
+    moviebox = _service_payload("moviebox", mb_status, mb_msg, True, mb_details)
+
+    # ── manga (local routes — always available) ───────────────────────────────
+    manga = _service_payload("manga", "online", "Manga routes are available.", False)
+    _health_log_write("manga", "online")
+
+    # ── consumet (network ping — use circuit breaker + tiered status) ─────────
+    global consumet_health_cache
+    consumet_cb_open = _health_cb_is_open("consumet")
+
+    if consumet_cb_open:
+        # Circuit is open — serve last cached result without pinging
+        consumet_health = (consumet_health_cache or (0, {}))[1] if consumet_health_cache else {}
+        consumet_raw_status = _get_health_cb("consumet").last_status
+    elif consumet_health_cache and consumet_health_cache[0] > time.time():
+        consumet_health = consumet_health_cache[1]
+        consumet_raw_status = "online" if consumet_health.get("healthy") else "degraded"
+    else:
+        t0 = time.monotonic()
         try:
-            consumet_health = await asyncio.wait_for(get_consumet_health_status(), timeout=0.9)
+            consumet_health = await asyncio.wait_for(get_consumet_health_status(), timeout=2.5)
+            latency_ms = (time.monotonic() - t0) * 1000
+            if consumet_health.get("healthy"):
+                consumet_raw_status = _health_cb_record_success("consumet", latency_ms)
+            else:
+                consumet_raw_status = _health_cb_record_failure("consumet", consumet_health.get("message", ""))
         except Exception as exc:
             consumet_health = {
-                "configured": False,
-                "healthy": False,
-                "message": "Consumet is still warming up. Anime fallback playback is already available.",
+                "configured": False, "healthy": False,
+                "message": "Consumet is warming up — anime fallback is already active.",
                 "error": str(exc),
             }
+            consumet_raw_status = _health_cb_record_failure("consumet", str(exc))
         consumet_health_cache = (time.time() + CONSUMET_HEALTH_CACHE_TTL_SECONDS, consumet_health)
 
-    consumet_status = "online" if consumet_health.get("healthy") else "degraded"
+    consumet_msg = _tiered_message(
+        "consumet", consumet_raw_status,
+        ok_msg      = str(consumet_health.get("message") or "Consumet is healthy."),
+        slow_msg    = "Consumet is responding slowly — anime may buffer.",
+        degraded_msg= "Consumet is degraded — anime running on built-in fallback.",
+        offline_msg = "Consumet is unreachable (circuit open) — anime fallback active.",
+    )
     consumet = _service_payload(
-        "consumet",
-        consumet_status,
-        str(consumet_health.get("message") or "Consumet health unavailable."),
-        True,
-        {"configured": bool(consumet_health.get("configured")), "api_base": consumet_health.get("api_base", "")},
+        "consumet", consumet_raw_status, consumet_msg, True,
+        {
+            "configured": bool(consumet_health.get("configured")),
+            "api_base": consumet_health.get("api_base", ""),
+            "circuit_open": consumet_cb_open,
+        },
     )
+
+    anime_healthy = consumet_health.get("healthy", False)
+    anime_status  = consumet_raw_status if anime_healthy else ("degraded" if consumet_raw_status != "offline" else "degraded")
     anime = _service_payload(
-        "anime",
-        "online" if consumet_health.get("healthy") else "degraded",
-        "Anime playback is fully available." if consumet_health.get("healthy") else "Anime playback is running on the built-in fallback stack.",
+        "anime", anime_status,
+        "Anime playback is fully available." if anime_healthy else "Anime running on built-in fallback stack.",
         True,
-    )
-    ffmpeg = _service_payload(
-        "ffmpeg",
-        "online" if ffmpeg_available else "degraded",
-        "FFmpeg is ready." if ffmpeg_available else "FFmpeg is unavailable, so converter and some HLS flows are limited.",
-        True,
-        {"path": FFMPEG_PATH or ""},
     )
 
     services = {
-        "backend": _service_payload("backend", "online", "Backend is responding.", False),
-        "database": database,
+        "backend":   _service_payload("backend", "online", "Backend is responding.", False),
+        "database":  database,
         "downloads": downloads_health,
-        "ffmpeg": ffmpeg,
-        "consumet": consumet,
-        "moviebox": moviebox,
-        "anime": anime,
-        "manga": manga,
+        "ffmpeg":    ffmpeg,
+        "consumet":  consumet,
+        "moviebox":  moviebox,
+        "anime":     anime,
+        "manga":     manga,
     }
-    summary = {"online": 0, "degraded": 0, "offline": 0}
-    for payload in services.values():
-        state = payload.get("status", "offline")
-        summary[state] = summary.get(state, 0) + 1
+
+    # Summary counts all four tiers
+    summary: dict[str, int] = {"online": 0, "slow": 0, "degraded": 0, "offline": 0}
+    for svc in services.values():
+        tier = svc.get("status", "offline")
+        summary[tier] = summary.get(tier, 0) + 1
+
     return {"services": services, "summary": summary}
 
 
@@ -6113,20 +6276,20 @@ async def health_capabilities() -> dict:
         "startup_ready": services["database"]["status"] == "online" and services["downloads"]["status"] == "online",
         "can_show_shell": True,
         "can_open_library": True,
-        "can_download_media": services["downloads"]["status"] == "online",
-        "can_use_converter": services["ffmpeg"]["status"] == "online",
+        "can_download_media": services["downloads"]["status"] in {"online", "slow"},
+        "can_use_converter": services["ffmpeg"]["status"] in {"online", "slow"},
         "can_browse_movies": True,
         "can_browse_tv": True,
-        "can_use_moviebox": services["moviebox"]["status"] == "online",
+        "can_use_moviebox": services["moviebox"]["status"] in {"online", "slow"},
         "can_play_anime": True,
-        "can_play_anime_primary": services["consumet"]["status"] == "online",
+        "can_play_anime_primary": services["consumet"]["status"] in {"online", "slow"},
         "can_play_anime_fallback": True,
-        "can_read_manga": services["manga"]["status"] == "online",
+        "can_read_manga": services["manga"]["status"] in {"online", "slow"},
     }
     degraded_services = [
         name
         for name, item in services.items()
-        if item["status"] in {"degraded", "offline"} and name != "backend"
+        if item["status"] in {"slow", "degraded", "offline"} and name != "backend"
     ]
     payload["capabilities"] = capabilities
     payload["summary"].update(
@@ -6163,6 +6326,83 @@ async def runtime_health_ping():
             "downloads": downloads_health,
         },
     }
+
+
+@app.get("/health/log")
+async def runtime_health_log(service: str | None = None, limit: int = 100):
+    """
+    Phase 4 — Return last 24h of health events from SQLite health_log.
+    Optional ?service=consumet to filter by service.
+    Optional ?limit=N to cap results (default 100, max 500).
+    """
+    limit = max(1, min(limit, 500))
+    try:
+        con = get_db_connection()
+        if service:
+            rows = con.execute(
+                "SELECT service, status, latency_ms, error, recorded_at FROM health_log "
+                "WHERE service=? ORDER BY recorded_at DESC LIMIT ?",
+                (service, limit),
+            ).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT service, status, latency_ms, error, recorded_at FROM health_log "
+                "ORDER BY recorded_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        con.close()
+        events = [
+            {
+                "service":    r["service"],
+                "status":     r["status"],
+                "latency_ms": r["latency_ms"],
+                "error":      r["error"] or "",
+                "recorded_at": r["recorded_at"],
+            }
+            for r in rows
+        ]
+        return {"events": events, "count": len(events), "filter_service": service}
+    except Exception as exc:
+        return {"events": [], "count": 0, "error": str(exc)}
+
+
+@app.post("/health/circuit-breaker/reset")
+async def runtime_reset_circuit_breaker(service: str | None = None):
+    """
+    Phase 4 — Manually reset a circuit breaker so health checks resume immediately.
+    POST /health/circuit-breaker/reset?service=consumet  → reset one service
+    POST /health/circuit-breaker/reset                   → reset all services
+    """
+    with _health_cb_lock:
+        if service:
+            if service in _health_cb:
+                _health_cb[service] = _HealthCBState()
+            targets = [service]
+        else:
+            for key in list(_health_cb):
+                _health_cb[key] = _HealthCBState()
+            targets = list(_health_cb.keys()) or ["(none)"]
+    return {"reset": targets, "message": "Circuit breaker(s) reset — pinging will resume on next health check."}
+
+
+@app.get("/health/circuit-breaker/status")
+async def runtime_circuit_breaker_status():
+    """
+    Phase 4 — Show current circuit-breaker state for all monitored services.
+    """
+    now = time.time()
+    result = {}
+    with _health_cb_lock:
+        for svc, state in _health_cb.items():
+            open_for_seconds = max(0.0, state.open_until - now)
+            result[svc] = {
+                "failures":          state.failures,
+                "circuit_open":      state.open_until > now,
+                "open_for_seconds":  round(open_for_seconds, 1),
+                "last_status":       state.last_status,
+                "last_latency_ms":   state.last_latency_ms,
+            }
+    return {"circuit_breakers": result, "threshold": _HEALTH_CB_THRESHOLD, "cooldown_seconds": _HEALTH_CB_COOLDOWN}
 
 
 def _providers_status_payload(payload: dict) -> dict:
