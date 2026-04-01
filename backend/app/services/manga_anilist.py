@@ -55,7 +55,11 @@ async def anilist_request(query: str, variables: dict[str, Any] | None = None, r
             response = await client.post(
                 ANILIST_URL,
                 json=payload,
-                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                },
             )
 
             if response.status_code == 429:
@@ -98,10 +102,17 @@ async def get_trending_manga(page: int = 1, per_page: int = 20) -> list[dict]:
       }
     }
     """
-    data = await anilist_request(query, {"page": page, "perPage": per_page})
-    items = [_map_manga(item) for item in (data.get("Page", {}).get("media") or [])]
-    await set_cached(cache_key, items, "anilist", expires_hours=1)
-    return items
+    try:
+        data = await anilist_request(query, {"page": page, "perPage": per_page})
+        items = [_map_manga(item) for item in (data.get("Page", {}).get("media") or [])]
+        await set_cached(cache_key, items, "anilist", expires_hours=1)
+        return items
+    except Exception as exc:
+        from app.services.logging_utils import get_logger
+        get_logger("manga").warning(f"AniList trending failed: {exc}, using Jikan fallback.")
+        from app.services.manga_jikan import get_top_manga
+        return await get_top_manga(page=page)
+
 
 
 async def search_manga(query_text: str, page: int = 1) -> list[dict]:
@@ -190,10 +201,17 @@ async def get_seasonal_manga(year: int, season: str) -> list[dict]:
       }
     }
     """
-    data = await anilist_request(query, {"seasonYear": year, "season": season})
-    items = [_map_manga(item) for item in (data.get("Page", {}).get("media") or [])]
-    await set_cached(cache_key, items, "anilist", expires_hours=1)
-    return items
+    try:
+        data = await anilist_request(query, {"seasonYear": year, "season": season})
+        items = [_map_manga(item) for item in (data.get("Page", {}).get("media") or [])]
+        await set_cached(cache_key, items, "anilist", expires_hours=1)
+        return items
+    except Exception as exc:
+        from app.services.logging_utils import get_logger
+        get_logger("manga").warning(f"AniList seasonal failed: {exc}, using Jikan fallback.")
+        from app.services.manga_jikan import get_top_manga
+        return await get_top_manga(page=1)
+
 
 
 async def get_manga_by_id(manga_id: int) -> dict[str, Any] | None:

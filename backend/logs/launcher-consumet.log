@@ -4,4 +4,10 @@
 
 GRABIX Consumet gateway listening on http://127.0.0.1:3000
 Anime provider: HiAnime (https://aniwatchtv.to)
+[2026-03-31 12:11:30.776 +0500] [31mERROR[39m (9012): [36m[31m{
+  "status": 500,
+  "scraper": "getHomePage",
+  "message": "getHomePage: fetchError: Something went wrong"
+}[0m[39m
+    [35mcontext[39m: "aniwatch-pkg"
 ^C^C

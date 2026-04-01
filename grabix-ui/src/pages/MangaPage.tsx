@@ -349,11 +349,12 @@ export default function MangaPage() {
     }
   };
 
-  const resolveDetailsForItem = async (item: MangaDiscoveryItem) => (
-    item.anilist_id
-      ? await fetchMangaDetails(item.anilist_id, "anilist_id")
-      : await fetchMangaDetails(item.mangadex_id!, "mangadex_id")
-  );
+  const resolveDetailsForItem = async (item: MangaDiscoveryItem) => {
+    if (item.anilist_id) return await fetchMangaDetails(item.anilist_id, "anilist_id");
+    if (item.mal_id) return await fetchMangaDetails(item.mal_id, "mal_id");
+    if (item.mangadex_id) return await fetchMangaDetails(item.mangadex_id, "mangadex_id");
+    throw new Error("Missing ID for details lookup");
+  };
 
   const resolveChaptersForItem = async (item: MangaDiscoveryItem, details: MangaDetailsResponse | null, language = "en", source: ChapterSource = "auto") => {
     const mangadexId = details?.mangadex?.mangadex_id || item.mangadex_id;
@@ -703,7 +704,7 @@ export default function MangaPage() {
   }, [query]);
 
   useEffect(() => {
-    if (!selectedItem?.anilist_id && !selectedItem?.mangadex_id) {
+    if (!selectedItem?.anilist_id && !selectedItem?.mangadex_id && !selectedItem?.mal_id) {
       setDetailData(null);
       setChapters([]);
       setOfflineRecord(null);

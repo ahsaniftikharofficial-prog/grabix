@@ -8,7 +8,6 @@ import { PageEmptyState, PageErrorState } from "../components/PageStates";
 import { useFavorites } from "../context/FavoritesContext";
 import { useContentFilter } from "../context/ContentFilterContext";
 import { queueSubtitleDownload, queueVideoDownload, resolveSourceDownloadOptions } from "../lib/downloads";
-import { BACKEND_API } from "../lib/api";
 import { filterAdultContent } from "../lib/contentFilter";
 import {
   fetchConsumetAnimeDiscover,
@@ -27,34 +26,12 @@ import { fetchMovieBoxSources, resolveAnimePlaybackSources, searchMovieBox, type
 const JIKAN = "https://api.jikan.moe/v4";
 const TMDB = "https://api.themoviedb.org/3";
 const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzYWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
-const GRABIX = BACKEND_API;
-
-function buildPlaybackProxyUrl(url: string, headers?: Record<string, string>): string {
-  if (!url) return url;
-  if (!headers || Object.keys(headers).length === 0) return url;
-  const params = new URLSearchParams({ url });
-  params.set("headers_json", JSON.stringify(headers));
-  return `${GRABIX}/stream/proxy?${params.toString()}`;
-}
 
 type Tab = "trending" | "popular" | "toprated" | "seasonal" | "movie";
 type TmdbEpisodeRef = { season: number; episode: number };
 type AnimeAudioOption = "en" | "original" | "hi";
 type AnimeServerOption = "auto" | "hd-1" | "hd-2";
 type TrendingPeriod = "daily" | "weekly" | "monthly";
-
-interface AnimeResolvedPayload {
-  source?: {
-    url?: string;
-    kind?: "embed" | "direct" | "hls" | "local";
-    headers?: Record<string, string>;
-  };
-  subtitles?: Array<{ url?: string; lang?: string; label?: string }>;
-  provider?: string;
-  selectedServer?: string;
-  strategy?: string;
-  tried?: Array<{ server?: string; stage?: string; detail?: string }>;
-}
 
 const tmdbSeasonCache = new Map<number, Array<{ season: number; count: number }>>();
 const AUDIO_BUTTONS: Array<{ id: AnimeAudioOption; label: string; help: string }> = [
@@ -640,7 +617,6 @@ function AnimeDetail({
   const [server, setServer] = useState<AnimeServerOption>("auto");
   const [detailHint, setDetailHint] = useState("");
   const [knownEpisodeCount, setKnownEpisodeCount] = useState<number | null>(anime.episodes_count ?? null);
-  const [episodeCache, setEpisodeCache] = useState<Record<string, ConsumetEpisode[]>>({});
   const [hasHindiFallback, setHasHindiFallback] = useState(false);
   const [trailerUrl, setTrailerUrl] = useState(anime.trailer_url || "");
   const [downloading, setDownloading] = useState(false);
@@ -655,6 +631,7 @@ function AnimeDetail({
   const [downloadDialogLoading, setDownloadDialogLoading] = useState(false);
   const [downloadDialogError, setDownloadDialogError] = useState("");
   const resolvedSourceCacheRef = useRef<Record<string, StreamSource>>({});
+  const episodeCacheRef = useRef<Record<string, ConsumetEpisode[]>>({});
   const episodeRequestCacheRef = useRef<Record<string, Promise<ConsumetEpisode[]>>>({});
   const resolvedSourcePromiseCacheRef = useRef<Record<string, Promise<StreamSource | null>>>({});
   const { isFav, toggle } = useFavorites();
@@ -686,7 +663,7 @@ function AnimeDetail({
     setDetailHint("");
     setResolvedAnime(anime.provider === "jikan" ? null : anime);
     setKnownEpisodeCount(anime.episodes_count ?? null);
-    setEpisodeCache({});
+    episodeCacheRef.current = {};
     setHasHindiFallback(false);
     setTrailerUrl(anime.trailer_url || "");
     resolvedSourceCacheRef.current = {};
@@ -755,10 +732,10 @@ function AnimeDetail({
             const detail = await fetchConsumetDomainInfo("anime", candidate.id, candidate.provider);
             const nextEpisodes = detail.item.episodes ?? await fetchConsumetAnimeEpisodes(candidate.id, candidate.provider);
             if (cancelled) return;
-            setEpisodeCache((current) => ({
-              ...current,
+            episodeCacheRef.current = {
+              ...episodeCacheRef.current,
               [`${candidate.provider}-${candidate.id}`]: nextEpisodes,
-            }));
+            };
             if (nextEpisodes.length > 0) {
               setResolvedAnime(candidate);
               setEpisodes(nextEpisodes);
@@ -909,31 +886,6 @@ function AnimeDetail({
       : candidateAnimes
   );
 
-  const getEpisodeListForCandidate = async (candidate: AnimeCardItem): Promise<ConsumetEpisode[]> => {
-    const cacheKey = `${candidate.provider}-${candidate.id}`;
-    const cached = episodeCache[cacheKey];
-    if (cached && cached.length > 0) return cached;
-    const pending = episodeRequestCacheRef.current[cacheKey];
-    if (pending) return pending;
-
-    const request = (async () => {
-      const detail = await fetchConsumetDomainInfo("anime", candidate.id, candidate.provider);
-      const nextEpisodes = detail.item.episodes ?? await fetchConsumetAnimeEpisodes(candidate.id, candidate.provider);
-      setEpisodeCache((current) => ({
-        ...current,
-        [cacheKey]: nextEpisodes,
-      }));
-      return nextEpisodes;
-    })();
-
-    episodeRequestCacheRef.current[cacheKey] = request;
-    try {
-      return await request;
-    } finally {
-      delete episodeRequestCacheRef.current[cacheKey];
-    }
-  };
-
   const resolveAnimeSourceViaBackend = async (
     targetEpisode = episode,
     purpose: "play" | "download" = "play",
@@ -950,75 +902,33 @@ function AnimeDetail({
 
     const request = (async () => {
       let lastMessage = "";
-      for (const candidate of getWatchCandidates()) {
-        try {
-          const episodeList = await getEpisodeListForCandidate(candidate);
-          const match = episodeList.find((item) => item.number === targetEpisode) || episodeList[0];
-          if (!match) continue;
-
-          const response = await fetch(`${GRABIX}/anime/resolve-source`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              episodeId: match.id,
-              animeId: candidate.id,
-              title: anime.title,
-              altTitle: anime.alt_title || "",
-              episodeNumber: targetEpisode,
-              audio: normalizedAudio,
-              server: requestedServer,
-              isMovie,
-              tmdbId,
-              purpose,
-            }),
-          });
-
-          if (!response.ok) {
-            try {
-              const payload = (await response.json()) as { detail?: { message?: string } | string };
-              lastMessage = typeof payload.detail === "string"
-                ? payload.detail
-                : payload.detail?.message || "";
-            } catch {
-              lastMessage = "";
-            }
-            continue;
-          }
-
-          const payload = (await response.json()) as AnimeResolvedPayload;
-          const resolvedUrl = payload.source?.url || "";
-          if (!resolvedUrl) continue;
-          const subtitles = (payload.subtitles ?? [])
-            .filter((track) => Boolean(track.url))
-            .map((track, index) => ({
-              id: `anime-resolved-sub-${targetEpisode}-${index}`,
-              label: track.label || track.lang || `Subtitle ${index + 1}`,
-              language: track.lang,
-              url: track.url || "",
-            }));
-
-        const resolvedSource = {
-          id: `anime-resolved-${candidate.provider}-${candidate.id}-${targetEpisode}-${purpose}`,
-          label: payload.selectedServer === "fallback"
-            ? `${payload.provider || "Fallback"} Auto`
-            : payload.selectedServer
-                ? `${payload.provider || "HiAnime"} ${payload.selectedServer}`
-                : (payload.provider || "HiAnime"),
-          provider: payload.provider || "HiAnime",
-          kind: payload.source?.kind || "direct",
-          url: buildPlaybackProxyUrl(resolvedUrl, payload.source?.headers),
-          requestHeaders: payload.source?.headers || undefined,
-          quality: payload.source?.kind === "hls" ? "HLS" : "Auto",
-          description: payload.strategy || "Resolved anime source",
-          externalUrl: resolvedUrl,
-            canExtract: false,
-            subtitles,
-          };
+      try {
+        const sources = await resolveAnimePlaybackSources({
+          title: anime.title,
+          altTitle: anime.alt_title || "",
+          altTitles: expandAnimeTitles(anime.title, anime.alt_title).slice(1),
+          tmdbId,
+          fallbackSeason: 1,
+          fallbackEpisode: targetEpisode,
+          episodeNumber: targetEpisode,
+          audio: normalizedAudio,
+          server: requestedServer,
+          isMovie,
+          purpose,
+          candidates: getWatchCandidates().map((candidate) => ({
+            provider: candidate.provider,
+            animeId: candidate.id,
+            title: candidate.title,
+            altTitle: candidate.alt_title || "",
+          })),
+        });
+        const resolvedSource = sources[0] ?? null;
+        if (resolvedSource) {
           resolvedSourceCacheRef.current[cacheKey] = resolvedSource;
-          return resolvedSource;
-        } catch (error) {
-          lastMessage = error instanceof Error ? error.message : "";
         }
+        return resolvedSource;
+      } catch (error) {
+        lastMessage = error instanceof Error ? error.message : "";
       }
 
       if (lastMessage) {

@@ -695,7 +695,7 @@ class AnimeResolvedProviderAdapter(BaseProviderAdapter):
             tmdbId=kwargs.get("tmdb_id"),
             purpose=str(kwargs.get("purpose") or "play"),
         )
-        resolved = main_module.anime_resolve_source(payload)
+        resolved = await main_module.anime_resolve_source(payload)
         source = resolved.get("source") or {}
         url = str(source.get("url") or "").strip()
         if not url:
@@ -1212,6 +1212,8 @@ async def resolve_anime_playback(
         episode_id = str(candidate.get("episode_id") or candidate.get("episodeId") or "").strip()
         candidate_key = f"{provider_name}:{anime_id}:{episode_number}"
         if not episode_id:
+            episode_id = resolved_episode_ids.get(candidate_key, "")
+        if not episode_id:
             try:
                 episode_payload = await registry.execute(
                     "consumet-watch",
@@ -1246,58 +1248,9 @@ async def resolve_anime_playback(
                 )
                 episode_id = ""
 
-        if not episode_id:
-            continue
+        if episode_id:
+            resolved_episode_ids[candidate_key] = episode_id
 
-        resolved_episode_ids[candidate_key] = episode_id
-        try:
-            resolved_sources = await registry.execute(
-                "anime-resolved",
-                "sources",
-                correlation_id=correlation_id,
-                fallback_used=False,
-                episode_id=episode_id,
-                anime_id=anime_id,
-                title=title,
-                alt_title=alt_title,
-                episode_number=episode_number,
-                audio=normalized_audio,
-                server=server,
-                is_movie=is_movie,
-                tmdb_id=tmdb_id,
-                purpose=purpose,
-            )
-            if resolved_sources:
-                attempts.append(
-                    _attempt_payload(
-                        provider="anime-resolved",
-                        operation="sources",
-                        success=True,
-                        message=f"Resolved a primary anime source via {provider_name}.",
-                        fallback_used=False,
-                    )
-                )
-                groups.append({"id": "anime-resolved", "label": "Backend resolved", "sources": resolved_sources})
-                break
-        except ProviderServiceError as error:
-            attempts.append(
-                _attempt_payload(
-                    provider="anime-resolved",
-                    operation="sources",
-                    success=False,
-                    message=error.message,
-                    fallback_used=False,
-                    retryable=error.retryable,
-                )
-            )
-
-    for candidate in candidate_items:
-        provider_name = str(candidate.get("provider") or "zoro").strip() or "zoro"
-        anime_id = str(candidate.get("anime_id") or candidate.get("animeId") or candidate.get("id") or "").strip()
-        if not anime_id:
-            continue
-        candidate_key = f"{provider_name}:{anime_id}:{episode_number}"
-        episode_id = resolved_episode_ids.get(candidate_key)
         try:
             watch_sources = await registry.execute(
                 "consumet-watch",
@@ -1335,48 +1288,49 @@ async def resolve_anime_playback(
                 )
             )
 
-    moviebox_sources = await _resolve_moviebox_sources_by_title(
-        registry=registry,
-        correlation_id=correlation_id,
-        titles=title_candidates,
-        media_type="movie" if is_movie else "anime",
-        season=max(1, fallback_season),
-        episode=max(1, fallback_episode or episode_number),
-        prefer_hindi=False,
-        anime_only=not is_movie,
-        attempts=attempts,
-        fallback_used=not bool(groups),
-    )
-    if moviebox_sources:
-        groups.append({"id": "moviebox", "label": "Movie Box fallback", "sources": moviebox_sources})
+    for candidate in candidate_items:
+        provider_name = str(candidate.get("provider") or "zoro").strip() or "zoro"
+        anime_id = str(candidate.get("anime_id") or candidate.get("animeId") or candidate.get("id") or "").strip()
+        if not anime_id:
+            continue
+        candidate_key = f"{provider_name}:{anime_id}:{episode_number}"
+        episode_id = resolved_episode_ids.get(candidate_key, "")
+        if not episode_id:
+            continue
 
-    if tmdb_id:
         try:
-            embed_sources = await registry.execute(
-                "embed",
+            resolved_sources = await registry.execute(
+                "anime-resolved",
                 "sources",
                 correlation_id=correlation_id,
                 fallback_used=not bool(groups),
-                media_type="anime",
+                episode_id=episode_id,
+                anime_id=anime_id,
+                title=title,
+                alt_title=alt_title,
+                episode_number=episode_number,
+                audio=normalized_audio,
+                server=server,
+                is_movie=is_movie,
                 tmdb_id=tmdb_id,
-                season=max(1, fallback_season),
-                episode=max(1, fallback_episode or episode_number),
+                purpose=purpose,
             )
-            if embed_sources:
+            if resolved_sources:
                 attempts.append(
                     _attempt_payload(
-                        provider="embed",
+                        provider="anime-resolved",
                         operation="sources",
                         success=True,
-                        message=f"Prepared {len(embed_sources)} anime embed fallback sources.",
+                        message=f"Resolved fallback anime sources via {provider_name}.",
                         fallback_used=not bool(groups),
                     )
                 )
-                groups.append({"id": "embed", "label": "Embed fallback", "sources": embed_sources})
+                groups.append({"id": "anime-resolved", "label": "Backend resolved fallback", "sources": resolved_sources})
+                break
         except ProviderServiceError as error:
             attempts.append(
                 _attempt_payload(
-                    provider="embed",
+                    provider="anime-resolved",
                     operation="sources",
                     success=False,
                     message=error.message,
@@ -1385,11 +1339,63 @@ async def resolve_anime_playback(
                 )
             )
 
+    # ── Only fall back to MovieBox / embed if HiAnime completely failed ───────
+    if not groups:
+        moviebox_sources = await _resolve_moviebox_sources_by_title(
+            registry=registry,
+            correlation_id=correlation_id,
+            titles=title_candidates,
+            media_type="movie" if is_movie else "anime",
+            season=max(1, fallback_season),
+            episode=max(1, fallback_episode or episode_number),
+            prefer_hindi=False,
+            anime_only=not is_movie,
+            attempts=attempts,
+            fallback_used=True,
+        )
+        if moviebox_sources:
+            groups.append({"id": "moviebox", "label": "Movie Box last-resort fallback", "sources": moviebox_sources})
+
+        if not groups and tmdb_id:
+            try:
+                embed_sources = await registry.execute(
+                    "embed",
+                    "sources",
+                    correlation_id=correlation_id,
+                    fallback_used=True,
+                    media_type="anime",
+                    tmdb_id=tmdb_id,
+                    season=max(1, fallback_season),
+                    episode=max(1, fallback_episode or episode_number),
+                )
+                if embed_sources:
+                    attempts.append(
+                        _attempt_payload(
+                            provider="embed",
+                            operation="sources",
+                            success=True,
+                            message=f"Prepared {len(embed_sources)} anime embed fallback sources.",
+                            fallback_used=True,
+                        )
+                    )
+                    groups.append({"id": "embed", "label": "Embed last-resort fallback", "sources": embed_sources})
+            except ProviderServiceError as error:
+                attempts.append(
+                    _attempt_payload(
+                        provider="embed",
+                        operation="sources",
+                        success=False,
+                        message=error.message,
+                        fallback_used=True,
+                        retryable=error.retryable,
+                    )
+                )
+
     payload = _resolution_payload(
         correlation_id=correlation_id,
         groups=groups,
         attempts=attempts,
-        primary_provider="anime-resolved",
+        primary_provider=(groups[0].get("id") or "anime") if groups else "anime",
     )
     if payload["sources"]:
         return payload

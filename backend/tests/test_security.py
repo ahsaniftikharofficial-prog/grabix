@@ -9,6 +9,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from fastapi import HTTPException
 
+from app.services.network_policy import validate_outbound_target
 from app.services.security import ensure_safe_managed_path, validate_outbound_url
 
 
@@ -28,6 +29,20 @@ class SecurityServiceTests(unittest.TestCase):
             validate_outbound_url("https://example.com/video.mp4")
         self.assertEqual(context.exception.status_code, 400)
         self.assertIn("approved media allowlist", str(context.exception.detail))
+
+    def test_validate_outbound_url_uses_suffix_boundary_matching(self):
+        with self.assertRaises(HTTPException) as context:
+            validate_outbound_url(
+                "https://evilyoutube.com/video.mp4",
+                allowed_hosts=("youtube.com",),
+            )
+        self.assertEqual(context.exception.status_code, 400)
+
+    def test_public_user_target_blocks_private_network_hosts(self):
+        with self.assertRaises(HTTPException) as context:
+            validate_outbound_target("http://127.0.0.1:9000/file.mp4", mode="public_user_target")
+        self.assertEqual(context.exception.status_code, 400)
+        self.assertIn("local network hosts are blocked", str(context.exception.detail))
 
     def test_ensure_safe_managed_path_allows_inside_root(self):
         with tempfile.TemporaryDirectory() as temp_dir:

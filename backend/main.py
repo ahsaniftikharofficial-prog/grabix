@@ -21,6 +21,9 @@ from app.routes.streaming import router as streaming_router
 from app.routes.subtitles import router as subtitles_router
 from app.services.consumet import get_health_status as get_consumet_health_status
 from app.services.logging_utils import LOG_DIR, backend_log_path, get_logger, log_event, read_recent_log_events
+from app.services.archive_installer import parse_checksum_manifest, safe_extract_zip, sha256_file
+from app.services.network_policy import validate_outbound_target
+from app.services.runtime_state import RuntimeStateRegistry
 from app.services.security import (
     DEFAULT_APPROVED_MEDIA_HOSTS,
     DEFAULT_LOCAL_APP_ORIGINS,
@@ -51,11 +54,7 @@ except Exception as exc:
     SELENIUM_IMPORT_ERROR = str(exc)
 
 try:
-    from moviebox_api.v1.constants import (
-        DOWNLOAD_REQUEST_HEADERS as MOVIEBOX_DOWNLOAD_REQUEST_HEADERS,
-        SubjectType as MovieBoxSubjectType,
-    )
-    from moviebox_api.v1.core import (
+    from moviebox_api import (
         Homepage as MovieBoxHomepage,
         HotMoviesAndTVSeries as MovieBoxHotMoviesAndTVSeries,
         MovieDetails as MovieBoxMovieDetails,
@@ -64,11 +63,13 @@ try:
         Trending as MovieBoxTrending,
         TVSeriesDetails as MovieBoxTVSeriesDetails,
     )
-    from moviebox_api.v1.download import (
+    from moviebox_api import (
         DownloadableMovieFilesDetail,
         DownloadableTVSeriesFilesDetail,
+        Session as MovieBoxSession,
+        SubjectType as MovieBoxSubjectType,
     )
-    from moviebox_api.v1.requests import Session as MovieBoxSession
+    from moviebox_api.constants import DOWNLOAD_REQUEST_HEADERS as MOVIEBOX_DOWNLOAD_REQUEST_HEADERS
     MOVIEBOX_AVAILABLE = True
     MOVIEBOX_IMPORT_ERROR = ""
 except Exception as exc:
@@ -106,16 +107,17 @@ RUNTIME_TOOLS_DIR = Path(DOWNLOAD_DIR) / "runtime-tools"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # In-memory progress store
-downloads: dict = {}
-download_controls: dict = {}
+runtime_state = RuntimeStateRegistry()
+downloads: dict = runtime_state.downloads
+download_controls: dict = runtime_state.download_controls
 FFMPEG_PATH = shutil.which("ffmpeg")
 ARIA2_PATH = shutil.which("aria2c")
 SELF_BASE_URL = os.getenv("GRABIX_PUBLIC_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 STREAM_EXTRACT_CACHE_TTL_SECONDS = 900
-stream_extract_cache: dict[str, tuple[float, dict]] = {}
+stream_extract_cache: dict[str, tuple[float, dict]] = runtime_state.stream_extract_cache
 ADULT_UNLOCK_WINDOW_SECONDS = 300
 ADULT_UNLOCK_MAX_ATTEMPTS = 5
-adult_unlock_attempts: dict[str, list[float]] = {}
+adult_unlock_attempts: dict[str, list[float]] = runtime_state.adult_unlock_attempts
 APPROVED_MEDIA_HOSTS = DEFAULT_APPROVED_MEDIA_HOSTS
 EDGE_BINARY_PATH = next(
     (
@@ -129,10 +131,10 @@ EDGE_BINARY_PATH = next(
     "",
 )
 ANIME_RESOLVE_CACHE_TTL_SECONDS = 300
-anime_resolve_cache: dict[str, tuple[float, dict]] = {}
+anime_resolve_cache: dict[str, tuple[float, dict]] = runtime_state.anime_resolve_cache
 CONSUMET_HEALTH_CACHE_TTL_SECONDS = 15
 consumet_health_cache: tuple[float, dict] | None = None
-dependency_install_jobs: dict[str, dict] = {}
+dependency_install_jobs: dict[str, dict] = runtime_state.dependency_install_jobs
 
 
 def refresh_runtime_tools() -> None:
@@ -1249,7 +1251,7 @@ def _resolve_fallback_provider(tmdb_id: int | None, season: int, episode: int, t
 
 
 @app.post("/anime/resolve-source")
-def anime_resolve_source(payload: AnimeResolveRequest):
+async def anime_resolve_source(payload: AnimeResolveRequest):
     cached = _get_cached_anime_resolution(payload)
     if cached:
         return cached
@@ -1259,13 +1261,39 @@ def anime_resolve_source(payload: AnimeResolveRequest):
     if not episode_id:
         raise HTTPException(status_code=400, detail="episodeId is required")
 
-    tried.append(
-        {
-            "server": "internal",
-            "stage": "anime-primary",
-            "detail": "Direct HiAnime sidecar resolution is disabled. Using built-in fallback chain.",
-        }
-    )
+    try:
+        from app.services.consumet import fetch_anime_watch
+        watch_payload = await fetch_anime_watch(
+            provider="hianime",
+            episode_id=episode_id,
+            server=payload.server,
+            audio=payload.audio
+        )
+        sources = watch_payload.get("sources")
+        if sources and isinstance(sources, list):
+            target_source = sources[0]
+            kind = "hls" if target_source.get("isM3U8") else ("embed" if target_source.get("isEmbed") else "direct")
+            resolution = {
+                "source": {
+                    "url": target_source.get("url"),
+                    "kind": kind,
+                    "headers": watch_payload.get("headers") or {}
+                },
+                "subtitles": watch_payload.get("subtitles") or [],
+                "provider": "HiAnime",
+                "selectedServer": target_source.get("quality", payload.server),
+                "strategy": "HiAnime Direct Resolution",
+            }
+            _set_cached_anime_resolution(payload, resolution)
+            return resolution
+    except Exception as exc:
+        tried.append(
+            {
+                "server": payload.server,
+                "stage": "anime-primary",
+                "detail": f"Direct HiAnime sidecar resolution failed {exc}. Using built-in fallback chain.",
+            }
+        )
 
     fallback_result = _resolve_fallback_provider(
         payload.tmdbId,
@@ -1323,6 +1351,7 @@ def check_link(url: str):
     opts = {"quiet": True, "no_warnings": True, "no_color": True, "noplaylist": True, "skip_download": True, "socket_timeout": 8}
     try:
         safe_url = _normalize_check_link_input(url)
+        safe_url = validate_outbound_target(safe_url, mode="public_user_target").normalized_url
         if _is_direct_media_url(safe_url) or _is_direct_subtitle_url(safe_url):
             return _direct_preview_payload(safe_url)
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -1741,7 +1770,14 @@ async def _moviebox_discover_payload():
         MovieBoxTrending(session).get_content_model(),
         MovieBoxHotMoviesAndTVSeries(session).get_content_model(),
         MovieBoxPopularSearch(session).get_content_model(),
+        return_exceptions=True
     )
+
+    if isinstance(homepage, Exception): homepage = None
+    if isinstance(trending, Exception): trending = None
+    if isinstance(hot, Exception): hot = None
+    if isinstance(popular_searches, Exception): popular_searches = None
+
 
     categories: dict[str, list] = {}
     for category in list(getattr(homepage, "operatingList", []) or []):
@@ -3869,7 +3905,7 @@ def start_download(
 
 # FIX 1: This is the correct endpoint name the frontend polls
 def download_status(dl_id: str):
-    item = downloads.get(dl_id)
+    item = runtime_state.snapshot_download(dl_id)
     return _public_download(item) if item else {"status": "not_found"}
 
 
@@ -3879,7 +3915,7 @@ def progress_alias(dl_id: str):
 
 
 def list_downloads():
-    ordered = sorted(downloads.values(), key=lambda item: item.get("created_at", ""), reverse=True)
+    ordered = sorted(runtime_state.snapshot_downloads(), key=lambda item: item.get("created_at", ""), reverse=True)
     return [_public_download(item) for item in ordered]
 
 
@@ -4211,6 +4247,19 @@ def _github_latest_release_asset(repo: str, asset_matcher) -> tuple[str, str]:
     raise RuntimeError(f"No matching asset was found in the latest {repo} release.")
 
 
+def _github_latest_release_checksum_asset(repo: str) -> tuple[str, str] | None:
+    api_url = f"https://api.github.com/repos/{repo}/releases/latest"
+    request = URLRequest(api_url, headers={"User-Agent": "GRABIX/1.0", "Accept": "application/vnd.github+json"})
+    with urlopen(request, timeout=60) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    for asset in payload.get("assets") or []:
+        name = str(asset.get("name") or "").lower()
+        if "sha256" in name and (name.endswith(".txt") or name.endswith(".sha256") or name.endswith(".sha256sum")):
+            return str(asset.get("browser_download_url") or ""), str(asset.get("name") or "")
+    return None
+
+
 def _install_aria2_portable(job: dict) -> str:
     runtime_dir = RUNTIME_TOOLS_DIR / "aria2"
     runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -4225,28 +4274,47 @@ def _install_aria2_portable(job: dict) -> str:
         temp_dir = Path(temp_dir_raw)
         archive_path = temp_dir / (archive_name or "aria2.zip")
         _download_file(archive_url, archive_path)
+        local_sha256 = sha256_file(archive_path)
+
+        checksum_asset = _github_latest_release_checksum_asset("aria2/aria2")
+        if checksum_asset:
+            checksum_url, checksum_name = checksum_asset
+            checksum_path = temp_dir / (checksum_name or "checksums.txt")
+            _download_file(checksum_url, checksum_path)
+            checksum_manifest = parse_checksum_manifest(checksum_path.read_text(encoding="utf-8", errors="ignore"))
+            expected = checksum_manifest.get(Path(archive_name).name)
+            if expected and expected.lower() != local_sha256.lower():
+                raise RuntimeError("aria2 archive checksum verification failed.")
 
         extract_dir = temp_dir / "extract"
         extract_dir.mkdir(parents=True, exist_ok=True)
         job.update({"status": "installing", "message": "Extracting aria2 portable package..."})
-        with zipfile.ZipFile(archive_path) as archive:
-            archive.extractall(extract_dir)
+        safe_extract_zip(archive_path, extract_dir)
 
         binary = next((path for path in extract_dir.rglob("aria2c.exe") if path.is_file()), None)
         if binary is None:
             raise RuntimeError("aria2 portable package did not contain aria2c.exe.")
 
-        if runtime_dir.exists():
-            shutil.rmtree(runtime_dir, ignore_errors=True)
-        runtime_dir.mkdir(parents=True, exist_ok=True)
+        staged_runtime_dir = temp_dir / "runtime-dir-next"
+        staged_runtime_dir.mkdir(parents=True, exist_ok=True)
 
         source_root = binary.parent
         for item in source_root.iterdir():
-            target = runtime_dir / item.name
+            target = staged_runtime_dir / item.name
             if item.is_dir():
                 shutil.copytree(item, target, dirs_exist_ok=True)
             else:
                 shutil.copy2(item, target)
+
+        final_runtime_dir = runtime_dir
+        backup_runtime_dir = final_runtime_dir.with_name(f"{final_runtime_dir.name}.bak")
+        if backup_runtime_dir.exists():
+            shutil.rmtree(backup_runtime_dir, ignore_errors=True)
+        if final_runtime_dir.exists():
+            final_runtime_dir.replace(backup_runtime_dir)
+        staged_runtime_dir.replace(final_runtime_dir)
+        if backup_runtime_dir.exists():
+            shutil.rmtree(backup_runtime_dir, ignore_errors=True)
 
     return f"Portable aria2 installed to {runtime_dir}"
 
@@ -4261,7 +4329,7 @@ def _dependency_status_payload() -> dict[str, dict]:
             "path": FFMPEG_PATH or "",
             "description": "Required for trimming, converting, and some HLS workflows.",
             "install_supported": _winget_available(),
-            "job": dependency_install_jobs.get("ffmpeg", {}),
+            "job": runtime_state.snapshot_dependency_job("ffmpeg"),
         },
         "aria2": {
             "id": "aria2",
@@ -4270,7 +4338,7 @@ def _dependency_status_payload() -> dict[str, dict]:
             "path": ARIA2_PATH or "",
             "description": "Optional fast multi-connection downloader for supported direct files.",
             "install_supported": True,
-            "job": dependency_install_jobs.get("aria2", {}),
+            "job": runtime_state.snapshot_dependency_job("aria2"),
         },
     }
 
@@ -4372,12 +4440,12 @@ def install_runtime_dependency(dep_id: str):
     dep_id = str(dep_id or "").strip().lower()
     if dep_id not in _dependency_catalog():
         raise HTTPException(status_code=404, detail="Unsupported dependency")
-    current_job = dependency_install_jobs.get(dep_id) or {}
+    current_job = runtime_state.snapshot_dependency_job(dep_id)
     if current_job.get("status") == "installing":
         return {"started": False, "dependency": dep_id, "job": current_job}
-    dependency_install_jobs[dep_id] = {"status": "queued", "message": f"Queued {dep_id} installation."}
+    runtime_state.set_dependency_job(dep_id, {"status": "queued", "message": f"Queued {dep_id} installation."})
     threading.Thread(target=_install_dependency_worker, args=(dep_id,), daemon=True).start()
-    return {"started": True, "dependency": dep_id, "job": dependency_install_jobs.get(dep_id, {})}
+    return {"started": True, "dependency": dep_id, "job": runtime_state.snapshot_dependency_job(dep_id)}
 
 
 def configure_adult_content(data: AdultContentConfigureRequest):

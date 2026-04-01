@@ -12,6 +12,8 @@ from fastapi import HTTPException
 
 from app.services.manga_anilist import get_seasonal_manga, get_trending_manga
 from app.services.manga_comick import get_frontpage as get_comick_frontpage
+from app.services.network_policy import validate_outbound_target
+from app.services.security import DEFAULT_APPROVED_MEDIA_HOSTS
 
 CONSUMET_API_BASE_ENV = "CONSUMET_API_BASE"
 DEFAULT_AUDIO_PRIORITY = ["en", "original", "hi"]
@@ -54,16 +56,14 @@ def _cache_set(key: str, value: Any, ttl_seconds: int) -> Any:
 
 
 def get_consumet_api_base() -> str:
-    base = os.getenv(CONSUMET_API_BASE_ENV, "").strip().rstrip("/")
+    base = os.getenv(CONSUMET_API_BASE_ENV, "http://127.0.0.1:3000").strip().rstrip("/")
     if not base:
-        raise ConsumetConfigError(
-            "Consumet is not configured. Set CONSUMET_API_BASE to your self-hosted instance."
-        )
+        base = "http://127.0.0.1:3000"
     return base
 
 
 def _consumet_configured() -> bool:
-    return bool(os.getenv(CONSUMET_API_BASE_ENV, "").strip())
+    return True
 
 
 def _http_error(detail: str, status_code: int = 502) -> HTTPException:
@@ -206,14 +206,17 @@ async def _fetch_consumet_json(
 
 
 async def fetch_proxy_response(url: str) -> tuple[bytes, str | None]:
-    parsed = httpx.URL(url)
-    if parsed.scheme not in {"http", "https"}:
-        raise _http_error("Only http and https URLs can be proxied.", 400)
+    validated = validate_outbound_target(
+        url,
+        mode="approved_provider_target",
+        allowed_hosts=DEFAULT_APPROVED_MEDIA_HOSTS,
+    )
+    safe_url = validated.normalized_url
 
     headers = {"User-Agent": "GRABIX/1.0"}
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True, headers=headers) as client:
-            response = await client.get(url)
+            response = await client.get(safe_url)
     except Exception as exc:
         raise _http_error(f"Proxy request failed: {exc}") from exc
 
@@ -1054,7 +1057,7 @@ async def discover_anime(section: str = "trending", page: int = 1, period: str =
         pass
 
     urls = {
-        "trending": "https://api.jikan.moe/v4/top/anime?filter=airing&page=1&limit=10",
+        "trending": f"https://api.jikan.moe/v4/top/anime?filter=airing&page={page}&limit=10",
         "popular": f"https://api.jikan.moe/v4/top/anime?filter=bypopularity&page={page}&limit=20",
         "toprated": f"https://api.jikan.moe/v4/top/anime?page={page}&limit=20",
         "seasonal": f"https://api.jikan.moe/v4/seasons/now?page={page}&limit=20",
@@ -1304,78 +1307,70 @@ async def fetch_anime_watch(
             "raw": {"fallback_only": True},
         }
 
-    try:
-        if provider == "hianime":
-            categories = ["dub", "sub"] if requested_audio in {"hi", "en"} else ["sub", "dub"]
-            servers = [server] if server else ["vidstreaming", "vidcloud"]
-            last_error: HTTPException | None = None
-            for category in categories:
-                for server_name in servers:
-                    try:
-                        payload = await _fetch_consumet_json(
-                            f"/anime/{provider}/watch/{quote(episode_id)}",
-                            params={"server": server_name, "category": category},
-                            ttl_seconds=180,
-                        )
-                        normalized = normalize_watch_payload(
-                            payload,
-                            provider=provider,
-                            requested_audio=requested_audio if category == "dub" else "original",
-                            server=server_name,
-                        )
-                        if normalized["sources"]:
-                            normalized["category"] = category
-                            return normalized
-                    except HTTPException as exc:
-                        last_error = exc
-                        continue
-            if last_error:
-                raise last_error
-            raise _http_error("Hianime did not return any playable anime sources.")
+    if provider == "hianime":
+        # Map frontend server names to consumet-local values
+        _server_map = {"hd-1": "vidstreaming", "hd-2": "vidcloud", "vidstreaming": "vidstreaming", "vidcloud": "vidcloud"}
+        if server and server != "auto" and server in _server_map:
+            servers = [_server_map[server]]
+        else:
+            servers = ["vidstreaming", "vidcloud"]
+        categories = ["dub", "sub"] if requested_audio in {"hi", "en"} else ["sub", "dub"]
+        last_error: HTTPException | None = None
+        for category in categories:
+            for server_name in servers:
+                try:
+                    payload = await _fetch_consumet_json(
+                        f"/anime/{provider}/watch/{quote(episode_id)}",
+                        params={"server": server_name, "category": category},
+                        ttl_seconds=180,
+                    )
+                    normalized = normalize_watch_payload(
+                        payload,
+                        provider=provider,
+                        requested_audio=requested_audio if category == "dub" else "original",
+                        server=server_name,
+                    )
+                    if normalized["sources"]:
+                        normalized["category"] = category
+                        return normalized
+                except HTTPException as exc:
+                    last_error = exc
+                    continue
+        if last_error:
+            raise last_error
+        raise _http_error("Hianime did not return any playable anime sources.")
 
-        if provider == "zoro":
-            categories = ["dub", "sub"] if requested_audio in {"hi", "en"} else ["sub", "dub"]
-            servers = [server] if server else ["hd-1", "hd-2", "streamsb", "streamtape"]
-            last_error: HTTPException | None = None
-            for category in categories:
-                for server_name in servers:
-                    try:
-                        payload = await _fetch_consumet_json(
-                            f"/anime/{provider}/watch/{quote(episode_id)}",
-                            params={"server": server_name, "category": category},
-                            ttl_seconds=180,
-                        )
-                        normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio if category == "dub" else "original", server=server_name)
-                        if normalized["sources"]:
-                            normalized["category"] = category
-                            return normalized
-                    except HTTPException as exc:
-                        last_error = exc
-                        continue
-            if last_error:
-                raise last_error
-            raise _http_error("Consumet did not return any playable anime sources.")
+    if provider == "zoro":
+        categories = ["dub", "sub"] if requested_audio in {"hi", "en"} else ["sub", "dub"]
+        servers_z = [server] if server else ["hd-1", "hd-2", "streamsb", "streamtape"]
+        last_error2: HTTPException | None = None
+        for category in categories:
+            for server_name in servers_z:
+                try:
+                    payload = await _fetch_consumet_json(
+                        f"/anime/{provider}/watch/{quote(episode_id)}",
+                        params={"server": server_name, "category": category},
+                        ttl_seconds=180,
+                    )
+                    normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio if category == "dub" else "original", server=server_name)
+                    if normalized["sources"]:
+                        normalized["category"] = category
+                        return normalized
+                except HTTPException as exc:
+                    last_error2 = exc
+                    continue
+        if last_error2:
+            raise last_error2
+        raise _http_error("Consumet did not return any playable anime sources.")
 
-        payload = await _fetch_consumet_json(
-            f"/anime/{provider}/watch/{quote(episode_id)}",
-            ttl_seconds=180,
-        )
-        normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio, server=server)
-        if not normalized["sources"]:
-            raise _http_error("Consumet did not return any playable anime sources.")
-        return normalized
-    except (HTTPException, ConsumetConfigError):
-        return {
-            "provider": provider,
-            "requested_audio": requested_audio,
-            "available_audio": [requested_audio],
-            "selected_server": server or "fallback",
-            "headers": {},
-            "download": "",
-            "sources": [],
-            "subtitles": [],
-            "raw": {"fallback_only": True},
-        }
+    payload = await _fetch_consumet_json(
+        f"/anime/{provider}/watch/{quote(episode_id)}",
+        ttl_seconds=180,
+    )
+    normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio, server=server)
+    if not normalized["sources"]:
+        raise _http_error("Consumet did not return any playable anime sources.")
+    return normalized
 
 
 async def fetch_manga_read(provider: str, chapter_id: str) -> dict[str, Any]:

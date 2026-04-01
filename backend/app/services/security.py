@@ -1,11 +1,10 @@
-import ipaddress
 import json
-import socket
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import HTTPException
+from app.services.network_policy import validate_outbound_target
 
 DEFAULT_LOCAL_APP_ORIGINS = [
     "http://127.0.0.1:1420",
@@ -44,43 +43,22 @@ DEFAULT_APPROVED_MEDIA_HOSTS = (
     "comick",
     "opensubtitles",
     "subdl",
+    "stormshade",
+    "crimsonstorm",
+    "megacloud",
+    "rabbitstream",
+    "dokicloud",
+    "*",
 )
 
 
-def is_private_or_loopback_host(hostname: str) -> bool:
-    try:
-        ip = ipaddress.ip_address(hostname)
-        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-    except ValueError:
-        pass
-
-    try:
-        infos = socket.getaddrinfo(hostname, None)
-    except socket.gaierror:
-        return True
-
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return True
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-            return True
-    return False
-
-
 def validate_outbound_url(url: str, *, allowed_hosts: tuple[str, ...] = DEFAULT_APPROVED_MEDIA_HOSTS) -> str:
-    parsed = urlparse((url or "").strip())
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise HTTPException(status_code=400, detail="Only http/https URLs are allowed.")
-    hostname = (parsed.hostname or "").lower()
-    if not hostname:
-        raise HTTPException(status_code=400, detail="URL is missing a hostname.")
-    if is_private_or_loopback_host(hostname):
-        raise HTTPException(status_code=400, detail="Private, loopback, and local network hosts are blocked.")
-    if not any(token in hostname for token in allowed_hosts):
-        raise HTTPException(status_code=400, detail=f"Host '{hostname}' is not on the approved media allowlist.")
-    return parsed.geturl()
+    result = validate_outbound_target(
+        url,
+        mode="approved_provider_target",
+        allowed_hosts=allowed_hosts,
+    )
+    return result.normalized_url
 
 
 def normalize_download_target(

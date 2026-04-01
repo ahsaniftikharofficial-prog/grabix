@@ -676,7 +676,10 @@ export default function VidSrcPlayer({
     video.addEventListener("durationchange", handleDurationChange);
 
     if (activeSource.kind === "hls") {
-      const playbackUrl = resolvedPlaybackUrl || activeSource.url;
+      const defaultUrl = shouldKeepHlsProxied(activeSource)
+        ? buildStreamProxyUrl(API, activeSource.url, activeSource.requestHeaders)
+        : activeSource.url;
+      const playbackUrl = resolvedPlaybackUrl || defaultUrl;
       if (Hls.isSupported()) {
         const hls = new Hls({
           enableWorker: true,

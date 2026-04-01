@@ -12,11 +12,14 @@ echo.
 set "ROOT=%~dp0"
 set "BACKEND=%ROOT%backend"
 set "FRONTEND=%ROOT%grabix-ui"
+set "CONSUMET=%ROOT%consumet-local"
 set "SCRIPTS=%ROOT%scripts"
 set "BACKEND_PORT=8000"
 set "FRONTEND_PORT=5173"
+set "CONSUMET_PORT=3000"
 set "BACKEND_LOG=%BACKEND%\logs\launcher-backend.log"
 set "FRONTEND_LOG=%BACKEND%\logs\launcher-frontend.log"
+set "CONSUMET_LOG=%BACKEND%\logs\launcher-consumet.log"
 
 echo  [CLEANUP] Closing installed GRABIX processes that can hijack source-mode ports...
 taskkill /IM grabix-ui.exe /F >nul 2>&1
@@ -30,11 +33,12 @@ powershell -NoProfile -Command ^
 
 echo  [CLEANUP] Releasing fixed GRABIX dev ports...
 powershell -NoProfile -Command ^
-  "$ports=@(%BACKEND_PORT%,%FRONTEND_PORT%); foreach($port in $ports){ Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $port -State Listen -ErrorAction SilentlyContinue | ForEach-Object { try { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } catch {} } }"
+  "$ports=@(%BACKEND_PORT%,%FRONTEND_PORT%,%CONSUMET_PORT%); foreach($port in $ports){ Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $port -State Listen -ErrorAction SilentlyContinue | ForEach-Object { try { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } catch {} } }"
 
 if not exist "%BACKEND%\logs" mkdir "%BACKEND%\logs" >nul 2>&1
 if exist "%BACKEND_LOG%" del /f /q "%BACKEND_LOG%" >nul 2>&1
 if exist "%FRONTEND_LOG%" del /f /q "%FRONTEND_LOG%" >nul 2>&1
+if exist "%CONSUMET_LOG%" del /f /q "%CONSUMET_LOG%" >nul 2>&1
 
 python --version >nul 2>&1
 if errorlevel 1 (
@@ -74,16 +78,33 @@ if not exist "%FRONTEND%\node_modules" (
     echo  [SETUP] Frontend packages installed.
 )
 
+if not exist "%CONSUMET%\node_modules" (
+    echo  [SETUP] Installing HiAnime packages ^(first time only^)...
+    cd /d "%CONSUMET%"
+    npm.cmd install --silent
+    echo  [SETUP] HiAnime packages installed.
+)
+
 set "BACKEND_BASE=http://127.0.0.1:%BACKEND_PORT%"
 set "FRONTEND_BASE=http://127.0.0.1:%FRONTEND_PORT%"
+set "CONSUMET_BASE=http://127.0.0.1:%CONSUMET_PORT%"
 set "FRONTEND_ENV_FILE=%FRONTEND%\.env.development.local"
 
 > "%FRONTEND_ENV_FILE%" (
     echo VITE_GRABIX_API_BASE=%BACKEND_BASE%
 )
 
+echo  [START] Launching HiAnime gateway on %CONSUMET_BASE%
+start "GRABIX HiAnime" /min cmd /c call "%SCRIPTS%\start-consumet.cmd" "%CONSUMET%" "%CONSUMET_PORT%" "%CONSUMET_LOG%"
+
+echo  [WAIT] Waiting for HiAnime gateway...
+powershell -NoProfile -Command ^
+  "$ready=$false; for($i=0;$i -lt 60;$i++){ Start-Sleep -Milliseconds 500; try { $r=Invoke-WebRequest -Uri '%CONSUMET_BASE%' -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200){$ready=$true; break} } catch {} }; if($ready){ Write-Host '  [OK] HiAnime gateway ready.' } else { Write-Host '  [WARN] HiAnime gateway slow to start, continuing anyway.' }"
+
+set "CONSUMET_API_BASE=%CONSUMET_BASE%"
+
 echo  [START] Launching backend on %BACKEND_BASE%
-start "GRABIX Backend" /min cmd /c call "%SCRIPTS%\start-backend.cmd" "%BACKEND%" "%BACKEND_PORT%" "%BACKEND_BASE%" "%BACKEND_LOG%"
+start "GRABIX Backend" /min cmd /c call "%SCRIPTS%\start-backend.cmd" "%BACKEND%" "%BACKEND_PORT%" "%BACKEND_BASE%" "%BACKEND_LOG%" "%CONSUMET_API_BASE%"
 
 echo  [WAIT] Waiting for backend health...
 powershell -NoProfile -Command ^

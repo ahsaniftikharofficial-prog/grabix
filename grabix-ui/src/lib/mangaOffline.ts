@@ -50,9 +50,10 @@ function runTransaction<T>(storeName: string, mode: IDBTransactionMode, handler:
   }));
 }
 
-export function getOfflineMangaKey(item: Pick<MangaDiscoveryItem, "mangadex_id" | "anilist_id" | "title">): string {
+export function getOfflineMangaKey(item: Pick<MangaDiscoveryItem, "mangadex_id" | "anilist_id" | "mal_id" | "title">): string {
   if (item.mangadex_id) return `mdx:${item.mangadex_id}`;
   if (item.anilist_id) return `anilist:${item.anilist_id}`;
+  if (item.mal_id) return `mal:${item.mal_id}`;
   return `title:${item.title.trim().toLowerCase()}`;
 }
 
