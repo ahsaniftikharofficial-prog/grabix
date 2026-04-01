@@ -1,43 +1,84 @@
-# Node / Frontend
-node_modules/
-dist/
-.env
-.env.local
+# ============================================================
+#  GRABIX — .gitignore
+#  Rule of thumb: if it's generated, downloaded, or a secret → ignore it
+# ============================================================
 
-# Python / Backend
-__pycache__/
-*.pyc
-*.pyo
-.venv/
-venv/
-*.egg-info/
-
-# Tauri / Rust
-target/
-src-tauri/target/
-
-# Downloads folder (don't commit downloaded media)
-backend/downloads/
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# VSCode
-.vscode/settings.json
-
-# Ignore Python junk
-venv/
-__pycache__/
-*.pyc
-
-# Ignore Node/React junk
+# ─── Node / Frontend ────────────────────────────────────────
 node_modules/
 dist/
 build/
+.cache/
+*.tsbuildinfo
 
-# Ignore Tauri junk
+# ─── Python / Backend ───────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ─── Tauri / Rust ───────────────────────────────────────────
+target/
 src-tauri/target/
+grabix-ui/src-tauri/target/
+
+# ─── Databases & Runtime State ──────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+memory.db
+
+# ─── Log Files ──────────────────────────────────────────────
+*.log
+*.err.log
+logs/
+backend/logs/
+consumet-local/server-watch.log
+consumet-local/server-watch.err.log
+
+# ─── Temporary / Scratch Folders ────────────────────────────
+.tmp-*/
+.temp-*/
+tmp/
+temp/
+
+# ─── Generated / Tool Output Files ─────────────────────────
 repomix-output.xml
 src-only.xml
-repomix-output.xml
+release-gate-report.json
+*.spec.bak
+
+# ─── Downloaded Media (never commit user content) ────────────
+backend/downloads/
+
+# ─── Secrets & Environment ──────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets.json
+
+# ─── OS Junk ────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ─── IDE / Editor ───────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# ─── Build Artifacts ────────────────────────────────────────
+*.exe
+*.msi
+*.dmg
+*.AppImage
+grabix-ui/src-tauri/target/
