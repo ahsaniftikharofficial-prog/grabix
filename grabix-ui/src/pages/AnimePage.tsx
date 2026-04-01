@@ -112,7 +112,7 @@ async function searchJikanAnime(query: string, page = 1): Promise<AnimeCardItem[
   return (data.data ?? []).map(mapLegacyAnime);
 }
 
-async function fetchJikanDiscover(tab: Tab, page = 1): Promise<AnimeCardItem[]> {
+async function fetchJikanDiscover(tab: Tab, page = 1, _period?: string): Promise<AnimeCardItem[]> {
   const path =
     tab === "popular"
       ? `/top/anime?filter=bypopularity&page=${page}&limit=20`
@@ -122,7 +122,7 @@ async function fetchJikanDiscover(tab: Tab, page = 1): Promise<AnimeCardItem[]> 
           ? `/seasons/now?page=${page}&limit=20`
           : tab === "movie"
             ? `/top/anime?type=movie&page=${page}&limit=20`
-            : `/top/anime?page=${page}&limit=20`;
+            : `/top/anime?filter=airing&page=${page}&limit=10`;
   const response = await fetch(`${JIKAN}${path}`);
   const data = (await response.json()) as { data?: LegacyAnime[] };
   return (data.data ?? []).map(mapLegacyAnime);
@@ -299,11 +299,12 @@ export default function AnimePage() {
     setBrowseError("");
     try {
       const nextItems = (await fetchConsumetAnimeDiscover(nextTab, nextPage, nextPeriod)).map(toCardItem);
+      if (nextItems.length === 0) throw new Error("empty");
       setHasMore(nextItems.length > 0);
       setItems((prev) => (nextPage === 1 ? nextItems : dedupeItems([...prev, ...nextItems])));
     } catch {
       try {
-        const fallbackItems = await fetchJikanDiscover(nextTab, nextPage);
+        const fallbackItems = await fetchJikanDiscover(nextTab, nextPage, nextPeriod);
         setHasMore(fallbackItems.length > 0);
         setItems((prev) => (nextPage === 1 ? fallbackItems : dedupeItems([...prev, ...fallbackItems])));
       } catch {
@@ -611,10 +612,16 @@ function AnimeDetail({
   const [tmdbId, setTmdbId] = useState<number | null>(null);
   const [candidateAnimes, setCandidateAnimes] = useState<AnimeCardItem[]>(anime.provider === "jikan" ? [] : [anime]);
   const [resolvedAnime, setResolvedAnime] = useState<AnimeCardItem | null>(anime.provider === "jikan" ? null : anime);
+  const hasDub = (resolvedAnime?.languages ?? anime.languages ?? []).some((l) => l === "en" || l === "dub");
   const [episodes, setEpisodes] = useState<ConsumetEpisode[]>([]);
   const [episode, setEpisode] = useState(1);
-  const [audio, setAudio] = useState<AudioPreference>("en");
+  const [audio, setAudio] = useState<AudioPreference>(
+    (anime.languages ?? []).some((l) => l === "en" || l === "dub") ? "en" : "original"
+  );
   const [server, setServer] = useState<AnimeServerOption>("auto");
+  useEffect(() => {
+    if (!hasDub && audio === "en") setAudio("original");
+  }, [hasDub]);
   const [detailHint, setDetailHint] = useState("");
   const [knownEpisodeCount, setKnownEpisodeCount] = useState<number | null>(anime.episodes_count ?? null);
   const [hasHindiFallback, setHasHindiFallback] = useState(false);
@@ -1063,9 +1070,8 @@ function AnimeDetail({
   const playerServerOptions = [
     { id: "hd-1:original", label: "HD-1 SUB" },
     { id: "hd-2:original", label: "HD-2 SUB" },
-    { id: "hd-1:en", label: "HD-1 DUB" },
-    { id: "hd-2:en", label: "HD-2 DUB" },
-  ] as const;
+    ...(hasDub ? [{ id: "hd-1:en", label: "HD-1 DUB" }, { id: "hd-2:en", label: "HD-2 DUB" }] : []),
+  ];
 
   const resolvePlayerServerOption = async (optionId: string, targetEpisode = episode) => {
     const [requestedServer, requestedAudio] = optionId.split(":") as [AnimeServerOption, AudioPreference];
@@ -1383,7 +1389,7 @@ function AnimeDetail({
             <div>
               <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>Audio</div>
               <div className="anime-option-grid compact">
-                {AUDIO_BUTTONS.filter((option) => option.id !== "hi" || hasHindiFallback).map((option) => (
+                {AUDIO_BUTTONS.filter((option) => (option.id !== "hi" || hasHindiFallback) && (option.id !== "en" || hasDub)).map((option) => (
                   <button
                     key={option.id}
                     className={`anime-option-btn compact${audio === option.id ? " active" : ""}`}

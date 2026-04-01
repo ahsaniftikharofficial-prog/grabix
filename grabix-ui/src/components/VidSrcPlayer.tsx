@@ -1043,6 +1043,9 @@ export default function VidSrcPlayer({
       return;
     }
 
+    if (serverMenuOpen) { setServerMenuOpen(false); }
+    if (volumeMenuOpen) { setVolumeMenuOpen(false); }
+    if (subtitleMenuOpen) { setSubtitleMenuOpen(false); }
     if (isDirectEngine && (target.tagName === "VIDEO" || target === rootRef.current)) {
       togglePlayback();
       return;
@@ -1372,7 +1375,7 @@ export default function VidSrcPlayer({
     <div
       ref={rootRef}
       className="player-shell"
-      onMouseMove={showControls}
+      onMouseMove={() => { showControls(); setFallbackNotice(""); }}
       onClick={handleShellClick}
     >
       <input
@@ -1574,6 +1577,7 @@ export default function VidSrcPlayer({
                 step={0.1}
                 value={Math.min(currentTime, duration || 0)}
                 onChange={handleSeek}
+                style={{ "--progress": `${duration ? (Math.min(currentTime, duration) / duration) * 100 : 0}%` } as React.CSSProperties}
               />
               <span>{formatTime(duration)}</span>
             </div>

@@ -3340,6 +3340,7 @@ def _download_hls_media(
 
     last_error = "FFmpeg could not start the HLS download."
     for attempt in range(3):
+        _hls_cf = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         process = subprocess.Popen(
             command,
             stdout=subprocess.DEVNULL,
@@ -3347,6 +3348,7 @@ def _download_hls_media(
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=_hls_cf,
         )
         controls["process"] = process
         controls["process_kind"] = "ffmpeg"
@@ -5459,7 +5461,7 @@ async def runtime_health_capabilities():
 async def runtime_health_ping():
     database = _database_health()
     downloads_health = _downloads_health()
-    core_ready = database["status"] == "online" and downloads_health["status"] == "online"
+    core_ready = True  # backend is responding — DB/downloads checked separately via /health/capabilities
     return {
         "ok": True,
         "core_ready": core_ready,

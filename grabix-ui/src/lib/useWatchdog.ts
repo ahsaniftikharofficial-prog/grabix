@@ -1,10 +1,10 @@
 /**
- * useWatchdog — polls the backend /ping endpoint to detect crashes and restarts.
+ * useWatchdog — polls the backend /health/ping endpoint to detect crashes and restarts.
  * Drives the WatchdogBanner: amber while reconnecting, green on recovery, red on timeout.
  *
  * States:
  *  idle         → backend is up, nothing to show
- *  reconnecting → /ping is failing, banner pulses amber
+ *  reconnecting → /health/ping is failing, banner pulses amber
  *  reconnected  → backend came back after being down, banner shows green for 3 s then hides
  *  failed       → backend stayed down for >30 s, banner shows red permanently
  */
@@ -36,7 +36,8 @@ export function useWatchdog(): WatchdogState {
     const probe = async () => {
       if (cancelled) return;
       try {
-        const res = await fetch(`${BACKEND_API}/ping`, {
+        // FIX: was /ping — the real backend endpoint is /health/ping
+        const res = await fetch(`${BACKEND_API}/health/ping`, {
           method: "GET",
           signal: AbortSignal.timeout(2500),
           cache: "no-store",
