@@ -593,6 +593,18 @@ def init_db():
                 consecutive_failures INTEGER DEFAULT 0
             )
         """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS content_cache (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                content_type TEXT DEFAULT 'generic',
+                expires_at REAL NOT NULL,
+                created_at REAL NOT NULL,
+                last_accessed REAL NOT NULL
+            )
+        """)
+        con.execute("CREATE INDEX IF NOT EXISTS idx_content_cache_expires ON content_cache(expires_at)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_content_cache_accessed ON content_cache(last_accessed)")
         con.commit()
         con.close()
         log_event(backend_logger, logging.INFO, event="db_init", message="Database initialized successfully.")
@@ -708,6 +720,187 @@ def _start_moviebox_bg_retry() -> None:
 # Restore last-known state and start background auto-retry
 _restore_provider_status_from_db()
 _start_moviebox_bg_retry()
+
+# ---------------------------------------------------------------------------
+# Phase 3 — SQLite TTL Content Cache (Stale-While-Revalidate + LRU Eviction)
+# ---------------------------------------------------------------------------
+
+# Per-content-type TTLs (seconds)
+_CACHE_TTL: dict[str, int] = {
+    "discover":        6 * 3600,    # trending / homepage  → 6 h
+    "details":         6 * 3600,    # item details         → 6 h
+    "manga_chapters":  12 * 3600,   # manga chapter lists  → 12 h
+    "search":          30 * 60,     # search results       → 30 min
+    "generic":         15 * 60,     # fallback             → 15 min
+}
+
+# Stale-while-revalidate grace period multiplier
+# If entry is within TTL * _CACHE_STALE_GRACE it's returned instantly;
+# a background task refreshes it silently.
+_CACHE_STALE_GRACE = 2.0
+
+# Maximum cache size on disk (50 MB expressed in characters — JSON text)
+_CACHE_MAX_BYTES = 50 * 1024 * 1024
+
+# Background refresh tasks that are currently running (deduplicated by key)
+_cache_bg_refresh_keys: set[str] = set()
+_cache_bg_refresh_lock = threading.Lock()
+
+
+def _sqlite_cache_get(key: str) -> tuple[object | None, bool]:
+    """
+    Returns (value, is_stale).
+    value=None  → full cache miss (caller must fetch fresh).
+    is_stale=True → value was returned but TTL has expired; caller should
+                    trigger a background refresh while the stale value is
+                    served immediately (stale-while-revalidate).
+    """
+    try:
+        now = time.time()
+        con = get_db_connection()
+        row = con.execute(
+            "SELECT value, expires_at, content_type FROM content_cache WHERE key=?", (key,)
+        ).fetchone()
+        if row is None:
+            con.close()
+            return None, False
+        expires_at = float(row["expires_at"])
+        content_type = row["content_type"] or "generic"
+        ttl = _CACHE_TTL.get(content_type, _CACHE_TTL["generic"])
+        stale_deadline = expires_at + ttl * (_CACHE_STALE_GRACE - 1.0)
+        # Update last_accessed for LRU tracking (best-effort)
+        try:
+            con.execute("UPDATE content_cache SET last_accessed=? WHERE key=?", (now, key))
+            con.commit()
+        except Exception:
+            pass
+        con.close()
+        value = json.loads(row["value"])
+        if now <= expires_at:
+            return value, False          # fresh hit
+        if now <= stale_deadline:
+            return value, True           # stale-but-usable hit
+        # Entry is too old — treat as miss
+        return None, False
+    except Exception as exc:
+        log_event(backend_logger, logging.DEBUG, event="cache_get_error", message="SQLite cache get failed.", details={"key": key, "error": str(exc)})
+        return None, False
+
+
+def _sqlite_cache_set(key: str, value: object, content_type: str = "generic") -> object:
+    """
+    Persist value to the SQLite content_cache table.
+    Runs LRU eviction if total cache size exceeds _CACHE_MAX_BYTES.
+    Returns value unchanged so callers can do `return _sqlite_cache_set(key, payload)`.
+    """
+    try:
+        ttl = _CACHE_TTL.get(content_type, _CACHE_TTL["generic"])
+        now = time.time()
+        serialized = json.dumps(value, default=str)
+        con = get_db_connection()
+        con.execute(
+            """
+            INSERT INTO content_cache (key, value, content_type, expires_at, created_at, last_accessed)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value=excluded.value,
+                content_type=excluded.content_type,
+                expires_at=excluded.expires_at,
+                created_at=excluded.created_at,
+                last_accessed=excluded.last_accessed
+            """,
+            (key, serialized, content_type, now + ttl, now, now),
+        )
+        con.commit()
+        # LRU eviction: check total size and drop oldest entries
+        try:
+            total = con.execute("SELECT COALESCE(SUM(LENGTH(value)), 0) FROM content_cache").fetchone()[0]
+            if total > _CACHE_MAX_BYTES:
+                to_delete = con.execute(
+                    "SELECT key FROM content_cache ORDER BY last_accessed ASC LIMIT 20"
+                ).fetchall()
+                if to_delete:
+                    con.executemany("DELETE FROM content_cache WHERE key=?", [(r["key"],) for r in to_delete])
+                    con.commit()
+                    log_event(backend_logger, logging.INFO, event="cache_eviction",
+                              message=f"Cache LRU eviction removed {len(to_delete)} entries.", details={"total_bytes": total})
+        except Exception:
+            pass
+        con.close()
+    except Exception as exc:
+        log_event(backend_logger, logging.DEBUG, event="cache_set_error", message="SQLite cache set failed.", details={"key": key, "error": str(exc)})
+    return value
+
+
+def _sqlite_cache_delete_expired() -> int:
+    """Delete all entries past their stale deadline. Returns number removed."""
+    try:
+        now = time.time()
+        con = get_db_connection()
+        # Build a case expression to compute stale deadline per content_type
+        cur = con.execute(
+            """
+            DELETE FROM content_cache
+            WHERE (
+                CASE content_type
+                    WHEN 'discover'        THEN expires_at + ?
+                    WHEN 'details'         THEN expires_at + ?
+                    WHEN 'manga_chapters'  THEN expires_at + ?
+                    WHEN 'search'          THEN expires_at + ?
+                    ELSE                       expires_at + ?
+                END
+            ) < ?
+            """,
+            (
+                _CACHE_TTL["discover"],
+                _CACHE_TTL["details"],
+                _CACHE_TTL["manga_chapters"],
+                _CACHE_TTL["search"],
+                _CACHE_TTL["generic"],
+                now,
+            ),
+        )
+        removed = cur.rowcount
+        con.commit()
+        con.close()
+        return removed
+    except Exception:
+        return 0
+
+
+def _cache_trigger_bg_refresh(key: str, refresh_coro_factory) -> None:
+    """
+    Fire a background asyncio task to refresh a stale cache entry.
+    Deduplicates: if a refresh for this key is already running, skips.
+    refresh_coro_factory is a zero-arg callable that returns a coroutine.
+    """
+    with _cache_bg_refresh_lock:
+        if key in _cache_bg_refresh_keys:
+            return
+        _cache_bg_refresh_keys.add(key)
+
+    async def _run():
+        try:
+            await refresh_coro_factory()
+        except Exception as exc:
+            log_event(backend_logger, logging.DEBUG, event="cache_bg_refresh_error",
+                      message="Background cache refresh failed.", details={"key": key, "error": str(exc)})
+        finally:
+            with _cache_bg_refresh_lock:
+                _cache_bg_refresh_keys.discard(key)
+
+    def _thread_target():
+        import asyncio as _asyncio
+        loop = _asyncio.new_event_loop()
+        _asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_run())
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=_thread_target, daemon=True, name=f"cache-refresh-{key[:30]}")
+    t.start()
+
 
 # ---------------------------------------------------------------------------
 
@@ -1971,9 +2164,23 @@ def _moviebox_total_episode_count(season_episode_counts: dict[int, int] | None) 
 
 async def _moviebox_discover_payload():
     cache_key = "moviebox:discover"
-    cached = _moviebox_cache_get(cache_key)
-    if cached is not None:
-        return cached
+
+    # Phase 3: SQLite TTL cache with stale-while-revalidate
+    cached_value, is_stale = _sqlite_cache_get(cache_key)
+    if cached_value is not None:
+        if is_stale:
+            # Return stale content immediately; refresh silently in background
+            _cache_trigger_bg_refresh(
+                cache_key,
+                lambda: _moviebox_discover_fetch_and_cache(cache_key),
+            )
+        return cached_value
+
+    # Full miss — fetch fresh synchronously
+    return await _moviebox_discover_fetch_and_cache(cache_key)
+
+
+async def _moviebox_discover_fetch_and_cache(cache_key: str):
 
     _moviebox_assert_available()
     session = MovieBoxSession(timeout=20)
@@ -2110,7 +2317,9 @@ async def _moviebox_discover_payload():
             if getattr(entry, "title", "")
         ][:12],
     }
-    return _moviebox_cache_set(cache_key, payload)
+    # Phase 3: persist to SQLite with 6h TTL; also warm the in-memory dict cache for the session
+    _moviebox_cache_set(cache_key, payload, ttl=_CACHE_TTL["discover"])
+    return _sqlite_cache_set(cache_key, payload, "discover")
 
 
 async def _moviebox_find_item(
@@ -2289,9 +2498,28 @@ async def moviebox_search_items(
         f"moviebox:search:{query}:{safe_page}:{safe_per_page}:{normalized_media_type}:"
         f"{hindi_only}:{anime_only}:{prefer_hindi}:{sort_by}"
     )
-    cached = _moviebox_cache_get(cache_key)
-    if cached is not None:
-        return cached
+    # Phase 3: SQLite cache (30min TTL, search results go stale fast)
+    cached_value, is_stale = _sqlite_cache_get(cache_key)
+    if cached_value is not None:
+        if is_stale:
+            async def _refresh_search():
+                await _moviebox_search_items_fetch_and_cache(
+                    cache_key, query, safe_page, safe_per_page,
+                    normalized_media_type, hindi_only, anime_only, prefer_hindi, sort_by,
+                )
+            _cache_trigger_bg_refresh(cache_key, _refresh_search)
+        return cached_value
+
+    return await _moviebox_search_items_fetch_and_cache(
+        cache_key, query, safe_page, safe_per_page,
+        normalized_media_type, hindi_only, anime_only, prefer_hindi, sort_by,
+    )
+
+
+async def _moviebox_search_items_fetch_and_cache(
+    cache_key, query, safe_page, safe_per_page,
+    normalized_media_type, hindi_only, anime_only, prefer_hindi, sort_by,
+):
 
     _moviebox_assert_available()
     session = MovieBoxSession(timeout=20)
@@ -2347,7 +2575,9 @@ async def moviebox_search_items(
         "media_type": normalized_media_type,
         "items": [_moviebox_card_payload(item, "search") for item in ranked],
     }
-    return _moviebox_cache_set(cache_key, payload)
+    # Phase 3: persist to SQLite with 30min TTL; warm in-memory dict too
+    _moviebox_cache_set(cache_key, payload, ttl=_CACHE_TTL["search"])
+    return _sqlite_cache_set(cache_key, payload, "search")
 
 
 @app.get("/moviebox/details")
@@ -2358,6 +2588,21 @@ async def moviebox_details(
     year: int | None = None,
 ):
     normalized_media_type = _moviebox_media_type_value(media_type)
+
+    # Phase 3: SQLite cache with 6h TTL for details (expensive to fetch)
+    cache_key = f"moviebox:details:{subject_id or title}:{normalized_media_type}:{year}"
+    cached_value, is_stale = _sqlite_cache_get(cache_key)
+    if cached_value is not None:
+        if is_stale:
+            async def _refresh_details():
+                await _moviebox_details_fetch_and_cache(cache_key, subject_id, title, normalized_media_type, year)
+            _cache_trigger_bg_refresh(cache_key, _refresh_details)
+        return cached_value
+
+    return await _moviebox_details_fetch_and_cache(cache_key, subject_id, title, normalized_media_type, year)
+
+
+async def _moviebox_details_fetch_and_cache(cache_key, subject_id, title, normalized_media_type, year):
     session, item = await _moviebox_resolve_item(subject_id, title, normalized_media_type, year)
 
     detail_model = None
@@ -2398,10 +2643,13 @@ async def moviebox_details(
         except Exception:
             pass
 
-    return {
+    result = {
         "provider": "MovieBox",
         "item": payload,
     }
+    # Phase 3: persist to SQLite with 6h TTL; warm in-memory dict too
+    _moviebox_cache_set(cache_key, result, ttl=_CACHE_TTL["details"])
+    return _sqlite_cache_set(cache_key, result, "details")
 
 
 @app.get("/moviebox/sources")
@@ -6032,6 +6280,82 @@ async def _diagnostics_payload() -> dict:
             "managed_download_root": str(Path(DOWNLOAD_DIR).resolve()),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Cache Management Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/cache/clear")
+async def cache_clear(content_type: str | None = None):
+    """
+    Clear the SQLite content cache.
+    - content_type=None  → wipe everything
+    - content_type=discover|search|details|manga_chapters|generic → wipe that type only
+    Also flushes the in-memory moviebox_cache dict for the same scope.
+    """
+    try:
+        con = get_db_connection()
+        if content_type:
+            cur = con.execute("DELETE FROM content_cache WHERE content_type=?", (content_type,))
+        else:
+            cur = con.execute("DELETE FROM content_cache")
+        removed = cur.rowcount
+        con.commit()
+        con.close()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Cache clear failed: {exc}")
+
+    # Flush matching in-memory dict entries
+    try:
+        if content_type in (None, "discover", "search", "details"):
+            moviebox_cache.clear()
+    except Exception:
+        pass
+
+    log_event(backend_logger, logging.INFO, event="cache_cleared",
+              message="Content cache cleared.", details={"content_type": content_type or "all", "removed": removed})
+    return {"cleared": removed, "content_type": content_type or "all"}
+
+
+@app.get("/cache/stats")
+async def cache_stats():
+    """Return current cache size, entry count, and per-type breakdown."""
+    try:
+        con = get_db_connection()
+        rows = con.execute(
+            """
+            SELECT content_type,
+                   COUNT(*) as entries,
+                   COALESCE(SUM(LENGTH(value)), 0) as bytes,
+                   MIN(expires_at) as oldest_expires,
+                   MAX(expires_at) as newest_expires
+            FROM content_cache
+            GROUP BY content_type
+            """
+        ).fetchall()
+        total_bytes = con.execute("SELECT COALESCE(SUM(LENGTH(value)), 0) FROM content_cache").fetchone()[0]
+        total_entries = con.execute("SELECT COUNT(*) FROM content_cache").fetchone()[0]
+        con.close()
+        breakdown = [
+            {
+                "content_type": r["content_type"],
+                "entries": r["entries"],
+                "size_kb": round(r["bytes"] / 1024, 1),
+                "oldest_expires": r["oldest_expires"],
+                "newest_expires": r["newest_expires"],
+            }
+            for r in rows
+        ]
+        return {
+            "total_entries": total_entries,
+            "total_size_kb": round(total_bytes / 1024, 1),
+            "max_size_kb": round(_CACHE_MAX_BYTES / 1024, 1),
+            "usage_pct": round(total_bytes / _CACHE_MAX_BYTES * 100, 1),
+            "breakdown": breakdown,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Cache stats failed: {exc}")
 
 
 @app.get("/diagnostics/self-test")
