@@ -37,6 +37,7 @@ const MovieBoxPage = lazy(() => import("./pages/MovieBoxPage"));
 const TVSeriesPage = lazy(() => import("./pages/TVSeriesPage"));
 const FavoritesPage = lazy(() => import("./pages/FavoritesPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
+const RatingsPage  = lazy(() => import("./pages/RatingsPage"));
 
 function Inner() {
   const offlineState = useOfflineDetection(BACKEND_API);
@@ -202,6 +203,7 @@ function Inner() {
     moviebox:   <ErrorBoundary section="MovieBox"><MovieBoxPage /></ErrorBoundary>,
     series:     <ErrorBoundary section="TV Series"><TVSeriesPage /></ErrorBoundary>,
     favorites:  <ErrorBoundary section="Favorites"><FavoritesPage /></ErrorBoundary>,
+    ratings:    <ErrorBoundary section="Ratings"><RatingsPage /></ErrorBoundary>,
     settings:   <ErrorBoundary section="Settings"><SettingsPage /></ErrorBoundary>,
   };
 

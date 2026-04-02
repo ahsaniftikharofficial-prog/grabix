@@ -29,7 +29,17 @@ const IconTv = ({ size = 16, color = "currentColor" }: { size?: number; color?: 
   </svg>
 );
 
-export type Page = "downloader" | "converter" | "library" | "anime" | "manga" | "explore" | "movies" | "moviebox" | "series" | "favorites" | "settings";
+
+const IconChart = ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="18" y1="20" x2="18" y2="10" />
+    <line x1="12" y1="20" x2="12" y2="4" />
+    <line x1="6" y1="20" x2="6" y2="14" />
+    <line x1="2" y1="20" x2="22" y2="20" />
+  </svg>
+);
+
+export type Page = "downloader" | "converter" | "library" | "anime" | "manga" | "explore" | "movies" | "moviebox" | "series" | "favorites" | "ratings" | "settings";
 
 interface Props {
   page: Page;
@@ -57,6 +67,7 @@ const GROUPS = [
       { id: "manga" as Page, label: "Manga", Icon: IconBook },
       { id: "moviebox" as Page, label: "Movie Box", Icon: IconBrowse },
       { id: "explore" as Page, label: "Explore", Icon: IconBrowse },
+      { id: "ratings"   as Page, label: "Ratings",   Icon: IconChart },
       { id: "favorites" as Page, label: "Favorites", Icon: IconHeart },
     ],
   },

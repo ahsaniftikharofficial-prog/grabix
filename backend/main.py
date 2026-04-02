@@ -4695,6 +4695,44 @@ def delete_library_file(path: str):
 # Library reconcile runs on first library page visit, not at startup
 
 
+@app.get("/ratings")
+async def get_ratings(title: str):
+    import subprocess, sys
+    # Auto-install cinemagoer into whichever Python is running the backend
+    try:
+        from imdb import Cinemagoer
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "cinemagoer", "-q"])
+        from imdb import Cinemagoer
+
+    try:
+        ia = Cinemagoer()
+        results = ia.search_movie(title)
+        # Filter to TV shows only
+        tv = [r for r in results if r.get("kind") in ("tv series", "tv mini series")]
+        show = tv[0] if tv else (results[0] if results else None)
+        if not show:
+            return {"error": "Show not found"}
+        ia.update(show, ["episodes"])
+        episodes_data = show.get("episodes", {})
+        if not episodes_data:
+            return {"error": "No episode data found"}
+        seasons = []
+        for season_num in sorted(k for k in episodes_data.keys() if isinstance(k, int)):
+            eps = []
+            for ep_num in sorted(episodes_data[season_num].keys()):
+                ep = episodes_data[season_num][ep_num]
+                rating = ep.get("rating")
+                eps.append({
+                    "episode": ep_num,
+                    "title":   ep.get("title", ""),
+                    "rating":  float(rating) if rating else None,
+                })
+            seasons.append({"season": season_num, "episodes": eps})
+        return {"title": show.get("title", title), "seasons": seasons}
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.get("/history/full")
 def get_history_full():
     """
