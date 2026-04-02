@@ -613,9 +613,13 @@ function AnimeDetail({
   const [resolvedAnime, setResolvedAnime] = useState<AnimeCardItem | null>(anime.provider === "jikan" ? null : anime);
   const [episodes, setEpisodes] = useState<ConsumetEpisode[]>([]);
   const [episode, setEpisode] = useState(1);
-  const dubEpisodeCount: number = resolvedAnime?.dub_episode_count
-    ?? ((resolvedAnime?.languages ?? anime.languages ?? []).some((l) => l === "en" || l === "dub") ? Infinity : 0);
-  const hasDub = episode <= dubEpisodeCount;
+  const dubEpisodeCount: number = (() => {
+    if (!resolvedAnime) return 0; // not loaded yet — assume no dub
+    if (typeof resolvedAnime.dub_episode_count === "number") return resolvedAnime.dub_episode_count;
+    // fallback: only trust resolvedAnime languages, never card data
+    return (resolvedAnime.languages ?? []).some((l) => l === "en" || l === "dub") ? Infinity : 0;
+  })();
+  const hasDub = dubEpisodeCount > 0 && episode <= dubEpisodeCount;
   const [audio, setAudio] = useState<AudioPreference>("original");
   const [server, setServer] = useState<AnimeServerOption>("auto");
   useEffect(() => {
@@ -743,7 +747,7 @@ function AnimeDetail({
               [`${candidate.provider}-${candidate.id}`]: nextEpisodes,
             };
             if (nextEpisodes.length > 0) {
-              setResolvedAnime(candidate);
+              setResolvedAnime({ ...candidate, ...detail.item, provider: candidate.provider, id: candidate.id });
               setEpisodes(nextEpisodes);
               setKnownEpisodeCount((current) => Math.max(current ?? 0, nextEpisodes.length));
               setDetailHint(`Episode sources available via ${candidate.provider.toUpperCase()}`);
