@@ -199,7 +199,7 @@ app = FastAPI()
 LOCAL_APP_ORIGINS = DEFAULT_LOCAL_APP_ORIGINS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=LOCAL_APP_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "Range"],

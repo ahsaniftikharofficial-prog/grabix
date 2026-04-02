@@ -61,6 +61,14 @@ def validate_outbound_url(url: str, *, allowed_hosts: tuple[str, ...] = DEFAULT_
     return result.normalized_url
 
 
+def _normalize_loopback(hostname: str) -> str:
+    """Treat localhost, 127.0.0.1, and ::1 as the same host for proxy-URL detection."""
+    h = (hostname or "").lower().strip()
+    if h in ("localhost", "127.0.0.1", "::1"):
+        return "127.0.0.1"
+    return h
+
+
 def normalize_download_target(
     url: str,
     *,
@@ -71,7 +79,7 @@ def normalize_download_target(
 ) -> tuple[str, str]:
     parsed = urlparse((url or "").strip())
     self_parsed = urlparse(self_base_url)
-    same_host = (parsed.hostname or "").lower() == (self_parsed.hostname or "").lower()
+    same_host = _normalize_loopback(parsed.hostname or "") == _normalize_loopback(self_parsed.hostname or "")
     same_port = (parsed.port or (443 if parsed.scheme == "https" else 80)) == (
         self_parsed.port or (443 if self_parsed.scheme == "https" else 80)
     )
