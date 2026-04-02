@@ -611,12 +611,10 @@ function AnimeDetail({
   const [tmdbId, setTmdbId] = useState<number | null>(null);
   const [candidateAnimes, setCandidateAnimes] = useState<AnimeCardItem[]>(anime.provider === "jikan" ? [] : [anime]);
   const [resolvedAnime, setResolvedAnime] = useState<AnimeCardItem | null>(anime.provider === "jikan" ? null : anime);
-  const hasDub = (resolvedAnime?.languages ?? anime.languages ?? []).some((l) => l === "en" || l === "dub");
+  const hasDub = (resolvedAnime?.languages ?? []).some((l) => l === "en" || l === "dub");
   const [episodes, setEpisodes] = useState<ConsumetEpisode[]>([]);
   const [episode, setEpisode] = useState(1);
-  const [audio, setAudio] = useState<AudioPreference>(
-    (anime.languages ?? []).some((l) => l === "en" || l === "dub") ? "en" : "original"
-  );
+  const [audio, setAudio] = useState<AudioPreference>("original");
   const [server, setServer] = useState<AnimeServerOption>("auto");
   useEffect(() => {
     if (!hasDub && audio === "en") setAudio("original");
@@ -1066,11 +1064,17 @@ function AnimeDetail({
   const buildSubtitleSearchTitle = (targetEpisode = episode) =>
     `${title} ${selectionLabel} ${targetEpisode}`.trim();
 
-  const playerServerOptions = [
-    { id: "hd-1:original", label: "HD-1 SUB" },
-    { id: "hd-2:original", label: "HD-2 SUB" },
-    ...(hasDub ? [{ id: "hd-1:en", label: "HD-1 DUB" }, { id: "hd-2:en", label: "HD-2 DUB" }] : []),
-  ];
+  const playerServerOptions = (() => {
+    const normalizedAudio = normalizeAudioPreference(audio);
+    const subOptions = [
+      { id: "hd-1:original", label: "HD-1 SUB" },
+      { id: "hd-2:original", label: "HD-2 SUB" },
+    ];
+    const dubOptions = hasDub
+      ? [{ id: "hd-1:en", label: "HD-1 DUB" }, { id: "hd-2:en", label: "HD-2 DUB" }]
+      : [];
+    return normalizedAudio === "en" ? [...dubOptions, ...subOptions] : [...subOptions, ...dubOptions];
+  })();
 
   const resolvePlayerServerOption = async (optionId: string, targetEpisode = episode) => {
     const [requestedServer, requestedAudio] = optionId.split(":") as [AnimeServerOption, AudioPreference];

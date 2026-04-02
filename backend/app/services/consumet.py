@@ -1027,12 +1027,25 @@ async def discover_anime(section: str = "trending", page: int = 1, period: str =
     period_key = (period or "daily").strip().lower()
     try:
         if section_key == "trending":
-            payload = await _fetch_consumet_json("/anime/hianime/top10", params={"period": period_key}, ttl_seconds=300)
-            items = [
-                _normalize_media_item(item, "anime", "hianime")
-                for item in _payload_items(payload)
-                if isinstance(item, dict)
-            ]
+            # Try requested period, then cascade: daily→weekly→monthly
+            fallback_order = {
+                "daily": ["daily", "weekly", "monthly"],
+                "weekly": ["weekly", "monthly"],
+                "monthly": ["monthly"],
+            }
+            items = []
+            for attempt_period in fallback_order.get(period_key, [period_key]):
+                try:
+                    payload = await _fetch_consumet_json("/anime/hianime/top10", params={"period": attempt_period}, ttl_seconds=300)
+                    items = [
+                        _normalize_media_item(item, "anime", "hianime")
+                        for item in _payload_items(payload)
+                        if isinstance(item, dict)
+                    ]
+                    if items:
+                        break
+                except Exception:
+                    continue
             if items:
                 return {"section": section_key, "period": period_key, "page": page, "items": items if page == 1 else []}
 
