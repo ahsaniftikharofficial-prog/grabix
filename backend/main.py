@@ -704,8 +704,112 @@ _restore_provider_status_from_db()
 _start_moviebox_bg_retry()
 
 # ---------------------------------------------------------------------------
-# Phase 3 — SQLite TTL Content Cache (Stale-While-Revalidate + LRU Eviction)
+# RESILIENCE: Network change monitor (Fix 7)
+# Pings 8.8.8.8 every 15s. WiFi drops -> pauses all active downloads.
+# WiFi restores -> auto-resumes them. No silent hangs.
 # ---------------------------------------------------------------------------
+_network_was_online: bool = True
+
+def _check_network() -> bool:
+    try:
+        socket.setdefaulttimeout(5)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect(("8.8.8.8", 53))
+        s.close()
+        return True
+    except Exception:
+        return False
+
+def _network_monitor_worker() -> None:
+    global _network_was_online
+    while True:
+        try:
+            time.sleep(15)
+            online = _check_network()
+            if not online and _network_was_online:
+                _network_was_online = False
+                for dl_id, item in list(downloads.items()):
+                    if item.get("status") in {"downloading", "queued"}:
+                        ctrl = download_controls.get(dl_id)
+                        if ctrl and item.get("can_pause"):
+                            ctrl["pause"].set()
+                            item["paused_from"] = item.get("status", "downloading")
+                            item["status"] = "paused"
+                            item["stage_label"] = "Waiting for network..."
+                            item["error"] = ""
+                            _persist_download_record(dl_id, force=True)
+            elif online and not _network_was_online:
+                _network_was_online = True
+                for dl_id, item in list(downloads.items()):
+                    if (item.get("status") == "paused"
+                            and item.get("stage_label", "") == "Waiting for network..."):
+                        ctrl = download_controls.get(dl_id)
+                        if ctrl:
+                            ctrl["pause"].clear()
+                            item["status"] = item.pop("paused_from", "downloading")
+                            item["stage_label"] = "Reconnecting..."
+                            item["error"] = ""
+                            _persist_download_record(dl_id, force=True)
+                            _start_download_thread(dl_id)
+        except Exception:
+            pass
+
+threading.Thread(target=_network_monitor_worker, daemon=True, name="network-monitor").start()
+
+# ---------------------------------------------------------------------------
+# RESILIENCE: Auto-retry failed downloads (Fix 8)
+# Checks every 60s. Any failed download re-queues itself after 5 min,
+# up to 3 times. No user action needed.
+# ---------------------------------------------------------------------------
+_TRANSIENT_FAILURE_CODES = {"download_failed", "restart_interrupted"}
+_AUTO_RETRY_LIMIT = 3
+_AUTO_RETRY_DELAY = 5 * 60
+
+def _auto_retry_failed_worker() -> None:
+    while True:
+        try:
+            time.sleep(60)
+            now = time.time()
+            for dl_id, item in list(downloads.items()):
+                if item.get("status") != "failed":
+                    continue
+                if item.get("failure_code", "") not in _TRANSIENT_FAILURE_CODES:
+                    continue
+                if int(item.get("retry_count", 0) or 0) >= _AUTO_RETRY_LIMIT:
+                    continue
+                failed_at = float(item.get("_failed_at", 0) or 0)
+                if failed_at == 0:
+                    item["_failed_at"] = now
+                    continue
+                if now - failed_at < _AUTO_RETRY_DELAY:
+                    continue
+                ctrl = download_controls.get(dl_id)
+                if ctrl:
+                    ctrl["pause"].clear()
+                    ctrl["cancel"].clear()
+                retry_count = int(item.get("retry_count", 0) or 0)
+                item.update({
+                    "status": "queued",
+                    "percent": 0, "speed": "", "eta": "",
+                    "downloaded": "", "total": "", "size": "",
+                    "error": "", "file_path": "",
+                    "partial_file_path": item.get("partial_file_path", ""),
+                    "recoverable": False, "failure_code": "",
+                    "retry_count": retry_count + 1,
+                    "stage_label": f"Auto-retrying (attempt {retry_count + 1}/{_AUTO_RETRY_LIMIT})...",
+                    "_failed_at": 0,
+                })
+                db_update_status(dl_id, "queued")
+                _persist_download_record(dl_id, force=True)
+                _start_download_thread(dl_id)
+                log_event(downloads_logger, logging.INFO,
+                          event="download_auto_retried",
+                          message="Download auto-retried after failure.",
+                          details={"download_id": dl_id, "retry_count": retry_count + 1})
+        except Exception:
+            pass
+
+threading.Thread(target=_auto_retry_failed_worker, daemon=True, name="auto-retry-failed").start()
 
 # Per-content-type TTLs (seconds)
 _CACHE_TTL: dict[str, int] = {
@@ -2840,7 +2944,7 @@ def _download_direct_media(
 
     request_headers = {"User-Agent": "Mozilla/5.0"}
     request_headers.update(headers or {})
-    # --- resilience: retry initial probe up to 4 times ---
+    # --- resilience: retry initial probe with smart error classification ---
     _probe_exc = None
     for _probe_attempt in range(4):
         try:
@@ -2853,10 +2957,23 @@ def _download_direct_media(
             break
         except Exception as _exc:
             _probe_exc = _exc
-            if _probe_attempt < 3:
-                downloads[dl_id]["stage_label"] = f"Retrying connection ({_probe_attempt + 1}/3)..."
+            if controls["cancel"].is_set():
+                raise RuntimeError("Download canceled")
+            _http_code = getattr(_exc, "code", None)
+            if _http_code in (404, 410):
+                raise RuntimeError(f"File not found on server (HTTP {_http_code}). The URL may be invalid or expired.") from _exc
+            if _http_code == 429:
+                _retry_after = int((getattr(getattr(_exc, "headers", None) or {}, "get", lambda k, d: d)("Retry-After", 10)) or 10)
+                downloads[dl_id]["stage_label"] = f"Rate limited - waiting {_retry_after}s..."
                 _persist_download_record(dl_id)
-                time.sleep(2 ** _probe_attempt * 2)
+                time.sleep(min(_retry_after, 60))
+                continue
+            if _probe_attempt < 3:
+                _wait = 2 ** _probe_attempt * 2
+                _label = f"Server error - retrying ({_probe_attempt + 1}/3)..." if _http_code and _http_code >= 500 else f"Retrying connection ({_probe_attempt + 1}/3)..."
+                downloads[dl_id]["stage_label"] = _label
+                _persist_download_record(dl_id)
+                time.sleep(_wait)
     if _probe_exc is not None:
         raise _probe_exc
 
@@ -2891,7 +3008,7 @@ def _download_direct_media(
         if downloaded_bytes > 0:
             range_headers["Range"] = f"bytes={downloaded_bytes}-"
 
-        # --- resilience: retry chunk fetch up to 4 times on network errors ---
+        # --- resilience: retry chunk fetch with smart error classification ---
         _chunk_exc = None
         for _chunk_attempt in range(4):
             try:
@@ -2903,10 +3020,21 @@ def _download_direct_media(
                 _chunk_exc = _exc
                 if controls["cancel"].is_set():
                     raise RuntimeError("Download canceled")
-                if _chunk_attempt < 3:
-                    downloads[dl_id]["stage_label"] = f"Reconnecting ({_chunk_attempt + 1}/3)..."
+                _http_code = getattr(_exc, "code", None)
+                if _http_code in (404, 410):
+                    raise RuntimeError(f"File no longer available on server (HTTP {_http_code}). The CDN link has expired.") from _exc
+                if _http_code == 429:
+                    _retry_after = int((getattr(getattr(_exc, "headers", None) or {}, "get", lambda k, d: d)("Retry-After", 15)) or 15)
+                    downloads[dl_id]["stage_label"] = f"Rate limited - waiting {_retry_after}s..."
                     _persist_download_record(dl_id)
-                    time.sleep(2 ** _chunk_attempt * 3)
+                    time.sleep(min(_retry_after, 60))
+                    continue
+                if _chunk_attempt < 3:
+                    _wait = 2 ** _chunk_attempt * 3
+                    _label = f"Server error - reconnecting ({_chunk_attempt + 1}/3)..." if _http_code and _http_code >= 500 else f"Reconnecting ({_chunk_attempt + 1}/3)..."
+                    downloads[dl_id]["stage_label"] = _label
+                    _persist_download_record(dl_id)
+                    time.sleep(_wait)
         if _chunk_exc is not None:
             raise _chunk_exc
         with _chunk_response as response:
@@ -2943,6 +3071,8 @@ def _download_direct_media(
                 total_bytes = max(total_bytes, downloaded_bytes + response_length)
 
             with open(part_path, "ab" if downloaded_bytes > 0 else "wb") as file_obj:
+                _stall_check_ts = time.monotonic()
+                _stall_last_bytes = downloaded_bytes
                 while True:
                     while controls["pause"].is_set() and not controls["cancel"].is_set():
                         time.sleep(0.2)
@@ -2952,6 +3082,17 @@ def _download_direct_media(
                     chunk = response.read(1024 * 256)
                     if not chunk:
                         break
+                    file_obj.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    # stall watchdog: no progress for 90s -> reconnect
+                    _now = time.monotonic()
+                    if downloaded_bytes > _stall_last_bytes:
+                        _stall_last_bytes = downloaded_bytes
+                        _stall_check_ts = _now
+                    elif _now - _stall_check_ts > 90:
+                        downloads[dl_id]["stage_label"] = "Connection stalled - reconnecting..."
+                        _persist_download_record(dl_id)
+                        break  # outer loop retries urlopen with Range header
                     file_obj.write(chunk)
                     downloaded_bytes += len(chunk)
                     pct = round((downloaded_bytes / total_bytes) * 100, 1) if total_bytes else 0
@@ -2972,6 +3113,18 @@ def _download_direct_media(
         if not total_bytes or downloaded_bytes >= total_bytes:
             break
         time.sleep(0.2)
+
+    # --- integrity check: verify size before finalizing ---
+    if total_bytes > 0:
+        _actual_size = Path(part_path).stat().st_size if Path(part_path).exists() else 0
+        if _actual_size < int(total_bytes * 0.99):
+            downloads[dl_id].update({
+                "stage_label": "Failed",
+                "error": f"Integrity check failed: got {_format_bytes(_actual_size)}, expected {_format_bytes(total_bytes)}. Retry to resume.",
+                "recoverable": True,
+            })
+            _persist_download_record(dl_id, force=True)
+            raise RuntimeError(f"Integrity check failed: got {_actual_size} bytes, expected {total_bytes}")
 
     if Path(output_path).exists():
         Path(output_path).unlink()
@@ -3948,6 +4101,7 @@ def list_downloads():
 def recover_download_jobs():
     rows = db_list_download_jobs()
     active_statuses = {"queued", "downloading", "processing", "canceling"}
+    _auto_resume_ids: list[str] = []
 
     for row in rows:
         try:
@@ -3966,10 +4120,18 @@ def recover_download_jobs():
         recoverable = bool(row["recoverable"])
         error_message = str(row["error"] or "")
         failure_code = str(row["failure_code"] or "")
+        partial_file_path = str(row["partial_file_path"] or "")
 
         if status in active_statuses:
             recoverable = True
-            if can_pause:
+            _has_part = partial_file_path and Path(partial_file_path).exists()
+            if can_pause and _has_part:
+                # .part file on disk -> auto-resume silently
+                status = "paused"
+                error_message = ""
+                failure_code = "restart_interrupted"
+                _auto_resume_ids.append(dl_id)
+            elif can_pause:
                 status = "paused"
                 error_message = "Download was interrupted when GRABIX closed. Resume to continue."
                 failure_code = "restart_interrupted"
@@ -3991,7 +4153,7 @@ def recover_download_jobs():
             "thumbnail": row["thumbnail"] or "",
             "error": error_message,
             "file_path": row["file_path"] or "",
-            "partial_file_path": row["partial_file_path"] or "",
+            "partial_file_path": partial_file_path,
             "folder": DOWNLOAD_DIR,
             "created_at": row["created_at"] or datetime.now().isoformat(),
             "params": params,
@@ -4006,6 +4168,30 @@ def recover_download_jobs():
         }
         download_controls[dl_id] = _create_download_controls()
         _persist_download_record(dl_id, force=True)
+
+    # Auto-resume interrupted downloads that have .part files
+    if _auto_resume_ids:
+        def _delayed_auto_resume():
+            time.sleep(3)
+            for _rid in _auto_resume_ids:
+                try:
+                    _item = downloads.get(_rid)
+                    if _item and _item.get("status") == "paused":
+                        _item["status"] = "queued"
+                        _item["error"] = ""
+                        _item["stage_label"] = "Auto-resuming..."
+                        _persist_download_record(_rid, force=True)
+                        _start_download_thread(_rid)
+                        log_event(downloads_logger, logging.INFO,
+                                  event="download_auto_resumed",
+                                  message="Download auto-resumed after restart.",
+                                  details={"download_id": _rid})
+                except Exception as _exc:
+                    log_event(downloads_logger, logging.WARNING,
+                              event="download_auto_resume_failed",
+                              message="Auto-resume failed.",
+                              details={"download_id": _rid, "error": str(_exc)})
+        threading.Thread(target=_delayed_auto_resume, daemon=True, name="auto-resume").start()
 
 
 # FIX 2 + FIX 3 (Library): Proper error handling so "no such table" never reaches the UI
@@ -5004,6 +5190,34 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
     estimated_total_bytes = int((downloads[dl_id].get("params") or {}).get("estimated_total_bytes") or 0)
     workspace = _prepare_job_workspace(dl_id)
 
+    # --- pre-flight: disk space check ---
+    try:
+        _disk = shutil.disk_usage(DOWNLOAD_DIR)
+        if _disk.free < 500 * 1024 * 1024:
+            raise RuntimeError(
+                f"Not enough disk space. Only {_format_bytes(_disk.free)} free in {DOWNLOAD_DIR}. Free up space and retry."
+            )
+    except OSError:
+        pass
+
+    # --- pre-flight: token TTL check ---
+    try:
+        import urllib.parse as _up
+        _qs = dict(_up.parse_qsl(urlparse(url).query))
+        for _param in ("expires", "e", "exp", "token_expires"):
+            _val = _qs.get(_param)
+            if _val and str(_val).isdigit():
+                _ttl = int(_val) - time.time()
+                if _ttl < 30:
+                    raise RuntimeError(
+                        f"Stream URL has already expired (TTL: {int(_ttl)}s). Retry to get a fresh link."
+                    )
+                break
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+
     def progress_hook(d):
         while controls["pause"].is_set() and not controls["cancel"].is_set():
             time.sleep(0.2)
@@ -5093,6 +5307,7 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
     _MAX_TASK_RETRIES = 2
     _task_attempt = 0
     _task_last_exc: Exception | None = None
+    _engine_fallback_used = False
 
     try:
      while True:
@@ -5192,6 +5407,22 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
             _persist_download_record(dl_id)
             time.sleep(_wait)
             continue  # retry the while loop
+        # --- fallback engine: aria2 exhausted -> switch to standard once ---
+        if (not is_cancel
+                and effective_engine == "aria2"
+                and not _engine_fallback_used):
+            _engine_fallback_used = True
+            effective_engine = "standard"
+            _task_attempt = 0
+            _task_last_exc = None
+            downloads[dl_id].update({
+                "status": "downloading",
+                "stage_label": "Switching to standard downloader...",
+                "error": "",
+                "progress_mode": "activity",
+            })
+            _persist_download_record(dl_id)
+            continue
         break  # give up
 
      if _task_last_exc is not None:
@@ -5205,6 +5436,8 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         downloads[dl_id]["recoverable"] = status == "failed"
         downloads[dl_id]["failure_code"] = "download_canceled" if status == "canceled" else "download_failed"
         downloads[dl_id]["progress_mode"] = "activity"
+        if status == "failed":
+            downloads[dl_id]["_failed_at"] = time.time()
         downloads[dl_id]["stage_label"] = "Canceled" if status == "canceled" else "Failed"
         db_update_status(dl_id, status, downloads[dl_id].get("file_path", ""))
         _persist_download_record(dl_id, force=True)
