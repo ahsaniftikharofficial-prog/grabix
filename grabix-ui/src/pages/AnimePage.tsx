@@ -611,9 +611,11 @@ function AnimeDetail({
   const [tmdbId, setTmdbId] = useState<number | null>(null);
   const [candidateAnimes, setCandidateAnimes] = useState<AnimeCardItem[]>(anime.provider === "jikan" ? [] : [anime]);
   const [resolvedAnime, setResolvedAnime] = useState<AnimeCardItem | null>(anime.provider === "jikan" ? null : anime);
-  const hasDub = (resolvedAnime?.languages ?? []).some((l) => l === "en" || l === "dub");
   const [episodes, setEpisodes] = useState<ConsumetEpisode[]>([]);
   const [episode, setEpisode] = useState(1);
+  const dubEpisodeCount: number = resolvedAnime?.dub_episode_count
+    ?? ((resolvedAnime?.languages ?? anime.languages ?? []).some((l) => l === "en" || l === "dub") ? Infinity : 0);
+  const hasDub = episode <= dubEpisodeCount;
   const [audio, setAudio] = useState<AudioPreference>("original");
   const [server, setServer] = useState<AnimeServerOption>("auto");
   useEffect(() => {

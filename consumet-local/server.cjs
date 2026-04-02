@@ -305,6 +305,8 @@ function normalizeInfo(infoPayload, animeId) {
     description: String(details?.description || ""),
     genres: Array.isArray(moreInfo?.genres) ? moreInfo.genres : [],
     subOrDub: episodesStats.dub ? "dub" : "sub",
+    dubEpisodeCount: Number(episodesStats.dub || 0),
+    subEpisodeCount: Number(episodesStats.sub || 0),
     type: String(details?.stats?.type || ""),
     status: String(moreInfo?.status || ""),
     otherName: String(details?.jname || moreInfo?.japanese || moreInfo?.synonyms || ""),

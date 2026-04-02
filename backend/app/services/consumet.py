@@ -555,6 +555,7 @@ def _normalize_media_item(item: dict[str, Any], domain: str, provider: str) -> d
         "languages": _extract_languages(item),
         "url": _first_non_empty(item.get("url"), item.get("siteUrl")),
         "episodes_count": _coerce_int(item.get("totalEpisodes") or item.get("episodes")),
+        "dub_episode_count": _coerce_int(item.get("dubEpisodeCount")),
         "raw": item,
     }
 

@@ -22,6 +22,7 @@ export interface ConsumetMediaSummary {
   anilist_id?: number;
   mangadex_id?: string;
   episodes_count?: number;
+  dub_episode_count?: number;
   trailer_url?: string;
 }
 
