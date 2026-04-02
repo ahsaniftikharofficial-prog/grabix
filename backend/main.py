@@ -2817,11 +2817,25 @@ def _download_direct_media(
 
     request_headers = {"User-Agent": "Mozilla/5.0"}
     request_headers.update(headers or {})
-    initial_request = URLRequest(url, headers=request_headers)
-    with urlopen(initial_request, timeout=30) as response:
-        content_type = response.headers.get("Content-Type", "video/mp4")
-        initial_length = int(response.headers.get("Content-Length", "0") or 0)
-        ext = _guess_media_extension(url, content_type)
+    # --- resilience: retry initial probe up to 4 times ---
+    _probe_exc = None
+    for _probe_attempt in range(4):
+        try:
+            initial_request = URLRequest(url, headers=request_headers)
+            with urlopen(initial_request, timeout=30) as response:
+                content_type = response.headers.get("Content-Type", "video/mp4")
+                initial_length = int(response.headers.get("Content-Length", "0") or 0)
+                ext = _guess_media_extension(url, content_type)
+            _probe_exc = None
+            break
+        except Exception as _exc:
+            _probe_exc = _exc
+            if _probe_attempt < 3:
+                downloads[dl_id]["stage_label"] = f"Retrying connection ({_probe_attempt + 1}/3)..."
+                _persist_download_record(dl_id)
+                time.sleep(2 ** _probe_attempt * 2)
+    if _probe_exc is not None:
+        raise _probe_exc
 
     output_path = _safe_variant_download_path(
         output_dir or DOWNLOAD_DIR,
@@ -2854,8 +2868,25 @@ def _download_direct_media(
         if downloaded_bytes > 0:
             range_headers["Range"] = f"bytes={downloaded_bytes}-"
 
-        request = URLRequest(url, headers=range_headers)
-        with urlopen(request, timeout=30) as response:
+        # --- resilience: retry chunk fetch up to 4 times on network errors ---
+        _chunk_exc = None
+        for _chunk_attempt in range(4):
+            try:
+                request = URLRequest(url, headers=range_headers)
+                _chunk_response = urlopen(request, timeout=30)
+                _chunk_exc = None
+                break
+            except Exception as _exc:
+                _chunk_exc = _exc
+                if controls["cancel"].is_set():
+                    raise RuntimeError("Download canceled")
+                if _chunk_attempt < 3:
+                    downloads[dl_id]["stage_label"] = f"Reconnecting ({_chunk_attempt + 1}/3)..."
+                    _persist_download_record(dl_id)
+                    time.sleep(2 ** _chunk_attempt * 3)
+        if _chunk_exc is not None:
+            raise _chunk_exc
+        with _chunk_response as response:
             response_status = getattr(response, "status", None) or response.getcode()
             content_range = response.headers.get("Content-Range", "")
             response_length = int(response.headers.get("Content-Length", "0") or 0)
@@ -4998,7 +5029,13 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
     monitor_stop_event: threading.Event | None = None
     monitor_thread: threading.Thread | None = None
 
+    _MAX_TASK_RETRIES = 2
+    _task_attempt = 0
+    _task_last_exc: Exception | None = None
+
     try:
+     while True:
+      try:
         if effective_engine == "aria2" and not (force_hls or ".m3u8" in url.lower()):
             if dl_type == "video" and _is_direct_media_url(url):
                 output_path = _download_via_aria2(dl_id, url, dl_type, request_headers, output_dir=workspace)
@@ -5075,8 +5112,29 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         raw_path = downloads[dl_id].get("file_path", "")
         file_path = _resolve_final_file(raw_path, str(workspace), preferred_ext=preferred_ext)
         _finalize_download_output(dl_id, file_path, dl_type, trim_enabled, trim_start, trim_end, use_cpu)
+        _task_last_exc = None
+        break  # success
 
-    except Exception as e:
+      except Exception as e:
+        _task_last_exc = e
+        is_cancel = controls["cancel"].is_set()
+        is_unretryable = is_cancel or (isinstance(e, OSError) and getattr(e, "errno", None) == 22)
+        if not is_unretryable and _task_attempt < _MAX_TASK_RETRIES:
+            _task_attempt += 1
+            _wait = _task_attempt * 7
+            downloads[dl_id].update({
+                "status": "downloading",
+                "stage_label": f"Retrying ({_task_attempt}/{_MAX_TASK_RETRIES})…",
+                "error": "",
+                "progress_mode": "activity",
+            })
+            _persist_download_record(dl_id)
+            time.sleep(_wait)
+            continue  # retry the while loop
+        break  # give up
+
+     if _task_last_exc is not None:
+        e = _task_last_exc
         status = "canceled" if controls["cancel"].is_set() else "failed"
         error_text = str(e)
         if isinstance(e, OSError) and getattr(e, "errno", None) == 22:
