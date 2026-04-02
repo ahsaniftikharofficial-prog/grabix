@@ -613,13 +613,8 @@ function AnimeDetail({
   const [resolvedAnime, setResolvedAnime] = useState<AnimeCardItem | null>(anime.provider === "jikan" ? null : anime);
   const [episodes, setEpisodes] = useState<ConsumetEpisode[]>([]);
   const [episode, setEpisode] = useState(1);
-  const dubEpisodeCount: number = (() => {
-    if (!resolvedAnime) return 0; // not loaded yet — assume no dub
-    if (typeof resolvedAnime.dub_episode_count === "number") return resolvedAnime.dub_episode_count;
-    // fallback: only trust resolvedAnime languages, never card data
-    return (resolvedAnime.languages ?? []).some((l) => l === "en" || l === "dub") ? Infinity : 0;
-  })();
-  const hasDub = dubEpisodeCount > 0 && episode <= dubEpisodeCount;
+  const [dubEpisodeCount, setDubEpisodeCount] = useState<number | null>(null);
+  const hasDub = dubEpisodeCount === null ? false : (dubEpisodeCount === 0 ? false : episode <= dubEpisodeCount);
   const [audio, setAudio] = useState<AudioPreference>("original");
   const [server, setServer] = useState<AnimeServerOption>("auto");
   useEffect(() => {
@@ -668,7 +663,8 @@ function AnimeDetail({
     setFinding(true);
     setEpisodes([]);
     setEpisode(1);
-    setAudio("en");
+    setDubEpisodeCount(null);
+    setAudio("original");
     setServer("auto");
     setDetailHint("");
     setResolvedAnime(anime.provider === "jikan" ? null : anime);
@@ -748,6 +744,7 @@ function AnimeDetail({
             };
             if (nextEpisodes.length > 0) {
               setResolvedAnime({ ...candidate, ...detail.item, provider: candidate.provider, id: candidate.id });
+              setDubEpisodeCount(typeof detail.item.dub_episode_count === "number" ? detail.item.dub_episode_count : (detail.item.languages ?? []).some((l: string) => l === "en" || l === "dub") ? Infinity : 0);
               setEpisodes(nextEpisodes);
               setKnownEpisodeCount((current) => Math.max(current ?? 0, nextEpisodes.length));
               setDetailHint(`Episode sources available via ${candidate.provider.toUpperCase()}`);
