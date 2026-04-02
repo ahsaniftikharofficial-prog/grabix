@@ -30,7 +30,8 @@
       }
     },
     "resources": [
-      "bin"
+      "python-runtime/**/*",
+      "backend/**/*"
     ],
     "icon": [
       "icons/32x32.png",

@@ -6136,12 +6136,20 @@ async def diagnostics_logs(limit: int = 20):
         "events": redact_for_diagnostics(read_recent_log_events(limit=safe_limit)),
     }
 
-if __name__ == "__main__":
-    import uvicorn
-
+# ── PyO3 entry point ─────────────────────────────────────────────────────────
+# Called by the Rust/PyO3 embed in lib.rs instead of spawning a child process.
+# Also called when running directly: `python main.py`
+# uvicorn blocks here forever — this is intentional.
+def run_server() -> None:
+    """Start the uvicorn server. Blocks until the process exits."""
+    import uvicorn  # lazy import keeps startup fast when used as a module
     uvicorn.run(
         app,
         host="127.0.0.1",
         port=int(os.getenv("GRABIX_BACKEND_PORT", "8000")),
         log_level=os.getenv("GRABIX_BACKEND_LOG_LEVEL", "warning"),
     )
+
+
+if __name__ == "__main__":
+    run_server()

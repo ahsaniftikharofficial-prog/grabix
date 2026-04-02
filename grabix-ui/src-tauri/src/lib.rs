@@ -1,23 +1,31 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// GRABIX — lib.rs (PyO3 embedded backend edition)
+//
+// Architecture change: Python is no longer a child process.
+// PyO3 embeds the Python interpreter INSIDE this Rust binary.
+// The FastAPI/uvicorn server runs on a Rust-managed thread.
+// If the app is running, the backend is running. Crash is structurally impossible.
+// ─────────────────────────────────────────────────────────────────────────────
+
 use std::{
     fs::{create_dir_all, OpenOptions},
     io::{Read, Write},
     net::TcpStream,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::Mutex,
     thread,
     time::{Duration, Instant},
 };
 
+use pyo3::prelude::*;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, RunEvent, State};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-struct SidecarState {
-    children: Mutex<Vec<Child>>,
-}
+// ── Startup state (read by React via get_startup_diagnostics) ─────────────────
 
 struct StartupState {
     snapshot: Mutex<StartupDiagnostics>,
@@ -43,12 +51,7 @@ struct StartupDiagnostics {
     consumet: SidecarDiagnostic,
 }
 
-struct StartupOutcome {
-    children: Vec<Child>,
-    diagnostics: StartupDiagnostics,
-}
-
-const SIDECAR_RESTART_COOLDOWN_MS: u64 = 1800;
+// ── Tauri commands ────────────────────────────────────────────────────────────
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -57,17 +60,13 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 fn read_clipboard_text() -> Result<String, String> {
-    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
-    clipboard.get_text().map_err(|error| error.to_string())
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.get_text().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn get_startup_diagnostics(state: State<'_, StartupState>) -> StartupDiagnostics {
-    state
-        .snapshot
-        .lock()
-        .map(|snapshot| snapshot.clone())
-        .unwrap_or_default()
+    state.snapshot.lock().map(|s| s.clone()).unwrap_or_default()
 }
 
 #[tauri::command]
@@ -105,7 +104,7 @@ fn open_startup_log(state: State<'_, StartupState>) -> Result<String, String> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|error| error.to_string())?;
+            .map_err(|e| e.to_string())?;
         return Ok(target.display().to_string());
     }
 
@@ -115,38 +114,7 @@ fn open_startup_log(state: State<'_, StartupState>) -> Result<String, String> {
     ))
 }
 
-fn resource_bin(app: &AppHandle, file_name: &str) -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        candidates.push(resource_dir.join("bin").join(file_name));
-        if let Some(stem) = Path::new(file_name).file_stem() {
-            candidates.push(
-                resource_dir
-                    .join("bin")
-                    .join(stem)
-                    .join(file_name),
-            );
-        }
-    }
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            candidates.push(exe_dir.join("resources").join("bin").join(file_name));
-            if let Some(stem) = Path::new(file_name).file_stem() {
-                candidates.push(
-                    exe_dir
-                        .join("resources")
-                        .join("bin")
-                        .join(stem)
-                        .join(file_name),
-                );
-            }
-            candidates.push(exe_dir.join("bin").join(file_name));
-            candidates.push(exe_dir.join(file_name));
-        }
-    }
-
-    candidates.into_iter().find(|candidate| candidate.exists())
-}
+// ── Diagnostics helpers ───────────────────────────────────────────────────────
 
 fn diagnostics_dir(app: &AppHandle) -> PathBuf {
     if let Ok(dir) = app.path().app_local_data_dir() {
@@ -193,152 +161,12 @@ fn log_sidecar(app: &AppHandle, message: &str) {
 fn chrono_stamp() -> String {
     let now = std::time::SystemTime::now();
     match now.duration_since(std::time::UNIX_EPOCH) {
-        Ok(duration) => format!("{}", duration.as_secs()),
+        Ok(d) => format!("{}", d.as_secs()),
         Err(_) => String::from("0"),
     }
 }
 
-fn spawn_process(program: &Path, envs: &[(&str, &str)]) -> Result<Child, String> {
-    let mut command = Command::new(program);
-    if let Some(parent) = program.parent() {
-        command.current_dir(parent);
-    }
-    command.stdout(Stdio::null()).stderr(Stdio::null());
-    #[cfg(target_os = "windows")]
-    {
-        command.creation_flags(0x08000000);
-    }
-    for (key, value) in envs {
-        command.env(key, value);
-    }
-    command.spawn().map_err(|error| error.to_string())
-}
-
-fn terminate_child_process(child: &mut Child) {
-    #[cfg(target_os = "windows")]
-    {
-        let mut command = Command::new("taskkill");
-        let _ = command
-            .args(["/PID", &child.id().to_string(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(0x08000000)
-            .status();
-    }
-
-    let _ = child.kill();
-}
-
-fn sidecar_ready(port: u16, health_path: &str, timeout_secs: u64) -> bool {
-    if !health_path.is_empty() && wait_for_http_ok(port, health_path, timeout_secs) {
-        return true;
-    }
-    wait_for_port(port, timeout_secs)
-}
-
-fn try_launch_sidecar(
-    app: &AppHandle,
-    diagnostic: &SidecarDiagnostic,
-    program: &Path,
-    envs: &[(&str, &str)],
-    health_path: &str,
-    timeout_secs: u64,
-) -> Result<Child, String> {
-    match spawn_process(program, envs) {
-        Ok(mut child) => {
-            if sidecar_ready(diagnostic.port, health_path, timeout_secs) {
-                Ok(child)
-            } else {
-                let _ = child.kill();
-                Err(format!(
-                    "{} sidecar did not become healthy in time.",
-                    diagnostic.name
-                ))
-            }
-        }
-        Err(error) => {
-            log_sidecar(
-                app,
-                &format!("{} sidecar launch failed: {}", diagnostic.name, error),
-            );
-            Err(format!(
-                "{} sidecar could not be launched: {}",
-                diagnostic.name, error
-            ))
-        }
-    }
-}
-
-fn start_sidecar_with_supervision(
-    app: &AppHandle,
-    diagnostic: &mut SidecarDiagnostic,
-    program: &Path,
-    envs: &[(&str, &str)],
-    health_path: &str,
-    timeout_secs: u64,
-    success_message: &str,
-) -> Option<Child> {
-    let mut last_error = String::new();
-
-    for attempt in 0..=1 {
-        if attempt == 1 {
-            diagnostic.status = String::from("recovering");
-            diagnostic.message = format!(
-                "{} did not start cleanly. Retrying once after cooldown.",
-                diagnostic.name
-            );
-            log_sidecar(app, &diagnostic.message);
-            thread::sleep(Duration::from_millis(SIDECAR_RESTART_COOLDOWN_MS));
-        }
-
-        match try_launch_sidecar(app, diagnostic, program, envs, health_path, timeout_secs) {
-            Ok(child) => {
-                diagnostic.status = if attempt == 0 {
-                    String::from("started")
-                } else {
-                    String::from("restarted")
-                };
-                diagnostic.message = if attempt == 0 {
-                    String::from(success_message)
-                } else {
-                    format!("{} after one supervised restart.", success_message)
-                };
-                return Some(child);
-            }
-            Err(error) => {
-                last_error = error;
-                log_sidecar(
-                    app,
-                    &format!(
-                        "{} start attempt {} failed: {}",
-                        diagnostic.name,
-                        attempt + 1,
-                        last_error
-                    ),
-                );
-            }
-        }
-    }
-
-    diagnostic.status = if last_error.contains("healthy in time") {
-        String::from("timeout")
-    } else {
-        String::from("failed")
-    };
-    diagnostic.message = format!("{} Check the startup log.", last_error);
-    None
-}
-
-fn wait_for_port(port: u16, timeout_secs: u64) -> bool {
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(timeout_secs) {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(350));
-    }
-    false
-}
+// ── Network helper ────────────────────────────────────────────────────────────
 
 fn wait_for_http_ok(port: u16, path: &str, timeout_secs: u64) -> bool {
     let started = Instant::now();
@@ -367,11 +195,174 @@ fn wait_for_http_ok(port: u16, path: &str, timeout_secs: u64) -> bool {
     false
 }
 
+// ── PyO3 runtime location helpers ─────────────────────────────────────────────
+
+fn find_python_home(app: &AppHandle) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("python-runtime"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("resources").join("python-runtime"));
+            candidates.push(exe_dir.join("python-runtime"));
+        }
+    }
+    candidates.into_iter().find(|p| p.exists())
+}
+
+fn find_backend_dir(app: &AppHandle) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("backend"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("resources").join("backend"));
+            candidates.push(exe_dir.join("backend"));
+        }
+    }
+    candidates.into_iter().find(|p| p.exists())
+}
+
+// ── PyO3 backend startup ──────────────────────────────────────────────────────
+
+fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathBuf) {
+    thread::Builder::new()
+        .name(String::from("pyo3-backend"))
+        .spawn(move || {
+            log_sidecar(
+                &app,
+                &format!(
+                    "PyO3: Initializing embedded Python. PYTHONHOME={} BACKEND={}",
+                    python_home.display(),
+                    backend_dir.display()
+                ),
+            );
+
+            // CRITICAL: Set PYTHONHOME before interpreter initializes.
+            // PYTHONHOME tells Python where its stdlib and site-packages live.
+            // PYTHONPATH adds our backend/ source directory to the import path.
+            std::env::set_var("PYTHONHOME", &python_home);
+            std::env::set_var("PYTHONPATH", backend_dir.to_str().unwrap_or(""));
+            std::env::set_var("PYTHONDONTWRITEBYTECODE", "1");
+            std::env::set_var("PYTHONUNBUFFERED", "1");
+
+            // On Windows: add python-runtime/ to PATH so python311.dll is found.
+            #[cfg(target_os = "windows")]
+            {
+                let dlls_dir = python_home.to_str().unwrap_or("").to_string();
+                if let Ok(current_path) = std::env::var("PATH") {
+                    std::env::set_var("PATH", format!("{};{}", dlls_dir, current_path));
+                }
+            }
+
+            // Initialize Python interpreter (must happen before with_gil).
+            pyo3::prepare_freethreaded_python();
+
+            let result = Python::with_gil(|py| -> PyResult<()> {
+                // Put backend_dir at front of sys.path so `import main` works.
+                let sys = py.import("sys")?;
+                let path = sys.getattr("path")?;
+                path.call_method1("insert", (0, backend_dir.to_str().unwrap_or("")))?;
+
+                log_sidecar(&app, "PyO3: Importing backend main module...");
+                let main_mod = py.import("main")?;
+
+                log_sidecar(&app, "PyO3: Calling main.run_server() — uvicorn starting...");
+                // run_server() blocks here forever (uvicorn event loop).
+                // When the Rust process exits, this thread exits, Python exits.
+                main_mod.call_method0("run_server")?;
+
+                Ok(())
+            });
+
+            match result {
+                Ok(_) => log_sidecar(&app, "PyO3: Python backend exited cleanly."),
+                Err(e) => log_sidecar(&app, &format!("PyO3: Python backend error: {}", e)),
+            }
+        })
+        .expect("Failed to spawn pyo3-backend thread");
+}
+
+fn update_backend_status(app: &AppHandle, status: &str, message: &str, ready: bool) {
+    if let Ok(mut snapshot) = app.state::<StartupState>().snapshot.lock() {
+        snapshot.backend.status = status.to_string();
+        snapshot.backend.message = message.to_string();
+        snapshot.startup_ready = ready;
+    }
+}
+
+fn start_python_backend_async(app: AppHandle) {
+    thread::Builder::new()
+        .name(String::from("pyo3-orchestrator"))
+        .spawn(move || {
+            let python_home = match find_python_home(&app) {
+                Some(p) => p,
+                None => {
+                    let msg = "ERROR: python-runtime/ not found in app resources. Reinstall GRABIX.";
+                    log_sidecar(&app, msg);
+                    update_backend_status(&app, "missing", msg, false);
+                    return;
+                }
+            };
+
+            let backend_dir = match find_backend_dir(&app) {
+                Some(p) => p,
+                None => {
+                    let msg = "ERROR: backend/ not found in app resources. Reinstall GRABIX.";
+                    log_sidecar(&app, msg);
+                    update_backend_status(&app, "missing", msg, false);
+                    return;
+                }
+            };
+
+            log_sidecar(
+                &app,
+                &format!(
+                    "PyO3: Resources located. python_home={} backend={}",
+                    python_home.display(),
+                    backend_dir.display()
+                ),
+            );
+
+            update_backend_status(&app, "starting", "Embedded Python backend initializing...", false);
+
+            start_python_backend(app.clone(), python_home, backend_dir);
+
+            // Give Python a moment to spin up before polling.
+            thread::sleep(Duration::from_secs(2));
+
+            log_sidecar(&app, "PyO3: Waiting for uvicorn on port 8000 (timeout: 60s)...");
+
+            if wait_for_http_ok(8000, "/health/ping", 60) {
+                let msg = "Embedded Python backend is healthy on port 8000.";
+                log_sidecar(&app, &format!("PyO3: {}", msg));
+                update_backend_status(&app, "started", msg, true);
+            } else {
+                let msg = "Backend did not respond within 60s. Check startup log for Python import errors.";
+                log_sidecar(&app, &format!("PyO3: TIMEOUT — {}", msg));
+                update_backend_status(&app, "timeout", msg, false);
+            }
+
+            let snapshot = app
+                .state::<StartupState>()
+                .snapshot
+                .lock()
+                .map(|s| s.clone())
+                .unwrap_or_default();
+            write_diagnostics_snapshot(&app, &snapshot);
+        })
+        .expect("Failed to spawn pyo3-orchestrator thread");
+}
+
+// ── Initial diagnostics ───────────────────────────────────────────────────────
+
 fn initial_diagnostics(app: &AppHandle) -> StartupDiagnostics {
     let resource_dir = app
         .path()
         .resource_dir()
-        .map(|path| path.display().to_string())
+        .map(|p| p.display().to_string())
         .unwrap_or_default();
 
     StartupDiagnostics {
@@ -392,113 +383,31 @@ fn initial_diagnostics(app: &AppHandle) -> StartupDiagnostics {
                 String::from("starting")
             },
             message: if cfg!(debug_assertions) {
-                String::from("Debug mode uses the local development backend.")
+                String::from("Debug mode — run backend manually: python backend/main.py")
             } else {
-                String::from("Waiting for the packaged backend sidecar.")
+                String::from("Embedded Python backend initializing via PyO3...")
             },
             port: 8000,
-            binary_path: resource_bin(app, "grabix-backend.exe")
-                .map(|path| path.display().to_string())
-                .unwrap_or_default(),
+            binary_path: String::from("(embedded via PyO3 — no separate process)"),
         },
         consumet: SidecarDiagnostic {
             name: String::from("consumet"),
-            status: if cfg!(debug_assertions) {
-                String::from("internal")
-            } else {
-                String::from("internal")
-            },
-            message: if cfg!(debug_assertions) {
-                String::from("Anime provider logic is handled inside the Python backend during development.")
-            } else {
-                String::from("Anime provider logic is handled inside the packaged Python backend.")
-            },
+            status: String::from("internal"),
+            message: String::from(
+                "Anime provider logic is handled inside the embedded Python backend.",
+            ),
             port: 0,
             binary_path: String::new(),
         },
     }
 }
 
-fn start_sidecars(app: &AppHandle) -> StartupOutcome {
-    let mut children = Vec::new();
-    let mut diagnostics = initial_diagnostics(app);
-    let backend_path = resource_bin(app, "grabix-backend.exe");
-    diagnostics.backend.binary_path = backend_path
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    diagnostics.consumet.binary_path = String::new();
-
-    if wait_for_http_ok(8000, "/health/ping", 2) || wait_for_port(8000, 2) {
-        diagnostics.backend.status = String::from("reused");
-        diagnostics.backend.message = String::from("Backend is already running on port 8000.");
-        log_sidecar(app, "Backend port 8000 already active. Reusing existing service.");
-    } else if let Some(path) = backend_path {
-        diagnostics.backend.status = String::from("starting");
-        diagnostics.backend.message = format!("Launching packaged backend from {}", path.display());
-        log_sidecar(app, &diagnostics.backend.message);
-        if let Some(child) = start_sidecar_with_supervision(
-            app,
-            &mut diagnostics.backend,
-            &path,
-            &[],
-            "/health/ping",
-            12,
-            "Backend is healthy on port 8000.",
-        ) {
-            children.push(child);
-        }
-    } else {
-        diagnostics.backend.status = String::from("missing");
-        diagnostics.backend.message =
-            String::from("Packaged backend sidecar was not found in the installer resources.");
-        log_sidecar(app, "Backend sidecar binary was not found.");
-    }
-
-    diagnostics.consumet.status = String::from("internal");
-    diagnostics.consumet.message =
-        String::from("Anime provider startup is no longer a separate sidecar dependency.");
-    log_sidecar(app, "Anime provider is handled inside the Python backend. No extra sidecar launched.");
-
-    diagnostics.startup_ready = diagnostics.backend.status == "started"
-        || diagnostics.backend.status == "reused"
-        || diagnostics.backend.status == "restarted";
-
-    log_sidecar(
-        app,
-        &format!(
-            "Startup summary -> backend: {} ({}) | consumet: {} ({})",
-            diagnostics.backend.status,
-            diagnostics.backend.message,
-            diagnostics.consumet.status,
-            diagnostics.consumet.message
-        ),
-    );
-    write_diagnostics_snapshot(app, &diagnostics);
-
-    StartupOutcome { children, diagnostics }
-}
-
-fn start_sidecars_async(app: AppHandle) {
-    thread::spawn(move || {
-        let outcome = start_sidecars(&app);
-        if let Ok(mut stored) = app.state::<SidecarState>().children.lock() {
-            *stored = outcome.children;
-        }
-        if let Ok(mut snapshot) = app.state::<StartupState>().snapshot.lock() {
-            *snapshot = outcome.diagnostics.clone();
-        }
-        write_diagnostics_snapshot(&app, &outcome.diagnostics);
-    });
-}
+// ── Tauri app entry point ─────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(SidecarState {
-            children: Mutex::new(Vec::new()),
-        })
         .manage(StartupState {
             snapshot: Mutex::new(StartupDiagnostics::default()),
         })
@@ -508,13 +417,12 @@ pub fn run() {
                 *snapshot = initial.clone();
             }
             write_diagnostics_snapshot(app.handle(), &initial);
-            log_sidecar(app.handle(), "GRABIX desktop app started.");
+            log_sidecar(app.handle(), "GRABIX started (PyO3 embedded backend edition).");
 
-            if cfg!(debug_assertions) {
-                return Ok(());
+            if !cfg!(debug_assertions) {
+                start_python_backend_async(app.handle().clone());
             }
 
-            start_sidecars_async(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -528,16 +436,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
 
-    app.run(|app_handle, event| {
+    // On exit: Python lives inside this process and dies automatically.
+    // No child processes to kill — nothing to do here.
+    app.run(|_app_handle, event| {
         if matches!(event, RunEvent::Exit) {
-            let state = app_handle.state::<SidecarState>();
-            let lock_result = state.children.lock();
-            if let Ok(mut children) = lock_result {
-                for child in children.iter_mut() {
-                    terminate_child_process(child);
-                }
-                children.clear();
-            }
+            // PyO3 cleanup is automatic when the process exits.
         }
     });
 }
