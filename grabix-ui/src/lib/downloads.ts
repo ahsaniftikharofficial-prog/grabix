@@ -130,26 +130,21 @@ export async function resolveSourceDownloadOptions(sources: StreamSource[]): Pro
 export async function queueVideoDownload(request: DownloadQueueRequest): Promise<void> {
   let response: Response;
   try {
-    response = await fetch(`${BACKEND_API}/download`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        url: request.url,
-        title: request.title?.trim() || "",
-        thumbnail: request.thumbnail?.trim() || "",
-        dl_type: "video",
-        headers_json:
-          request.headers && Object.keys(request.headers).length > 0
-            ? JSON.stringify(request.headers)
-            : "",
-        force_hls: Boolean(request.forceHls),
-        category: request.category?.trim() || "",
-        tags_csv: Array.isArray(request.tags) ? request.tags.filter(Boolean).join(",") : "",
-        download_engine: request.downloadEngine || "",
-      }),
+    const params = new URLSearchParams({
+      url: request.url,
+      title: request.title?.trim() || "",
+      thumbnail: request.thumbnail?.trim() || "",
+      dl_type: "video",
+      headers_json:
+        request.headers && Object.keys(request.headers).length > 0
+          ? JSON.stringify(request.headers)
+          : "",
+      force_hls: String(Boolean(request.forceHls)),
+      category: request.category?.trim() || "",
+      tags_csv: Array.isArray(request.tags) ? request.tags.filter(Boolean).join(",") : "",
+      download_engine: request.downloadEngine || "",
     });
+    response = await fetch(`${BACKEND_API}/download?${params.toString()}`);
   } catch (error) {
     throw new Error(error instanceof Error ? error.message : "Downloader could not be reached.");
   }
@@ -171,24 +166,19 @@ export async function queueVideoDownload(request: DownloadQueueRequest): Promise
 export async function queueSubtitleDownload(request: SubtitleDownloadRequest): Promise<void> {
   let response: Response;
   try {
-    response = await fetch(`${BACKEND_API}/download`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        url: request.url,
-        title: request.title?.trim() || "",
-        dl_type: "subtitle",
-        headers_json:
-          request.headers && Object.keys(request.headers).length > 0
-            ? JSON.stringify(request.headers)
-            : "",
-        category: request.category?.trim() || "",
-        tags_csv: Array.isArray(request.tags) ? request.tags.filter(Boolean).join(",") : "",
-        download_engine: request.downloadEngine || "",
-      }),
+    const params = new URLSearchParams({
+      url: request.url,
+      title: request.title?.trim() || "",
+      dl_type: "subtitle",
+      headers_json:
+        request.headers && Object.keys(request.headers).length > 0
+          ? JSON.stringify(request.headers)
+          : "",
+      category: request.category?.trim() || "",
+      tags_csv: Array.isArray(request.tags) ? request.tags.filter(Boolean).join(",") : "",
+      download_engine: request.downloadEngine || "",
     });
+    response = await fetch(`${BACKEND_API}/download?${params.toString()}`);
   } catch (error) {
     throw new Error(error instanceof Error ? error.message : "Subtitle downloader could not be reached.");
   }

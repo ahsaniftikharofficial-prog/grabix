@@ -566,28 +566,34 @@ html, body, #root {
 .player-progress-range {
   flex: 1;
   appearance: none;
-  height: 4px;
+  height: 5px;
   border-radius: 999px;
-  background: linear-gradient(to right, #a855f7 var(--progress, 0%), rgba(255,255,255,0.24) var(--progress, 0%));
+  background: linear-gradient(to right, #a78bfa var(--progress, 0%), rgba(255,255,255,0.18) var(--progress, 0%));
   outline: none;
-  transition: transform 0.18s ease;
+  cursor: pointer;
+  transition: height 0.15s ease;
 }
 .player-progress-range:hover {
-  transform: scaleY(1.35);
-  background: rgba(255,255,255,0.34);
+  height: 8px;
+  background: linear-gradient(to right, #c084fc var(--progress, 0%), rgba(255,255,255,0.28) var(--progress, 0%));
 }
 .player-progress-range::-webkit-slider-thumb {
   appearance: none;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: #fff;
+  box-shadow: 0 0 8px rgba(168,85,247,0.6);
   border: none;
   cursor: pointer;
-  transition: transform 0.16s ease;
+  transition: transform 0.14s ease, box-shadow 0.14s ease;
+}
+.player-progress-range:hover::-webkit-slider-thumb {
+  transform: scale(1.25);
+  box-shadow: 0 0 14px rgba(192,132,252,0.8);
 }
 .player-progress-range:active::-webkit-slider-thumb {
-  transform: scale(1.14);
+  transform: scale(1.35);
 }
 .player-control-row {
   display: flex;
@@ -595,11 +601,13 @@ html, body, #root {
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
-  padding: 10px 14px;
-  border-radius: 18px;
-  background: linear-gradient(180deg, rgba(0,0,0,0.78), rgba(0,0,0,0.62));
-  border: 1px solid rgba(255,255,255,0.08);
-  backdrop-filter: blur(16px);
+  padding: 12px 18px;
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(0,0,0,0.72), rgba(0,0,0,0.55));
+  border: 1px solid rgba(255,255,255,0.1);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
 }
 .player-controls-wrap.compact .player-control-row {
   justify-content: flex-end;
@@ -648,22 +656,34 @@ html, body, #root {
   transform: scale(1.06);
 }
 .player-control-icon.primary {
-  width: 42px;
-  height: 42px;
+  width: 50px;
+  height: 50px;
+  background: rgba(168,85,247,0.2);
+  border-radius: 50%;
+  border: 1.5px solid rgba(168,85,247,0.4);
+  transition: background 0.18s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+.player-control-icon.primary:hover {
+  opacity: 1;
+  background: rgba(168,85,247,0.35);
+  box-shadow: 0 0 20px rgba(168,85,247,0.45);
+  transform: scale(1.1);
 }
 .player-back-button {
-  width: 54px;
-  height: 54px;
-  border-radius: 999px;
-  background: rgba(8,10,14,0.82);
-  border: 1px solid rgba(255,255,255,0.14);
-  box-shadow: 0 10px 28px rgba(0,0,0,0.28);
-  backdrop-filter: blur(14px);
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: rgba(8,10,14,0.75);
+  border: 1px solid rgba(255,255,255,0.18);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
 }
 .player-back-button:hover {
   opacity: 1;
-  background: rgba(20,24,32,0.92);
-  transform: scale(1.04);
+  background: rgba(30,34,44,0.9);
+  transform: scale(1.06);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.45);
 }
 .player-menu-wrap {
   position: relative;

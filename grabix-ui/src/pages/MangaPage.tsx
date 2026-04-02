@@ -37,6 +37,7 @@ import {
   saveOfflineMangaRecord,
   type OfflineMangaRecord,
 } from "../lib/mangaOffline";
+import { createCbzBlob, triggerFileDownload } from "../lib/mangaZip";
 
 type ReaderState = { chapterIndex: number; chapter: MangaChapter };
 type ChapterSource = "auto" | "mangadex" | "consumet" | "comick";
@@ -529,7 +530,16 @@ export default function MangaPage() {
       await saveOfflineChapterPages(mangaKey, chapter.chapter_id, session.blobs);
       delete chapterDownloadSessionsRef.current[stateKey];
       markChapterDownloaded(mangaKey, chapter.chapter_id);
-      updateChapterDownloadState(mangaKey, chapter.chapter_id, { status: "done", message: "Saved offline.", progress: 100 });
+      updateChapterDownloadState(mangaKey, chapter.chapter_id, { status: "done", message: "Saving CBZ file...", progress: 100 });
+      try {
+        const safeTitle = (item.title || "manga").replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
+        const chapterLabel = `Chapter_${String(chapter.chapter_number ?? chapter.chapter_id).replace(/[\\/:*?"<>|]/g, "_")}`;
+        const cbz = await createCbzBlob(session.blobs, safeTitle, chapterLabel);
+        triggerFileDownload(cbz, `${safeTitle} - ${chapterLabel}.cbz`);
+        updateChapterDownloadState(mangaKey, chapter.chapter_id, { status: "done", message: "Downloaded as CBZ file.", progress: 100 });
+      } catch {
+        updateChapterDownloadState(mangaKey, chapter.chapter_id, { status: "done", message: "Saved offline (CBZ export failed).", progress: 100 });
+      }
       return "done";
     } catch (error) {
       const activeSession = chapterDownloadSessionsRef.current[stateKey];
