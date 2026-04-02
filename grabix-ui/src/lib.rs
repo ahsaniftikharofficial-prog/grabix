@@ -19,12 +19,6 @@ struct SidecarState {
     children: Mutex<Vec<Child>>,
 }
 
-/// Holds the backend binary path so the watchdog can restart it without
-/// re-scanning the filesystem on every recovery attempt.
-struct WatchdogConfig {
-    backend_binary: Mutex<Option<PathBuf>>,
-}
-
 struct StartupState {
     snapshot: Mutex<StartupDiagnostics>,
 }
@@ -485,79 +479,82 @@ fn start_sidecars(app: &AppHandle) -> StartupOutcome {
     StartupOutcome { children, diagnostics }
 }
 
-/// Phase 7 — Watchdog supervisor.
-/// Spawned once after initial startup; polls /health/ping every 30 s.
-/// On failure: emits "sidecar-reconnecting", auto-restarts the backend,
-/// then emits "sidecar-reconnected" or "sidecar-failed".
-fn start_watchdog(app: AppHandle) {
+// ── Backend auto-restart supervision ─────────────────────────────────────────
+// Polls /health/ping every 10 seconds.
+// After 3 consecutive failures (30s down), relaunches grabix-backend.exe.
+// This is why Netflix/Chrome never "crash" — they restart automatically.
+fn supervise_backend(app: AppHandle, backend_path: PathBuf) {
     thread::spawn(move || {
-        // Let initial startup fully settle before the first check.
-        thread::sleep(Duration::from_secs(40));
+        // Wait for initial startup to fully settle before monitoring begins
+        thread::sleep(Duration::from_secs(20));
+        log_sidecar(&app, "Backend supervision started.");
+
+        let mut consecutive_failures: u32 = 0;
 
         loop {
-            thread::sleep(Duration::from_secs(30));
+            thread::sleep(Duration::from_secs(10));
 
-            if wait_for_http_ok(8000, "/health/ping", 3) {
-                continue; // backend healthy — nothing to do
-            }
-
-            log_sidecar(&app, "Watchdog: backend unresponsive. Attempting supervised restart.");
-            let _ = app.emit("sidecar-reconnecting", ());
-
-            // Retrieve the binary path that was stored at startup.
-            let binary: Option<PathBuf> = app
-                .state::<WatchdogConfig>()
-                .backend_binary
-                .lock()
-                .ok()
-                .and_then(|guard| guard.clone());
-
-            let Some(path) = binary else {
-                log_sidecar(&app, "Watchdog: no binary path stored — cannot restart.");
-                let _ = app.emit("sidecar-failed", ());
-                continue;
-            };
-
-            let mut diag = SidecarDiagnostic {
-                name: String::from("backend"),
-                port: 8000,
-                binary_path: path.display().to_string(),
-                status: String::from("watchdog-restarting"),
-                message: String::from("Watchdog is restarting the backend."),
-            };
-
-            match start_sidecar_with_supervision(
-                &app,
-                &mut diag,
-                &path,
-                &[],
-                "/health/ping",
-                18,
-                "Backend restarted successfully by watchdog.",
-            ) {
-                Some(new_child) => {
-                    // Replace the old (dead) child handle.
-                    if let Ok(mut children) = app.state::<SidecarState>().children.lock() {
-                        for child in children.iter_mut() {
-                            terminate_child_process(child);
-                        }
-                        children.clear();
-                        children.push(new_child);
-                    }
-                    // Update diagnostics so the frontend UI reflects the recovery.
-                    if let Ok(mut snapshot) = app.state::<StartupState>().snapshot.lock() {
-                        snapshot.backend.status = String::from("restarted");
-                        snapshot.backend.message =
-                            String::from("Backend was automatically restarted by the watchdog.");
-                        snapshot.startup_ready = true;
-                        write_diagnostics_snapshot(&app, &snapshot.clone());
-                    }
-                    log_sidecar(&app, "Watchdog: backend restart succeeded.");
-                    let _ = app.emit("sidecar-reconnected", ());
+            if wait_for_http_ok(8000, "/health/ping", 5) {
+                // Backend is alive — reset failure counter
+                if consecutive_failures > 0 {
+                    log_sidecar(&app, "Backend ping recovered.");
                 }
-                None => {
-                    log_sidecar(&app, "Watchdog: backend restart failed after retries.");
-                    let _ = app.emit("sidecar-failed", ());
+                consecutive_failures = 0;
+            } else {
+                consecutive_failures += 1;
+                log_sidecar(
+                    &app,
+                    &format!(
+                        "Backend ping failed ({}/3). Will restart if this continues.",
+                        consecutive_failures
+                    ),
+                );
+
+                // 3 failures = ~30s down → restart
+                if consecutive_failures >= 3 {
+                    consecutive_failures = 0;
+                    log_sidecar(&app, "Backend unresponsive for 30s — attempting auto-restart.");
+
+                    // Kill any leftover processes on port 8000 first (Windows)
+                    #[cfg(target_os = "windows")]
+                    {
+                        let _ = Command::new("cmd")
+                            .args(["/C", "for /f \"tokens=5\" %a in ('netstat -aon ^| find \":8000\"') do taskkill /PID %a /F"])
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .creation_flags(0x08000000)
+                            .status();
+                    }
+
+                    thread::sleep(Duration::from_secs(2));
+
+                    match spawn_process(&backend_path, &[]) {
+                        Ok(new_child) => {
+                            // Give the backend time to initialize
+                            thread::sleep(Duration::from_secs(5));
+
+                            if wait_for_http_ok(8000, "/health/ping", 12) {
+                                // Successfully restarted — store the new child process
+                                if let Ok(mut children) =
+                                    app.state::<SidecarState>().children.lock()
+                                {
+                                    children.push(new_child);
+                                }
+                                log_sidecar(&app, "Backend auto-restarted successfully.");
+                            } else {
+                                log_sidecar(
+                                    &app,
+                                    "Backend auto-restart launched but did not respond in time.",
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            log_sidecar(
+                                &app,
+                                &format!("Backend auto-restart failed to launch: {}", err),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -568,11 +565,6 @@ fn start_sidecars_async(app: AppHandle) {
     thread::spawn(move || {
         let outcome = start_sidecars(&app);
 
-        // Store the binary path so the watchdog can restart without re-scanning.
-        if let Ok(mut guard) = app.state::<WatchdogConfig>().backend_binary.lock() {
-            *guard = resource_bin(&app, "grabix-backend.exe");
-        }
-
         if let Ok(mut stored) = app.state::<SidecarState>().children.lock() {
             *stored = outcome.children;
         }
@@ -581,13 +573,16 @@ fn start_sidecars_async(app: AppHandle) {
         }
         write_diagnostics_snapshot(&app, &outcome.diagnostics);
 
-        // Launch the watchdog only when the backend actually started (or was reused).
-        let backend_ok = matches!(
-            outcome.diagnostics.backend.status.as_str(),
-            "started" | "restarted" | "reused"
-        );
-        if backend_ok {
-            start_watchdog(app);
+        // Start auto-restart supervision if backend launched successfully
+        let backend_status = &outcome.diagnostics.backend.status;
+        let backend_path = PathBuf::from(&outcome.diagnostics.backend.binary_path);
+
+        if (backend_status == "started"
+            || backend_status == "reused"
+            || backend_status == "restarted")
+            && backend_path.exists()
+        {
+            supervise_backend(app, backend_path);
         }
     });
 }
@@ -598,9 +593,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(SidecarState {
             children: Mutex::new(Vec::new()),
-        })
-        .manage(WatchdogConfig {
-            backend_binary: Mutex::new(None),
         })
         .manage(StartupState {
             snapshot: Mutex::new(StartupDiagnostics::default()),

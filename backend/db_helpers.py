@@ -34,9 +34,11 @@ library_logger   = get_logger("library")
 # ── DB connection ─────────────────────────────────────────────────────────────
 
 def get_db_connection() -> sqlite3.Connection:
-    """Return a new sqlite3 connection with row_factory set."""
-    con = sqlite3.connect(DB_PATH)
+    """Return a new sqlite3 connection with WAL mode, timeout, and row_factory set."""
+    con = sqlite3.connect(DB_PATH, timeout=30)
     con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
     return con
 
 
