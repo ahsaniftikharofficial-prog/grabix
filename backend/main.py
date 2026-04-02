@@ -427,6 +427,33 @@ def _normalize_download_target(url: str, headers_json: str = "") -> tuple[str, s
     )
 
 
+def _infer_download_category(url: str, title: str, dl_type: str, category: str = "") -> str:
+    if category:
+        return _normalize_category_label(category)
+    if dl_type == "subtitle":
+        return "Subtitles"
+    if dl_type == "audio":
+        return "Audio"
+    lowered_url = (url or "").lower()
+    lowered_title = (title or "").lower()
+    if "youtube.com" in lowered_url or "youtu.be" in lowered_url:
+        return "YouTube"
+    if "anime" in lowered_title or "episode" in lowered_title:
+        return "Anime"
+    if "manga" in lowered_title:
+        return "Manga"
+    return ""
+
+
+def _infer_library_display_layout(url: str, title: str, dl_type: str, category: str = "") -> str:
+    cat = _infer_download_category(url, title, dl_type, category)
+    if cat in ("Anime", "TV Series"):
+        return "episodes"
+    if cat == "Manga":
+        return "chapters"
+    return "grid"
+
+
 def _normalize_category_label(value: str) -> str:
     cleaned = re.sub(r"\s+", " ", str(value or "").strip())
     if not cleaned:
@@ -4610,10 +4637,7 @@ def delete_library_file(path: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-try:
-    _reconcile_library_state()
-except Exception as reconcile_error:
-    log_event(library_logger, logging.ERROR, event="startup_library_reconcile_failed", message="Startup library reconcile failed.", details={"error": str(reconcile_error)})
+# Library reconcile runs on first library page visit, not at startup
 
 
 @app.get("/history/full")
