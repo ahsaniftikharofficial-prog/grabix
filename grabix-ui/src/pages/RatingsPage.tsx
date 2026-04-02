@@ -1,164 +1,79 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
-const API    = "https://api.imdbapi.dev";
-const JIKAN  = "https://api.jikan.moe/v4";
+const API        = "https://api.imdbapi.dev";
+const JIKAN      = "https://api.jikan.moe/v4";
+const TMDB       = "https://api.themoviedb.org/3";
+const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzdWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
+const IMG_BASE   = "https://image.tmdb.org/t/p/w500";
+const TMDB_HEADERS: Record<string,string> = { "Authorization": `Bearer ${TMDB_TOKEN}`, "Content-Type": "application/json" };
 
-// ── Real IMDB Top 50 Movies (by rating) ───────────────────────────────────
-const TOP_MOVIE_IDS = [
-  "tt0111161","tt0068646","tt0071562","tt0468569","tt0050083",
-  "tt0108052","tt0167260","tt0110912","tt0120737","tt0060196",
-  "tt0137523","tt1375666","tt0109830","tt0167261","tt0080684",
-  "tt0133093","tt0099685","tt0073486","tt0047478","tt0114369",
-  "tt6751668","tt0317248","tt0102926","tt0038650","tt0245429",
-  "tt0076759","tt0120689","tt0816692","tt0054215","tt0021749",
-  "tt0034583","tt0253474","tt1675434","tt0047396","tt0407887",
-  "tt0118799","tt0103064","tt0088763","tt0082971","tt0172495",
-  "tt0110357","tt0114814","tt4633694","tt0482571","tt1853728",
-  "tt0209144","tt0078788","tt0120586","tt2582802","tt0364569",
-];
-
-// ── Real IMDB Top 50 TV Series (by rating) ────────────────────────────────
-const TOP_TV_IDS = [
-  "tt0903747","tt0185906","tt7366338","tt0306414","tt0141842",
-  "tt3032476","tt5753856","tt4158110","tt2802850","tt1475582",
-  "tt4574334","tt2442560","tt0944947","tt2297757","tt3581920",
-  "tt5071412","tt1190634","tt0108778","tt0096697","tt0386676",
-  "tt4786824","tt2707408","tt1831384","tt0072508","tt0348914",
-  "tt1837492","tt2467372","tt8111088","tt0411008","tt0417373",
-  "tt0773262","tt2861424","tt1844624","tt1520211","tt0460649",
-  "tt1615919","tt3498820","tt0795176","tt4270492","tt6468322",
-  "tt1399664","tt9126600","tt2372162","tt3107288","tt3514324",
-  "tt1442449","tt0367279","tt0383126","tt1831164","tt0455275",
-];
-
-// ── Types ──────────────────────────────────────────────────────────────────
 interface SearchResult {
-  id: string;
-  primaryTitle: string;
-  startYear: number;
-  endYear?: number;
-  type: string;
-  primaryImage?: { url: string };
-  rating?: { aggregateRating: number; voteCount: number };
-  genres?: string[];
+  id: string; primaryTitle: string; startYear: number; endYear?: number;
+  type: string; primaryImage?: { url: string };
+  rating?: { aggregateRating: number; voteCount: number }; genres?: string[];
 }
 interface TitleDetail extends SearchResult {
-  plot?: string;
-  directors?: { displayName: string }[];
-  writers?: { displayName: string }[];
-  stars?: { displayName: string }[];
-  runtimeSeconds?: number;
-  metacritic?: { score: number };
-  originCountries?: { name: string }[];
+  plot?: string; directors?: { displayName: string }[]; writers?: { displayName: string }[];
+  stars?: { displayName: string }[]; runtimeSeconds?: number;
+  metacritic?: { score: number }; originCountries?: { name: string }[];
 }
 interface EpisodeData {
-  id: string;
-  title: string;
-  episodeNumber: number;
-  season: string;
-  rating?: { aggregateRating: number; voteCount: number };
-  plot?: string;
+  id: string; title: string; episodeNumber: number; season: string;
+  rating?: { aggregateRating: number; voteCount: number }; plot?: string;
 }
 interface SeasonData { season: string; episodeCount: number; }
+interface TmdbMovie { id: number; title: string; poster_path: string|null; release_date: string; vote_average: number; vote_count: number; }
+interface TmdbShow  { id: number; name:  string; poster_path: string|null; first_air_date: string; vote_average: number; }
 interface AnimeEntry {
-  mal_id: number;
-  title: string;
-  score: number;
-  scored_by: number;
-  rank: number;
-  images: { jpg: { large_image_url: string } };
-  year: number;
-  episodes: number | null;
-  genres: { name: string }[];
+  mal_id: number; title: string; score: number; rank: number;
+  images: { jpg: { large_image_url: string } }; year: number; episodes: number|null;
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-function getRatingColor(r: number | null): string {
+function getRatingColor(r: number|null): string {
   if (!r) return "var(--bg-surface2)";
-  if (r >= 9.0) return "#1d4ed8";
-  if (r >= 8.5) return "#15803d";
-  if (r >= 8.0) return "#16a34a";
-  if (r >= 7.0) return "#ca8a04";
-  if (r >= 6.0) return "#c2410c";
-  if (r >= 5.0) return "#b91c1c";
+  if (r >= 9.0) return "#1d4ed8"; if (r >= 8.5) return "#15803d";
+  if (r >= 8.0) return "#16a34a"; if (r >= 7.0) return "#ca8a04";
+  if (r >= 6.0) return "#c2410c"; if (r >= 5.0) return "#b91c1c";
   return "#6d28d9";
 }
 const LEGEND = [
-  { label: "Absolute Cinema", color: "#1d4ed8" },
-  { label: "Awesome",         color: "#15803d" },
-  { label: "Great",           color: "#16a34a" },
-  { label: "Good",            color: "#ca8a04" },
-  { label: "Regular",         color: "#c2410c" },
-  { label: "Bad",             color: "#b91c1c" },
-  { label: "Garbage",         color: "#6d28d9" },
+  { label:"Absolute Cinema", color:"#1d4ed8" }, { label:"Awesome", color:"#15803d" },
+  { label:"Great", color:"#16a34a" }, { label:"Good", color:"#ca8a04" },
+  { label:"Regular", color:"#c2410c" }, { label:"Bad", color:"#b91c1c" }, { label:"Garbage", color:"#6d28d9" },
 ];
 function fmt(n: number) {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-  if (n >= 1_000)     return (n / 1_000).toFixed(0) + "K";
+  if (n >= 1_000_000) return (n/1_000_000).toFixed(1)+"M";
+  if (n >= 1_000) return (n/1_000).toFixed(0)+"K";
   return String(n);
 }
 function runtime(secs?: number) {
   if (!secs) return null;
-  const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60);
+  const h = Math.floor(secs/3600), m = Math.floor((secs%3600)/60);
   return h ? `${h}h ${m}m` : `${m}m`;
 }
 const IS_SERIES = (t: string) =>
-  ["TV_SERIES","TV_MINI_SERIES","tvSeries","tvMiniSeries","TV_SHOW","tvShow"].includes(t)
-  || t.toLowerCase().includes("series");
+  ["TV_SERIES","TV_MINI_SERIES","tvSeries","tvMiniSeries","TV_SHOW","tvShow"].includes(t) || t.toLowerCase().includes("series");
 
-type TopTab = "movies" | "tv" | "anime";
+type TopTab = "movies"|"tv"|"anime";
 
 const CSS = `
-@keyframes rat-fadeUp {
-  from { opacity:0; transform:translateY(14px); }
-  to   { opacity:1; transform:translateY(0); }
-}
-@keyframes rat-fadeIn {
-  from { opacity:0; }
-  to   { opacity:1; }
-}
-@keyframes rat-shimmer {
-  0%   { background-position:-600px 0; }
-  100% { background-position: 600px 0; }
-}
-@keyframes rat-spin { to { transform:rotate(360deg); } }
-
-.rat-card {
-  animation: rat-fadeUp 0.35s ease both;
-  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
-  cursor: pointer;
-}
-.rat-card:hover {
-  transform: translateY(-5px) scale(1.015);
-  box-shadow: var(--shadow-lg);
-  border-color: var(--accent) !important;
-}
-.rat-search-wrap input:focus {
-  border-color: var(--border-focus) !important;
-  box-shadow: 0 0 0 3px rgba(138,180,248,0.15) !important;
-  outline: none;
-}
-.rat-tab {
-  transition: color 0.15s, border-color 0.15s;
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-}
-.rat-tab:hover  { color: var(--text-primary) !important; }
-.rat-tab.active { color: var(--accent) !important; border-bottom-color: var(--accent) !important; }
-.rat-skeleton {
-  background: linear-gradient(90deg, var(--bg-surface) 25%, var(--bg-surface2) 50%, var(--bg-surface) 75%);
-  background-size: 600px 100%;
-  animation: rat-shimmer 1.4s infinite linear;
-}
-.rat-ep {
-  transition: transform 0.1s, box-shadow 0.1s;
-  cursor: pointer;
-}
-.rat-ep:hover { transform: scale(1.16); box-shadow: 0 4px 14px rgba(0,0,0,0.5); }
-.rat-sug-row { transition: background 0.1s; cursor: pointer; }
-.rat-sug-row:hover { background: var(--bg-hover) !important; }
-.rat-detail { animation: rat-fadeIn 0.3s ease; }
-.rat-grid   { animation: rat-fadeUp 0.25s ease; }
+@keyframes rat-fadeUp { from{opacity:0;transform:translateY(14px)} to{opacity:1;transform:translateY(0)} }
+@keyframes rat-fadeIn { from{opacity:0} to{opacity:1} }
+@keyframes rat-shimmer { 0%{background-position:-600px 0} 100%{background-position:600px 0} }
+@keyframes rat-spin { to{transform:rotate(360deg)} }
+.rat-card { animation:rat-fadeUp 0.35s ease both; transition:transform 0.18s ease,box-shadow 0.18s ease,border-color 0.18s ease; cursor:pointer; }
+.rat-card:hover { transform:translateY(-5px) scale(1.015); box-shadow:var(--shadow-lg); border-color:var(--accent) !important; }
+.rat-search-wrap input:focus { border-color:var(--border-focus) !important; box-shadow:0 0 0 3px rgba(138,180,248,0.15) !important; outline:none; }
+.rat-tab { transition:color 0.15s,border-color 0.15s; cursor:pointer; border-bottom:2px solid transparent; }
+.rat-tab:hover { color:var(--text-primary) !important; }
+.rat-tab.active { color:var(--accent) !important; border-bottom-color:var(--accent) !important; }
+.rat-skeleton { background:linear-gradient(90deg,var(--bg-surface) 25%,var(--bg-surface2) 50%,var(--bg-surface) 75%); background-size:600px 100%; animation:rat-shimmer 1.4s infinite linear; }
+.rat-ep { transition:transform 0.1s,box-shadow 0.1s; cursor:pointer; }
+.rat-ep:hover { transform:scale(1.16); box-shadow:0 4px 14px rgba(0,0,0,0.5); }
+.rat-sug-row { transition:background 0.1s; cursor:pointer; }
+.rat-sug-row:hover { background:var(--bg-hover) !important; }
+.rat-detail { animation:rat-fadeIn 0.3s ease; }
+.rat-grid { animation:rat-fadeUp 0.25s ease; }
 `;
 
 export default function RatingsPage() {
@@ -166,82 +81,60 @@ export default function RatingsPage() {
   const [suggestions, setSuggestions] = useState<SearchResult[]>([]);
   const [showSug, setShowSug]         = useState(false);
   const [loading, setLoading]         = useState(false);
-  const [detail, setDetail]           = useState<TitleDetail | null>(null);
+  const [detail, setDetail]           = useState<TitleDetail|null>(null);
   const [seasons, setSeasons]         = useState<SeasonData[]>([]);
-  const [episodes, setEpisodes]       = useState<Record<string, EpisodeData[]>>({});
+  const [episodes, setEpisodes]       = useState<Record<string,EpisodeData[]>>({});
   const [loadingGrid, setLoadingGrid] = useState(false);
-  const [tooltip, setTooltip]         = useState<{ ep: EpisodeData; x: number; y: number } | null>(null);
+  const [tooltip, setTooltip]         = useState<{ep:EpisodeData;x:number;y:number}|null>(null);
   const [error, setError]             = useState("");
   const [filterType, setFilterType]   = useState("ALL");
   const [browseResults, setBrowseResults] = useState<SearchResult[]>([]);
   const [browsing, setBrowsing]       = useState(false);
-
   const [activeTab, setActiveTab]     = useState<TopTab>("movies");
-  const [topMovies, setTopMovies]     = useState<TitleDetail[]>([]);
-  const [topTv, setTopTv]             = useState<TitleDetail[]>([]);
+  const [topMovies, setTopMovies]     = useState<TmdbMovie[]>([]);
+  const [topTv, setTopTv]             = useState<TmdbShow[]>([]);
   const [topAnime, setTopAnime]       = useState<AnimeEntry[]>([]);
   const [topLoading, setTopLoading]   = useState(false);
-  const [animeLoading, setAnimeLoading] = useState(false);
+  const debounce = useRef<ReturnType<typeof setTimeout>|null>(null);
 
-  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // ── Fetch IDs in batches of 5, update UI after each batch ─────────────
-  const fetchImdbBatched = async (
-    ids: string[],
-    onUpdate: (items: TitleDetail[]) => void
-  ): Promise<void> => {
-    const all: TitleDetail[] = [];
-    const BATCH = 5;
-    for (let i = 0; i < ids.length; i += BATCH) {
-      const batch = ids.slice(i, i + BATCH);
-      const settled = await Promise.allSettled(
-        batch.map(id =>
-          fetch(`${API}/titles/${id}`)
-            .then(r => r.ok ? r.json() : null)
-            .catch(() => null)
-        )
-      );
-      for (const s of settled) {
-        if (s.status === "fulfilled" && s.value) all.push(s.value);
-      }
-      const sorted = [...all].sort(
-        (a, b) => (b.rating?.aggregateRating ?? 0) - (a.rating?.aggregateRating ?? 0)
-      );
-      onUpdate(sorted);
-      await new Promise(res => setTimeout(res, 250));
-    }
-  };
-
+  // ── Load top lists: TMDB for movies/TV, Jikan for anime ──────────────────
   const loadTopLists = useCallback(async () => {
     setTopLoading(true);
-    setTopMovies([]);
-    setTopTv([]);
-    setTopAnime([]);
-
-    // Movies + TV load in parallel (each batches internally)
-    await Promise.all([
-      fetchImdbBatched(TOP_MOVIE_IDS, items => setTopMovies(items)),
-      fetchImdbBatched(TOP_TV_IDS,    items => setTopTv(items)),
-    ]);
+    setTopMovies([]); setTopTv([]); setTopAnime([]);
+    // Movies — 3 pages (~60 items)
+    try {
+      const pages = await Promise.allSettled([1,2,3].map(p =>
+        fetch(`${TMDB}/movie/top_rated?page=${p}`, { headers: TMDB_HEADERS }).then(r => r.json())
+      ));
+      const movies: TmdbMovie[] = pages
+        .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled")
+        .flatMap(r => r.value?.results ?? []);
+      setTopMovies(movies);
+    } catch { /* silent */ }
+    // TV — 3 pages (~60 items)
+    try {
+      const pages = await Promise.allSettled([1,2,3].map(p =>
+        fetch(`${TMDB}/tv/top_rated?page=${p}`, { headers: TMDB_HEADERS }).then(r => r.json())
+      ));
+      const shows: TmdbShow[] = pages
+        .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled")
+        .flatMap(r => r.value?.results ?? []);
+      setTopTv(shows);
+    } catch { /* silent */ }
+    // Anime — 2 pages from Jikan
+    try {
+      const r1 = await fetch(`${JIKAN}/top/anime?limit=25&page=1`);
+      const j1 = await r1.json();
+      setTopAnime(j1.data ?? []);
+      await new Promise(res => setTimeout(res, 450));
+      const r2 = await fetch(`${JIKAN}/top/anime?limit=25&page=2`);
+      const j2 = await r2.json();
+      setTopAnime(prev => {
+        const ids = new Set(prev.map((a: AnimeEntry) => a.mal_id));
+        return [...prev, ...(j2.data ?? []).filter((a: AnimeEntry) => !ids.has(a.mal_id))];
+      });
+    } catch { /* silent */ }
     setTopLoading(false);
-
-    // Anime: load 10 pages = 250 from MyAnimeList via Jikan, progressively
-    setAnimeLoading(true);
-    for (let page = 1; page <= 10; page++) {
-      try {
-        const r = await fetch(`${JIKAN}/top/anime?limit=25&page=${page}`);
-        if (!r.ok) break;
-        const j = await r.json();
-        const data: AnimeEntry[] = j.data ?? [];
-        if (!data.length) break;
-        setTopAnime(prev => {
-          const existingIds = new Set(prev.map(a => a.mal_id));
-          return [...prev, ...data.filter(a => !existingIds.has(a.mal_id))];
-        });
-        await new Promise(res => setTimeout(res, 450)); // Jikan rate limit
-      } catch { break; }
-    }
-    setAnimeLoading(false);
   }, []);
 
   useEffect(() => { loadTopLists(); }, [loadTopLists]);
@@ -256,8 +149,7 @@ export default function RatingsPage() {
         const r = await fetch(`${API}/search/titles?query=${encodeURIComponent(query)}&limit=8`);
         const j = await r.json();
         const list: SearchResult[] = j.titles ?? [];
-        setSuggestions(list);
-        setShowSug(list.length > 0);
+        setSuggestions(list); setShowSug(list.length > 0);
       } catch { /* silent */ }
     }, 350);
   }, [query, detail]);
@@ -276,25 +168,20 @@ export default function RatingsPage() {
         const sr = await fetch(`${API}/titles/${id}/seasons`);
         const sj = await sr.json();
         const seas: SeasonData[] = sj.seasons ?? [];
-        setSeasons(seas);
-        setLoadingGrid(true);
-        const epMap: Record<string, EpisodeData[]> = {};
+        setSeasons(seas); setLoadingGrid(true);
+        const epMap: Record<string,EpisodeData[]> = {};
         await Promise.all(seas.map(async (s) => {
           let all: EpisodeData[] = [], token = "";
           do {
-            const url = `${API}/titles/${id}/episodes?season=${s.season}&pageSize=50${token ? `&pageToken=${token}` : ""}`;
+            const url = `${API}/titles/${id}/episodes?season=${s.season}&pageSize=50${token?`&pageToken=${token}`:""}`;
             const ej = await (await fetch(url)).json();
-            all = all.concat(ej.episodes ?? []);
-            token = ej.nextPageToken ?? "";
+            all = all.concat(ej.episodes ?? []); token = ej.nextPageToken ?? "";
           } while (token);
-          epMap[s.season] = all.sort((a, b) => a.episodeNumber - b.episodeNumber);
+          epMap[s.season] = all.sort((a,b) => a.episodeNumber - b.episodeNumber);
         }));
-        setEpisodes(epMap);
-        setLoadingGrid(false);
+        setEpisodes(epMap); setLoadingGrid(false);
       }
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to load.");
-    }
+    } catch(e: unknown) { setError(e instanceof Error ? e.message : "Failed to load."); }
     setLoading(false);
   };
 
@@ -303,12 +190,9 @@ export default function RatingsPage() {
     try {
       const r = await fetch(`${API}/search/titles?query=${encodeURIComponent(title)}&limit=5`);
       const j = await r.json();
-      const first: SearchResult | undefined = j.titles?.[0];
-      if (first) {
-        await selectTitle(first.id, first.primaryTitle);
-      } else {
-        setError("Not found on IMDb."); setLoading(false);
-      }
+      const first: SearchResult|undefined = j.titles?.[0];
+      if (first) { await selectTitle(first.id, first.primaryTitle); }
+      else { setError("Not found on IMDb."); setLoading(false); }
     } catch { setError("Search failed."); setLoading(false); }
   };
 
@@ -330,18 +214,33 @@ export default function RatingsPage() {
     setSuggestions([]); setShowSug(false); setBrowseResults([]);
   };
 
-  const maxEps = seasons.length ? Math.max(...seasons.map(s => (episodes[s.season] ?? []).length)) : 0;
+  const maxEps = seasons.length ? Math.max(...seasons.map(s => (episodes[s.season]??[]).length)) : 0;
   const seasonAvg = seasons.map(s => {
-    const eps = (episodes[s.season] ?? []).filter(e => e.rating?.aggregateRating);
+    const eps = (episodes[s.season]??[]).filter(e => e.rating?.aggregateRating);
     if (!eps.length) return null;
-    return +(eps.reduce((a, e) => a + (e.rating?.aggregateRating ?? 0), 0) / eps.length).toFixed(1);
+    return +(eps.reduce((a,e) => a+(e.rating?.aggregateRating??0), 0)/eps.length).toFixed(1);
   });
   const CELL = 60, ROW_LABEL = 48;
   const isEmptyState = !detail && !loading && browseResults.length === 0 && !browsing;
 
-  const ratingBadge = (rating: number) => (
-    <div style={{ position:"absolute", bottom:6, right:6, background:getRatingColor(rating), color:"#fff", fontSize:11, fontWeight:700, borderRadius:4, padding:"2px 6px" }}>
-      ⭐ {rating}
+  const RatingBadge = ({ r, source="TMDB" }: { r: number; source?: string }) => (
+    <div style={{ position:"absolute", bottom:6, right:6, background:getRatingColor(r), color:"#fff", fontSize:10, fontWeight:700, borderRadius:4, padding:"2px 6px", display:"flex", flexDirection:"column", alignItems:"center", lineHeight:1.2 }}>
+      <span>⭐ {r.toFixed(1)}</span>
+      <span style={{ fontSize:8, opacity:0.8, fontWeight:400 }}>{source}</span>
+    </div>
+  );
+
+  const SkeletonGrid = () => (
+    <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
+      {Array.from({length:12},(_,i) => (
+        <div key={i} style={{ borderRadius:"var(--radius-md)", overflow:"hidden", background:"var(--bg-surface)" }}>
+          <div className="rat-skeleton" style={{ width:"100%", aspectRatio:"2/3" }} />
+          <div style={{ padding:"8px 10px" }}>
+            <div className="rat-skeleton" style={{ height:13, borderRadius:4, marginBottom:5 }} />
+            <div className="rat-skeleton" style={{ height:10, borderRadius:4, width:"55%" }} />
+          </div>
+        </div>
+      ))}
     </div>
   );
 
@@ -351,8 +250,7 @@ export default function RatingsPage() {
 
       {/* Header */}
       <div style={{ padding:"12px 20px", borderBottom:"1px solid var(--border)", flexShrink:0, display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
-        <div style={{ fontSize:15, fontWeight:700, whiteSpace:"nowrap" }}>📊 IMDb Ratings</div>
-
+        <div style={{ fontSize:15, fontWeight:700, whiteSpace:"nowrap" }}>📊 Ratings</div>
         <select value={filterType} onChange={e => setFilterType(e.target.value)}
           style={{ background:"var(--bg-input)", border:"1px solid var(--border)", borderRadius:"var(--radius-sm)", padding:"7px 10px", color:"var(--text-primary)", fontSize:13, cursor:"pointer", fontFamily:"var(--font)" }}>
           <option value="ALL">All Types</option>
@@ -361,23 +259,21 @@ export default function RatingsPage() {
           <option value="TV_MINI_SERIES">Mini-Series</option>
           <option value="TV_MOVIE">TV Movie</option>
         </select>
-
         <div className="rat-search-wrap" style={{ position:"relative", flex:1, minWidth:200, maxWidth:500 }}>
           <span style={{ position:"absolute", left:10, top:"50%", transform:"translateY(-50%)", fontSize:13, color:"var(--text-muted)", pointerEvents:"none" }}>🔍</span>
           <input value={query}
             onChange={e => setQuery(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && doSearch()}
-            onFocus={() => !detail && suggestions.length > 0 && setShowSug(true)}
+            onKeyDown={e => e.key==="Enter" && doSearch()}
+            onFocus={() => !detail && suggestions.length>0 && setShowSug(true)}
             onBlur={() => setTimeout(() => setShowSug(false), 180)}
             placeholder="Search movies, series, anime…"
             style={{ width:"100%", background:"var(--bg-input)", border:"1px solid var(--border)", borderRadius:"var(--radius-sm)", padding:"7px 12px 7px 30px", color:"var(--text-primary)", fontSize:14, fontFamily:"var(--font)", boxSizing:"border-box" }} />
-
-          {!detail && showSug && suggestions.length > 0 && (
+          {!detail && showSug && suggestions.length>0 && (
             <div style={{ position:"absolute", top:"calc(100% + 4px)", left:0, right:0, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", zIndex:300, boxShadow:"var(--shadow-lg)", overflow:"hidden", animation:"rat-fadeIn 0.12s ease" }}>
-              {suggestions.map((s, i) => (
+              {suggestions.map((s,i) => (
                 <div key={s.id} className="rat-sug-row"
                   onMouseDown={() => selectTitle(s.id, s.primaryTitle)}
-                  style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", background:"var(--bg-surface)", borderBottom: i < suggestions.length - 1 ? "1px solid var(--border)" : "none" }}>
+                  style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", background:"var(--bg-surface)", borderBottom:i<suggestions.length-1?"1px solid var(--border)":"none" }}>
                   {s.primaryImage?.url
                     ? <img src={s.primaryImage.url} alt="" style={{ width:26, height:38, objectFit:"cover", borderRadius:4, flexShrink:0 }} />
                     : <div style={{ width:26, height:38, background:"var(--bg-surface2)", borderRadius:4, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11 }}>🎬</div>}
@@ -385,7 +281,7 @@ export default function RatingsPage() {
                     <div style={{ fontSize:13, fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.primaryTitle}</div>
                     <div style={{ fontSize:11, color:"var(--text-muted)", marginTop:1 }}>
                       {s.startYear}{s.endYear?`–${s.endYear}`:""} · {s.type.replace(/_/g," ")}
-                      {s.rating ? <span style={{ color:"var(--text-accent)" }}> · ⭐ {s.rating.aggregateRating}</span> : ""}
+                      {s.rating?<span style={{ color:"var(--text-accent)" }}> · ⭐ {s.rating.aggregateRating}</span>:""}
                     </div>
                   </div>
                 </div>
@@ -393,12 +289,10 @@ export default function RatingsPage() {
             </div>
           )}
         </div>
-
         <button onClick={doSearch} disabled={browsing}
           style={{ background:"var(--accent)", border:"none", borderRadius:"var(--radius-sm)", padding:"7px 20px", color:"var(--text-on-accent)", cursor:"pointer", fontWeight:600, fontFamily:"var(--font)", fontSize:13, opacity:browsing?0.7:1 }}>
-          {browsing ? "Searching…" : "Search"}
+          {browsing?"Searching…":"Search"}
         </button>
-
         {detail && (
           <button onClick={goBack}
             style={{ background:"none", border:"1px solid var(--border)", borderRadius:"var(--radius-sm)", padding:"7px 14px", color:"var(--text-secondary)", cursor:"pointer", fontSize:12, fontFamily:"var(--font)" }}>
@@ -417,13 +311,13 @@ export default function RatingsPage() {
       )}
 
       {/* Browse results */}
-      {!detail && !loading && browseResults.length > 0 && (
+      {!detail && !loading && browseResults.length>0 && (
         <div className="rat-grid" style={{ flex:1, overflow:"auto", padding:"18px 20px" }}>
           <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:14 }}>
             {browseResults.length} results for "<span style={{ color:"var(--text-accent)" }}>{query}</span>"
           </div>
           <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
-            {browseResults.map((r, i) => (
+            {browseResults.map((r,i) => (
               <div key={r.id} className="rat-card"
                 style={{ animationDelay:`${i*0.025}s`, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", overflow:"hidden" }}
                 onClick={() => selectTitle(r.id, r.primaryTitle)}>
@@ -443,58 +337,155 @@ export default function RatingsPage() {
 
       {/* Detail view */}
       {detail && !loading && (
-        <div className="rat-detail" style={{ flex:1, display:"flex", overflow:"hidden" }}>
-          <div style={{ width:250, flexShrink:0, borderRight:"1px solid var(--border)", overflow:"auto", padding:"18px 16px", display:"flex", flexDirection:"column", gap:12 }}>
-            {detail.primaryImage?.url && (
-              <div style={{ position:"relative" }}>
-                <img src={detail.primaryImage.url} alt={detail.primaryTitle}
-                  style={{ width:"100%", borderRadius:"var(--radius-md)", objectFit:"cover", display:"block", boxShadow:"var(--shadow-md)" }} />
+        <div className="rat-detail" style={{ flex:1, overflow:"hidden" }}>
+
+          {/* ── MOVIE / ANIME-MOVIE: cinematic full-width layout ── */}
+          {!IS_SERIES(detail.type) && (
+            <div style={{ display:"flex", height:"100%", overflow:"auto" }}>
+              {/* Poster column */}
+              <div style={{ width:300, flexShrink:0, padding:"28px 24px", display:"flex", flexDirection:"column", gap:14, borderRight:"1px solid var(--border)", background:"var(--bg-surface)" }}>
+                {detail.primaryImage?.url ? (
+                  <div style={{ position:"relative", borderRadius:"var(--radius-md)", overflow:"hidden", boxShadow:"0 8px 32px rgba(0,0,0,0.5)" }}>
+                    <img src={detail.primaryImage.url} alt={detail.primaryTitle}
+                      style={{ width:"100%", display:"block", objectFit:"cover" }} />
+                    {detail.rating && (
+                      <div style={{ position:"absolute", top:10, right:10, background:getRatingColor(detail.rating.aggregateRating), color:"#fff", borderRadius:8, padding:"5px 10px", fontSize:16, fontWeight:900, boxShadow:"0 2px 8px rgba(0,0,0,0.4)" }}>
+                        ⭐ {detail.rating.aggregateRating}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div style={{ width:"100%", aspectRatio:"2/3", background:"var(--bg-surface2)", borderRadius:"var(--radius-md)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:48 }}>🎬</div>
+                )}
                 {detail.rating && (
-                  <div style={{ position:"absolute", top:8, right:8, background:getRatingColor(detail.rating.aggregateRating), color:"#fff", borderRadius:6, padding:"3px 8px", fontSize:14, fontWeight:800 }}>
-                    ⭐ {detail.rating.aggregateRating}
+                  <div style={{ background:"var(--accent-subtle)", border:"1px solid var(--accent-light)", borderRadius:"var(--radius-sm)", padding:"10px 14px", display:"flex", alignItems:"center", gap:10 }}>
+                    <span style={{ fontSize:28, fontWeight:900, color:"var(--text-accent)" }}>{detail.rating.aggregateRating}</span>
+                    <div>
+                      <div style={{ fontSize:11, color:"var(--text-secondary)" }}>/ 10 on IMDb</div>
+                      <div style={{ fontSize:11, color:"var(--text-muted)" }}>{fmt(detail.rating.voteCount)} votes</div>
+                    </div>
+                  </div>
+                )}
+                {detail.metacritic?.score != null && (
+                  <div style={{ background:detail.metacritic.score>=60?"var(--accent-subtle)":"rgba(185,28,28,0.1)", border:`1px solid ${detail.metacritic.score>=60?"var(--success)":"var(--danger)"}`, color:detail.metacritic.score>=60?"var(--text-success)":"var(--text-danger)", borderRadius:"var(--radius-sm)", padding:"8px 12px", fontWeight:700, fontSize:13, textAlign:"center" }}>
+                    🎯 Metacritic: {detail.metacritic.score}/100
                   </div>
                 )}
               </div>
-            )}
-            <div>
-              <div style={{ fontSize:16, fontWeight:700, lineHeight:1.3, marginBottom:4 }}>{detail.primaryTitle}</div>
-              <div style={{ fontSize:11, color:"var(--text-muted)", lineHeight:1.9 }}>
-                {detail.startYear}{detail.endYear?`–${detail.endYear}`:""}
-                {runtime(detail.runtimeSeconds) ? ` · ${runtime(detail.runtimeSeconds)}` : ""}
-                {detail.originCountries?.[0] ? ` · ${detail.originCountries[0].name}` : ""}
-                {" · "}{detail.type.replace(/_/g," ")}
-              </div>
-            </div>
-            {detail.rating && (
-              <div style={{ background:"var(--accent-subtle)", border:"1px solid var(--accent-light)", borderRadius:"var(--radius-sm)", padding:"10px 14px", display:"flex", alignItems:"center", gap:10 }}>
-                <span style={{ fontSize:24, fontWeight:800, color:"var(--text-accent)" }}>{detail.rating.aggregateRating}</span>
-                <span style={{ fontSize:11, color:"var(--text-secondary)", lineHeight:1.6 }}>/ 10<br />{fmt(detail.rating.voteCount)} votes</span>
-              </div>
-            )}
-            {detail.metacritic?.score != null && (
-              <div style={{ background: detail.metacritic.score >= 60 ? "var(--accent-subtle)" : "rgba(185,28,28,0.1)", border:`1px solid ${detail.metacritic.score >= 60 ? "var(--success)" : "var(--danger)"}`, color: detail.metacritic.score >= 60 ? "var(--text-success)" : "var(--text-danger)", borderRadius:"var(--radius-sm)", padding:"6px 12px", fontWeight:700, fontSize:13 }}>
-                🎯 Metacritic: {detail.metacritic.score}
-              </div>
-            )}
-            {detail.genres && detail.genres.length > 0 && (
-              <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
-                {detail.genres.map(g => <span key={g} style={{ background:"var(--bg-surface2)", border:"1px solid var(--border)", borderRadius:20, padding:"2px 8px", fontSize:11, color:"var(--text-secondary)" }}>{g}</span>)}
-              </div>
-            )}
-            {detail.plot && <p style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.7, margin:0 }}>{detail.plot}</p>}
-            <div style={{ fontSize:12, color:"var(--text-muted)", lineHeight:2 }}>
-              {detail.directors?.length ? <div><span style={{ color:"var(--text-primary)", fontWeight:600 }}>Director</span><br />{detail.directors.map(d=>d.displayName).join(", ")}</div> : null}
-              {detail.writers?.length   ? <div style={{ marginTop:6 }}><span style={{ color:"var(--text-primary)", fontWeight:600 }}>Writers</span><br />{detail.writers.slice(0,3).map(w=>w.displayName).join(", ")}</div> : null}
-              {detail.stars?.length     ? <div style={{ marginTop:6 }}><span style={{ color:"var(--text-primary)", fontWeight:600 }}>Stars</span><br />{detail.stars.slice(0,5).map(s=>s.displayName).join(", ")}</div> : null}
-            </div>
-          </div>
 
-          <div style={{ flex:1, overflow:"auto", padding:"18px 24px" }}>
-            {!IS_SERIES(detail.type) && (
-              <div style={{ color:"var(--text-muted)", fontSize:14, marginTop:60, textAlign:"center" }}>Episode grid is only available for TV series.</div>
-            )}
-            {IS_SERIES(detail.type) && (
-              <>
+              {/* Info column */}
+              <div style={{ flex:1, padding:"36px 40px", overflow:"auto", display:"flex", flexDirection:"column", gap:20 }}>
+                {/* Title & meta */}
+                <div>
+                  <div style={{ fontSize:32, fontWeight:900, lineHeight:1.2, marginBottom:8, color:"var(--text-primary)" }}>{detail.primaryTitle}</div>
+                  <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+                    {detail.startYear && <span style={{ background:"var(--bg-surface2)", borderRadius:4, padding:"3px 8px", fontSize:12, color:"var(--text-muted)", fontWeight:600 }}>{detail.startYear}{detail.endYear?`–${detail.endYear}`:""}</span>}
+                    {runtime(detail.runtimeSeconds) && <span style={{ background:"var(--bg-surface2)", borderRadius:4, padding:"3px 8px", fontSize:12, color:"var(--text-muted)", fontWeight:600 }}>⏱ {runtime(detail.runtimeSeconds)}</span>}
+                    {detail.originCountries?.[0] && <span style={{ background:"var(--bg-surface2)", borderRadius:4, padding:"3px 8px", fontSize:12, color:"var(--text-muted)", fontWeight:600 }}>🌍 {detail.originCountries[0].name}</span>}
+                    <span style={{ background:"var(--bg-surface2)", borderRadius:4, padding:"3px 8px", fontSize:12, color:"var(--text-muted)", fontWeight:600 }}>{detail.type.replace(/_/g," ")}</span>
+                  </div>
+                </div>
+
+                {/* Genres */}
+                {detail.genres && detail.genres.length>0 && (
+                  <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                    {detail.genres.map(g => <span key={g} style={{ background:"var(--accent-subtle)", border:"1px solid var(--accent-light)", borderRadius:20, padding:"4px 12px", fontSize:12, color:"var(--text-accent)", fontWeight:500 }}>{g}</span>)}
+                  </div>
+                )}
+
+                {/* Plot */}
+                {detail.plot && (
+                  <div>
+                    <div style={{ fontSize:12, fontWeight:700, color:"var(--text-muted)", textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:8 }}>Plot</div>
+                    <p style={{ fontSize:14, color:"var(--text-secondary)", lineHeight:1.8, margin:0 }}>{detail.plot}</p>
+                  </div>
+                )}
+
+                {/* Cast & crew */}
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:16 }}>
+                  {detail.directors?.length ? (
+                    <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", padding:"12px 16px" }}>
+                      <div style={{ fontSize:11, fontWeight:700, color:"var(--text-muted)", textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:6 }}>Director</div>
+                      {detail.directors.map(d => <div key={d.displayName} style={{ fontSize:13, color:"var(--text-primary)", fontWeight:500 }}>{d.displayName}</div>)}
+                    </div>
+                  ) : null}
+                  {detail.writers?.length ? (
+                    <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", padding:"12px 16px" }}>
+                      <div style={{ fontSize:11, fontWeight:700, color:"var(--text-muted)", textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:6 }}>Writers</div>
+                      {detail.writers.slice(0,3).map(w => <div key={w.displayName} style={{ fontSize:13, color:"var(--text-primary)", fontWeight:500 }}>{w.displayName}</div>)}
+                    </div>
+                  ) : null}
+                  {detail.stars?.length ? (
+                    <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", padding:"12px 16px", gridColumn:"span 2" }}>
+                      <div style={{ fontSize:11, fontWeight:700, color:"var(--text-muted)", textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:8 }}>Stars</div>
+                      <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                        {detail.stars.slice(0,6).map(s => (
+                          <span key={s.displayName} style={{ background:"var(--bg-surface2)", borderRadius:20, padding:"4px 12px", fontSize:12, color:"var(--text-secondary)" }}>{s.displayName}</span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* IMDb link */}
+                <div>
+                  <button onClick={() => window.open(`https://www.imdb.com/title/${detail.id}`,"_blank")}
+                    style={{ background:"var(--accent)", border:"none", borderRadius:"var(--radius-sm)", padding:"9px 20px", color:"var(--text-on-accent)", cursor:"pointer", fontWeight:600, fontSize:13, fontFamily:"var(--font)" }}>
+                    Open on IMDb ↗
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── TV SERIES / ANIME SERIES: sidebar + episode grid ── */}
+          {IS_SERIES(detail.type) && (
+            <div style={{ display:"flex", height:"100%", overflow:"hidden" }}>
+              <div style={{ width:250, flexShrink:0, borderRight:"1px solid var(--border)", overflow:"auto", padding:"18px 16px", display:"flex", flexDirection:"column", gap:12 }}>
+                {detail.primaryImage?.url && (
+                  <div style={{ position:"relative" }}>
+                    <img src={detail.primaryImage.url} alt={detail.primaryTitle}
+                      style={{ width:"100%", borderRadius:"var(--radius-md)", objectFit:"cover", display:"block", boxShadow:"var(--shadow-md)" }} />
+                    {detail.rating && (
+                      <div style={{ position:"absolute", top:8, right:8, background:getRatingColor(detail.rating.aggregateRating), color:"#fff", borderRadius:6, padding:"3px 8px", fontSize:14, fontWeight:800 }}>
+                        ⭐ {detail.rating.aggregateRating}
+                      </div>
+                    )}
+                  </div>
+                )}
+                <div>
+                  <div style={{ fontSize:16, fontWeight:700, lineHeight:1.3, marginBottom:4 }}>{detail.primaryTitle}</div>
+                  <div style={{ fontSize:11, color:"var(--text-muted)", lineHeight:1.9 }}>
+                    {detail.startYear}{detail.endYear?`–${detail.endYear}`:""}
+                    {runtime(detail.runtimeSeconds)?` · ${runtime(detail.runtimeSeconds)}`:""}
+                    {detail.originCountries?.[0]?` · ${detail.originCountries[0].name}`:""}
+                    {" · "}{detail.type.replace(/_/g," ")}
+                  </div>
+                </div>
+                {detail.rating && (
+                  <div style={{ background:"var(--accent-subtle)", border:"1px solid var(--accent-light)", borderRadius:"var(--radius-sm)", padding:"10px 14px", display:"flex", alignItems:"center", gap:10 }}>
+                    <span style={{ fontSize:24, fontWeight:800, color:"var(--text-accent)" }}>{detail.rating.aggregateRating}</span>
+                    <span style={{ fontSize:11, color:"var(--text-secondary)", lineHeight:1.6 }}>/ 10<br />{fmt(detail.rating.voteCount)} votes</span>
+                  </div>
+                )}
+                {detail.metacritic?.score != null && (
+                  <div style={{ background:detail.metacritic.score>=60?"var(--accent-subtle)":"rgba(185,28,28,0.1)", border:`1px solid ${detail.metacritic.score>=60?"var(--success)":"var(--danger)"}`, color:detail.metacritic.score>=60?"var(--text-success)":"var(--text-danger)", borderRadius:"var(--radius-sm)", padding:"6px 12px", fontWeight:700, fontSize:13 }}>
+                    🎯 Metacritic: {detail.metacritic.score}
+                  </div>
+                )}
+                {detail.genres && detail.genres.length>0 && (
+                  <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+                    {detail.genres.map(g => <span key={g} style={{ background:"var(--bg-surface2)", border:"1px solid var(--border)", borderRadius:20, padding:"2px 8px", fontSize:11, color:"var(--text-secondary)" }}>{g}</span>)}
+                  </div>
+                )}
+                {detail.plot && <p style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.7, margin:0 }}>{detail.plot}</p>}
+                <div style={{ fontSize:12, color:"var(--text-muted)", lineHeight:2 }}>
+                  {detail.directors?.length?<div><span style={{ color:"var(--text-primary)", fontWeight:600 }}>Director</span><br />{detail.directors.map(d=>d.displayName).join(", ")}</div>:null}
+                  {detail.writers?.length?<div style={{ marginTop:6 }}><span style={{ color:"var(--text-primary)", fontWeight:600 }}>Writers</span><br />{detail.writers.slice(0,3).map(w=>w.displayName).join(", ")}</div>:null}
+                  {detail.stars?.length?<div style={{ marginTop:6 }}><span style={{ color:"var(--text-primary)", fontWeight:600 }}>Stars</span><br />{detail.stars.slice(0,5).map(s=>s.displayName).join(", ")}</div>:null}
+                </div>
+              </div>
+              <div style={{ flex:1, overflow:"auto", padding:"18px 24px" }}>
                 <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16, flexWrap:"wrap", gap:10 }}>
                   <div style={{ fontSize:14, fontWeight:700 }}>Episode Ratings</div>
                   <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
@@ -506,7 +497,7 @@ export default function RatingsPage() {
                   </div>
                 </div>
                 {loadingGrid && <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>{Array.from({length:20},(_,i)=><div key={i} className="rat-skeleton" style={{ width:54, height:40, borderRadius:8 }} />)}</div>}
-                {seasons.length > 0 && !loadingGrid && (
+                {seasons.length>0 && !loadingGrid && (
                   <div className="rat-grid" style={{ overflowX:"auto" }}>
                     <div style={{ display:"inline-block", minWidth:"max-content" }}>
                       <div style={{ display:"flex", marginBottom:6, paddingLeft:ROW_LABEL }}>
@@ -517,18 +508,18 @@ export default function RatingsPage() {
                           <div style={{ width:ROW_LABEL, fontSize:11, color:"var(--text-muted)", fontWeight:600, flexShrink:0 }}>E{epIdx+1}</div>
                           {seasons.map(s => {
                             const ep = (episodes[s.season]??[])[epIdx];
-                            const rating = ep?.rating?.aggregateRating ?? null;
+                            const rating = ep?.rating?.aggregateRating??null;
                             return (
                               <div key={s.season} style={{ width:CELL, flexShrink:0, display:"flex", justifyContent:"center" }}>
-                                {ep ? (
+                                {ep?(
                                   <div className="rat-ep"
                                     style={{ width:CELL-6, height:40, borderRadius:8, background:getRatingColor(rating), color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700 }}
                                     onMouseEnter={e => setTooltip({ep, x:e.clientX, y:e.clientY})}
-                                    onMouseMove={e  => setTooltip(t => t?{...t,x:e.clientX,y:e.clientY}:null)}
+                                    onMouseMove={e => setTooltip(t => t?{...t,x:e.clientX,y:e.clientY}:null)}
                                     onMouseLeave={() => setTooltip(null)}
                                     onClick={() => window.open(`https://www.imdb.com/title/${ep.id}`,"_blank")}
-                                  >{rating ?? "—"}</div>
-                                ) : <div style={{ width:CELL-6, height:40 }} />}
+                                  >{rating??"—"}</div>
+                                ):<div style={{ width:CELL-6, height:40 }} />}
                               </div>
                             );
                           })}
@@ -538,28 +529,25 @@ export default function RatingsPage() {
                         <div style={{ width:ROW_LABEL, fontSize:10, color:"var(--text-muted)", fontWeight:700, flexShrink:0 }}>AVG.</div>
                         {seasonAvg.map((avg,i) => (
                           <div key={i} style={{ width:CELL, flexShrink:0, display:"flex", justifyContent:"center" }}>
-                            <div style={{ width:CELL-6, height:40, borderRadius:8, background:getRatingColor(avg), color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:800 }}>{avg ?? "—"}</div>
+                            <div style={{ width:CELL-6, height:40, borderRadius:8, background:getRatingColor(avg), color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:800 }}>{avg??"—"}</div>
                           </div>
                         ))}
                       </div>
                     </div>
                   </div>
                 )}
-              </>
-            )}
-          </div>
+              </div>
+            </div>
+          )}
+
         </div>
       )}
 
       {/* Top Lists */}
       {isEmptyState && (
         <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
-          <div style={{ display:"flex", borderBottom:"1px solid var(--border)", flexShrink:0, paddingLeft:20 }}>
-            {([
-              { key:"movies", label:"🎬 Top Movies" },
-              { key:"tv",     label:"📺 Top TV Series" },
-              { key:"anime",  label:"✨ Top Anime" },
-            ] as {key:TopTab;label:string}[]).map(tab => (
+          <div style={{ display:"flex", borderBottom:"1px solid var(--border)", flexShrink:0, paddingLeft:20, alignItems:"center" }}>
+            {([ {key:"movies",label:"🎬 Top Rated Movies"}, {key:"tv",label:"📺 Top Rated Series"}, {key:"anime",label:"✨ Top Rated Animes"} ] as {key:TopTab;label:string}[]).map(tab => (
               <button key={tab.key}
                 className={`rat-tab${activeTab===tab.key?" active":""}`}
                 onClick={() => setActiveTab(tab.key)}
@@ -567,91 +555,71 @@ export default function RatingsPage() {
                 {tab.label}
               </button>
             ))}
-          </div>
-
-          <div style={{ flex:1, overflow:"auto", padding:"18px 20px" }}>
-
-            {/* Skeleton while first batch loads */}
-            {topLoading && topMovies.length === 0 && activeTab !== "anime" && (
-              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
-                {Array.from({length:12},(_,i) => (
-                  <div key={i} style={{ borderRadius:"var(--radius-md)", overflow:"hidden", background:"var(--bg-surface)" }}>
-                    <div className="rat-skeleton" style={{ width:"100%", aspectRatio:"2/3" }} />
-                    <div style={{ padding:"8px 10px" }}>
-                      <div className="rat-skeleton" style={{ height:13, borderRadius:4, marginBottom:5 }} />
-                      <div className="rat-skeleton" style={{ height:10, borderRadius:4, width:"55%" }} />
-                    </div>
-                  </div>
-                ))}
+            {topLoading && (
+              <div style={{ marginLeft:"auto", marginRight:20, display:"flex", alignItems:"center", gap:6, fontSize:11, color:"var(--text-muted)" }}>
+                <div style={{ width:12, height:12, border:"2px solid var(--border)", borderTopColor:"var(--accent)", borderRadius:"50%", animation:"rat-spin 0.75s linear infinite" }} />
+                Loading…
               </div>
             )}
+          </div>
+          <div style={{ flex:1, overflow:"auto", padding:"18px 20px" }}>
 
             {/* Movies */}
-            {activeTab === "movies" && topMovies.length > 0 && (
+            {activeTab==="movies" && (topMovies.length===0 && topLoading ? <SkeletonGrid /> : (
               <>
-                <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:12 }}>
-                  Showing {topMovies.length} / {TOP_MOVIE_IDS.length} · IMDB Top Rated Movies
-                  {topLoading && <span style={{ marginLeft:8, color:"var(--accent)" }}>⏳ loading more…</span>}
-                </div>
+                <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:12 }}>{topMovies.length} Top Rated Movies · TMDB</div>
                 <div className="rat-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
-                  {topMovies.map((r,i) => (
-                    <div key={r.id} className="rat-card"
-                      style={{ animationDelay:`${(i%5)*0.04}s`, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", overflow:"hidden" }}
-                      onClick={() => selectTitle(r.id, r.primaryTitle)}>
+                  {topMovies.map((m,i) => (
+                    <div key={m.id} className="rat-card"
+                      style={{ animationDelay:`${(i%20)*0.03}s`, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", overflow:"hidden" }}
+                      onClick={() => openByTitle(m.title)}>
                       <div style={{ position:"relative" }}>
-                        {r.primaryImage?.url
-                          ? <img src={r.primaryImage.url} alt={r.primaryTitle} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
+                        {m.poster_path
+                          ? <img src={`${IMG_BASE}${m.poster_path}`} alt={m.title} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
                           : <div style={{ width:"100%", aspectRatio:"2/3", background:"var(--bg-surface2)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:32 }}>🎬</div>}
                         <div style={{ position:"absolute", top:6, left:6, background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:10, fontWeight:700, borderRadius:4, padding:"2px 6px" }}>#{i+1}</div>
-                        {r.rating && ratingBadge(r.rating.aggregateRating)}
+                        {m.vote_average>0 && <RatingBadge r={m.vote_average} />}
                       </div>
                       <div style={{ padding:"8px 10px" }}>
-                        <div style={{ fontSize:12, fontWeight:700, marginBottom:2, lineHeight:1.3 }}>{r.primaryTitle}</div>
-                        <div style={{ fontSize:11, color:"var(--text-muted)" }}>{r.startYear}</div>
+                        <div style={{ fontSize:12, fontWeight:700, marginBottom:2, lineHeight:1.3 }}>{m.title}</div>
+                        <div style={{ fontSize:11, color:"var(--text-muted)" }}>{m.release_date?.slice(0,4)}</div>
                       </div>
                     </div>
                   ))}
                 </div>
               </>
-            )}
+            ))}
 
             {/* TV */}
-            {activeTab === "tv" && topTv.length > 0 && (
+            {activeTab==="tv" && (topTv.length===0 && topLoading ? <SkeletonGrid /> : (
               <>
-                <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:12 }}>
-                  Showing {topTv.length} / {TOP_TV_IDS.length} · IMDB Top Rated TV Series
-                  {topLoading && <span style={{ marginLeft:8, color:"var(--accent)" }}>⏳ loading more…</span>}
-                </div>
+                <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:12 }}>{topTv.length} Top Rated TV Series · TMDB</div>
                 <div className="rat-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
-                  {topTv.map((r,i) => (
-                    <div key={r.id} className="rat-card"
-                      style={{ animationDelay:`${(i%5)*0.04}s`, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", overflow:"hidden" }}
-                      onClick={() => selectTitle(r.id, r.primaryTitle)}>
+                  {topTv.map((s,i) => (
+                    <div key={s.id} className="rat-card"
+                      style={{ animationDelay:`${(i%20)*0.03}s`, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", overflow:"hidden" }}
+                      onClick={() => openByTitle(s.name)}>
                       <div style={{ position:"relative" }}>
-                        {r.primaryImage?.url
-                          ? <img src={r.primaryImage.url} alt={r.primaryTitle} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
+                        {s.poster_path
+                          ? <img src={`${IMG_BASE}${s.poster_path}`} alt={s.name} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
                           : <div style={{ width:"100%", aspectRatio:"2/3", background:"var(--bg-surface2)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:32 }}>📺</div>}
                         <div style={{ position:"absolute", top:6, left:6, background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:10, fontWeight:700, borderRadius:4, padding:"2px 6px" }}>#{i+1}</div>
-                        {r.rating && ratingBadge(r.rating.aggregateRating)}
+                        {s.vote_average>0 && <RatingBadge r={s.vote_average} />}
                       </div>
                       <div style={{ padding:"8px 10px" }}>
-                        <div style={{ fontSize:12, fontWeight:700, marginBottom:2, lineHeight:1.3 }}>{r.primaryTitle}</div>
-                        <div style={{ fontSize:11, color:"var(--text-muted)" }}>{r.startYear}{r.endYear?`–${r.endYear}`:""}</div>
+                        <div style={{ fontSize:12, fontWeight:700, marginBottom:2, lineHeight:1.3 }}>{s.name}</div>
+                        <div style={{ fontSize:11, color:"var(--text-muted)" }}>{s.first_air_date?.slice(0,4)}</div>
                       </div>
                     </div>
                   ))}
                 </div>
               </>
-            )}
+            ))}
 
-            {/* Anime — MAL Top 250 via Jikan, loads progressively */}
-            {activeTab === "anime" && (
+            {/* Anime */}
+            {activeTab==="anime" && (topAnime.length===0 && topLoading ? <SkeletonGrid /> : (
               <>
-                <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:12 }}>
-                  {topAnime.length > 0
-                    ? <>Showing {topAnime.length} · MyAnimeList Top Ranked{animeLoading && <span style={{ marginLeft:8, color:"var(--accent)" }}>⏳ loading more…</span>}</>
-                    : <span style={{ color:"var(--accent)" }}>⏳ Loading MyAnimeList top 250 anime…</span>}
-                </div>
+                <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:12 }}>{topAnime.length} Top Ranked Anime · MyAnimeList</div>
                 <div className="rat-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
                   {topAnime.map((a,i) => (
                     <div key={a.mal_id} className="rat-card"
@@ -660,7 +628,7 @@ export default function RatingsPage() {
                       <div style={{ position:"relative" }}>
                         <img src={a.images.jpg.large_image_url} alt={a.title} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
                         <div style={{ position:"absolute", top:6, left:6, background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:10, fontWeight:700, borderRadius:4, padding:"2px 6px" }}>#{i+1}</div>
-                        {a.score && ratingBadge(a.score)}
+                        {a.score>0 && <RatingBadge r={a.score} />}
                       </div>
                       <div style={{ padding:"8px 10px" }}>
                         <div style={{ fontSize:12, fontWeight:700, marginBottom:2, lineHeight:1.3 }}>{a.title}</div>
@@ -670,7 +638,8 @@ export default function RatingsPage() {
                   ))}
                 </div>
               </>
-            )}
+            ))}
+
           </div>
         </div>
       )}
@@ -679,7 +648,7 @@ export default function RatingsPage() {
       {tooltip && (
         <div style={{ position:"fixed", top:tooltip.y-100, left:tooltip.x+14, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", padding:"9px 13px", fontSize:12, color:"var(--text-primary)", pointerEvents:"none", zIndex:999, maxWidth:270, boxShadow:"var(--shadow-lg)", animation:"rat-fadeIn 0.1s ease" }}>
           <div style={{ fontWeight:700, marginBottom:2 }}>S{tooltip.ep.season} E{tooltip.ep.episodeNumber} — {tooltip.ep.title}</div>
-          <div style={{ color:"var(--text-accent)", fontWeight:600 }}>⭐ {tooltip.ep.rating?.aggregateRating ?? "No rating"}{tooltip.ep.rating?.voteCount ? ` · ${fmt(tooltip.ep.rating.voteCount)} votes` : ""}</div>
+          <div style={{ color:"var(--text-accent)", fontWeight:600 }}>⭐ {tooltip.ep.rating?.aggregateRating??"No rating"}{tooltip.ep.rating?.voteCount?` · ${fmt(tooltip.ep.rating.voteCount)} votes`:""}</div>
           {tooltip.ep.plot && <div style={{ marginTop:4, color:"var(--text-muted)", fontSize:11, lineHeight:1.55 }}>{tooltip.ep.plot.slice(0,120)}{tooltip.ep.plot.length>120?"…":""}</div>}
           <div style={{ marginTop:4, fontSize:10, color:"var(--text-accent)", opacity:0.65 }}>Click to open on IMDb ↗</div>
         </div>
