@@ -1395,7 +1395,20 @@ function AnimeDetail({
             <div>
               <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>Audio</div>
               <div className="anime-option-grid compact">
-                {AUDIO_BUTTONS.filter((option) => (option.id !== "hi" || hasHindiFallback) && (option.id !== "en" || hasDub)).map((option) => (
+                {AUDIO_BUTTONS.filter((option) => (option.id !== "hi" || hasHindiFallback) && (option.id !== "en" || hasDub || dubEpisodeCount === null)).map((option) => (
+                  option.id === "en" && dubEpisodeCount === null ? (
+                    // Skeleton shimmer — dub availability is still loading
+                    <button
+                      key={option.id}
+                      className="anime-option-btn compact"
+                      disabled
+                      type="button"
+                      style={{ cursor: "default", opacity: 0.7 }}
+                    >
+                      <strong className="pulse" style={{ display: "inline-block", background: "var(--border)", borderRadius: 4, color: "transparent", minWidth: 28, lineHeight: 1.6 }}>Dub</strong>
+                      <span className="pulse" style={{ display: "inline-block", background: "var(--border)", borderRadius: 3, color: "transparent", minWidth: 72, lineHeight: 1.6 }}>Checking…</span>
+                    </button>
+                  ) : (
                   <button
                     key={option.id}
                     className={`anime-option-btn compact${audio === option.id ? " active" : ""}`}
@@ -1405,6 +1418,7 @@ function AnimeDetail({
                     <strong>{option.label}</strong>
                     <span>{option.help}</span>
                   </button>
+                  )
                 ))}
               </div>
             </div>

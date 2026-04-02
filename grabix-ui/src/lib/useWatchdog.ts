@@ -4,9 +4,13 @@
  *
  * States:
  *  idle         → backend is up, nothing to show
- *  reconnecting → /health/ping is failing, banner pulses amber
+ *  reconnecting → /health/ping failing 3× in a row, banner pulses amber
  *  reconnected  → backend came back after being down, banner shows green for 3 s then hides
  *  failed       → backend stayed down for >30 s, banner shows red permanently
+ *
+ * FIX: Requires 3 consecutive failures (not 1) before showing the banner,
+ *      and uses a 5s timeout instead of 2.5s to avoid false alerts during
+ *      brief SQLite lock or heavy API calls.
  */
 import { useEffect, useRef, useState } from "react";
 import { BACKEND_API } from "./api";
@@ -18,7 +22,9 @@ export interface WatchdogState {
   isBannerVisible: boolean;
 }
 
-const POLL_MS = 3_000;
+const POLL_MS = 4_000;               // poll every 4s (was 3s)
+const PING_TIMEOUT_MS = 5_000;       // wait up to 5s per ping (was 2.5s)
+const CONSECUTIVE_FAILS_NEEDED = 3;  // require 3 failures in a row before alerting
 const RECONNECT_TIMEOUT_MS = 30_000;
 const BANNER_LINGER_MS = 3_000;
 
@@ -27,6 +33,7 @@ export function useWatchdog(): WatchdogState {
   const [isBannerVisible, setIsBannerVisible] = useState(false);
 
   const wasDown = useRef(false);
+  const consecutiveFails = useRef(0);
   const reconnectStart = useRef<number | null>(null);
   const lingerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -36,18 +43,18 @@ export function useWatchdog(): WatchdogState {
     const probe = async () => {
       if (cancelled) return;
       try {
-        // FIX: was /ping — the real backend endpoint is /health/ping
         const res = await fetch(`${BACKEND_API}/health/ping`, {
           method: "GET",
-          signal: AbortSignal.timeout(2500),
+          signal: AbortSignal.timeout(PING_TIMEOUT_MS),
           cache: "no-store",
         });
 
         if (!res.ok) throw new Error("non-ok");
 
-        // Backend is up
+        // Success — reset failure counter
+        consecutiveFails.current = 0;
+
         if (wasDown.current) {
-          // Just recovered from a crash
           wasDown.current = false;
           reconnectStart.current = null;
           if (!cancelled) {
@@ -62,12 +69,17 @@ export function useWatchdog(): WatchdogState {
             }, BANNER_LINGER_MS);
           }
         }
-        // else: all good, stay idle — no state change needed
       } catch {
         if (cancelled) return;
 
+        consecutiveFails.current += 1;
+
+        // Only react after CONSECUTIVE_FAILS_NEEDED failures in a row
+        if (consecutiveFails.current < CONSECUTIVE_FAILS_NEEDED) {
+          return; // transient hiccup — ignore
+        }
+
         if (!wasDown.current) {
-          // First failure — start reconnecting
           wasDown.current = true;
           reconnectStart.current = Date.now();
           setStatus("reconnecting");
@@ -76,19 +88,15 @@ export function useWatchdog(): WatchdogState {
           reconnectStart.current !== null &&
           Date.now() - reconnectStart.current > RECONNECT_TIMEOUT_MS
         ) {
-          // Timed out — backend restart failed
           setStatus("failed");
           setIsBannerVisible(true);
         }
-        // else: still reconnecting, keep banner as-is
       }
     };
 
-    // Start polling after a short delay (let the app fully mount first)
     const startTimer = setTimeout(() => {
       void probe();
       const interval = setInterval(() => void probe(), POLL_MS);
-      // Store interval id so cleanup can clear it
       (startTimer as unknown as { _interval: ReturnType<typeof setInterval> })._interval = interval;
     }, 2000);
 

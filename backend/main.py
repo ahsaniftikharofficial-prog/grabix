@@ -1135,6 +1135,28 @@ def _fallback_embed_sources(tmdb_id: int | None, season: int, episode: int) -> l
     return [{"provider": provider, "url": url} for provider, url in providers]
 
 
+def _get_cached_anime_resolution(payload) -> dict | None:
+    key = f"{payload.episodeId}:{payload.audio}:{payload.server}"
+    cached = anime_resolve_cache.get(key)
+    if not cached:
+        return None
+    expires_at, data = cached
+    if expires_at <= time.time():
+        anime_resolve_cache.pop(key, None)
+        return None
+    return data
+
+
+def _set_cached_anime_resolution(payload, data: dict) -> None:
+    key = f"{payload.episodeId}:{payload.audio}:{payload.server}"
+    anime_resolve_cache[key] = (time.time() + ANIME_RESOLVE_CACHE_TTL_SECONDS, data)
+
+
+def _is_internal_managed_file(path) -> bool:
+    name = getattr(path, "name", str(path))
+    return name.endswith((".db", ".json", ".log")) or name.startswith(".")
+
+
 def _resolve_fallback_provider(tmdb_id: int | None, season: int, episode: int, tried: list[dict]) -> dict | None:
     for candidate in _fallback_embed_sources(tmdb_id, season, episode):
         try:
@@ -1201,7 +1223,8 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
             }
         )
 
-    fallback_result = _resolve_fallback_provider(
+    fallback_result = await asyncio.to_thread(
+        _resolve_fallback_provider,
         payload.tmdbId,
         1,
         max(1, payload.episodeNumber),
@@ -5542,16 +5565,14 @@ async def runtime_health_capabilities():
 
 @app.get("/health/ping")
 async def runtime_health_ping():
-    database = _database_health()
-    downloads_health = _downloads_health()
-    core_ready = True  # backend is responding — DB/downloads checked separately via /health/capabilities
+    # Ultra-lightweight — intentionally does NO blocking DB or filesystem work.
+    # Heavy checks (DB, downloads folder) are available at /health/capabilities.
+    # Keeping this instant prevents false "Backend crashed" watchdog alerts.
     return {
         "ok": True,
-        "core_ready": core_ready,
+        "core_ready": True,
         "services": {
             "backend": _service_payload("backend", "online", "Backend is responding.", False),
-            "database": database,
-            "downloads": downloads_health,
         },
     }
 
