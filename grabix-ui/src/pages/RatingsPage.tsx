@@ -3,20 +3,32 @@ import { useState, useRef, useEffect, useCallback } from "react";
 const API    = "https://api.imdbapi.dev";
 const JIKAN  = "https://api.jikan.moe/v4";
 
-// Top IMDB IDs – fetched directly from imdbapi.dev (same API used everywhere else)
+// ── Real IMDB Top 50 Movies (by rating) ───────────────────────────────────
 const TOP_MOVIE_IDS = [
   "tt0111161","tt0068646","tt0071562","tt0468569","tt0050083",
   "tt0108052","tt0167260","tt0110912","tt0120737","tt0060196",
   "tt0137523","tt1375666","tt0109830","tt0167261","tt0080684",
   "tt0133093","tt0099685","tt0073486","tt0047478","tt0114369",
   "tt6751668","tt0317248","tt0102926","tt0038650","tt0245429",
+  "tt0076759","tt0120689","tt0816692","tt0054215","tt0021749",
+  "tt0034583","tt0253474","tt1675434","tt0047396","tt0407887",
+  "tt0118799","tt0103064","tt0088763","tt0082971","tt0172495",
+  "tt0110357","tt0114814","tt4633694","tt0482571","tt1853728",
+  "tt0209144","tt0078788","tt0120586","tt2582802","tt0364569",
 ];
+
+// ── Real IMDB Top 50 TV Series (by rating) ────────────────────────────────
 const TOP_TV_IDS = [
-  "tt0944947","tt0903747","tt0795176","tt0773262","tt1475582",
-  "tt2861424","tt0306414","tt4574334","tt2442560","tt0141842",
-  "tt7366338","tt2802850","tt0096697","tt1190634","tt3032476",
-  "tt1844624","tt0386676","tt1520211","tt1831164","tt0460649",
-  "tt4158110","tt5071412","tt0185906","tt0417373","tt0367279",
+  "tt0903747","tt0185906","tt7366338","tt0306414","tt0141842",
+  "tt3032476","tt5753856","tt4158110","tt2802850","tt1475582",
+  "tt4574334","tt2442560","tt0944947","tt2297757","tt3581920",
+  "tt5071412","tt1190634","tt0108778","tt0096697","tt0386676",
+  "tt4786824","tt2707408","tt1831384","tt0072508","tt0348914",
+  "tt1837492","tt2467372","tt8111088","tt0411008","tt0417373",
+  "tt0773262","tt2861424","tt1844624","tt1520211","tt0460649",
+  "tt1615919","tt3498820","tt0795176","tt4270492","tt6468322",
+  "tt1399664","tt9126600","tt2372162","tt3107288","tt3514324",
+  "tt1442449","tt0367279","tt0383126","tt1831164","tt0455275",
 ];
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -63,10 +75,10 @@ interface AnimeEntry {
 // ── Helpers ────────────────────────────────────────────────────────────────
 function getRatingColor(r: number | null): string {
   if (!r) return "var(--bg-surface2)";
-  if (r >= 9.5) return "#1d4ed8";
+  if (r >= 9.0) return "#1d4ed8";
   if (r >= 8.5) return "#15803d";
   if (r >= 8.0) return "#16a34a";
-  if (r >= 7.0) return "#b45309";
+  if (r >= 7.0) return "#ca8a04";
   if (r >= 6.0) return "#c2410c";
   if (r >= 5.0) return "#b91c1c";
   return "#6d28d9";
@@ -75,7 +87,7 @@ const LEGEND = [
   { label: "Absolute Cinema", color: "#1d4ed8" },
   { label: "Awesome",         color: "#15803d" },
   { label: "Great",           color: "#16a34a" },
-  { label: "Good",            color: "#b45309" },
+  { label: "Good",            color: "#ca8a04" },
   { label: "Regular",         color: "#c2410c" },
   { label: "Bad",             color: "#b91c1c" },
   { label: "Garbage",         color: "#6d28d9" },
@@ -164,41 +176,77 @@ export default function RatingsPage() {
   const [browseResults, setBrowseResults] = useState<SearchResult[]>([]);
   const [browsing, setBrowsing]       = useState(false);
 
-  const [activeTab, setActiveTab] = useState<TopTab>("movies");
-  const [topMovies, setTopMovies] = useState<TitleDetail[]>([]);
-  const [topTv, setTopTv]         = useState<TitleDetail[]>([]);
-  const [topAnime, setTopAnime]   = useState<AnimeEntry[]>([]);
-  const [topLoading, setTopLoading] = useState(false);
+  const [activeTab, setActiveTab]     = useState<TopTab>("movies");
+  const [topMovies, setTopMovies]     = useState<TitleDetail[]>([]);
+  const [topTv, setTopTv]             = useState<TitleDetail[]>([]);
+  const [topAnime, setTopAnime]       = useState<AnimeEntry[]>([]);
+  const [topLoading, setTopLoading]   = useState(false);
+  const [animeLoading, setAnimeLoading] = useState(false);
 
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Batch-fetch IMDB title details
-  const fetchImdbBatch = async (ids: string[]): Promise<TitleDetail[]> => {
-    const results = await Promise.allSettled(
-      ids.map(id => fetch(`${API}/titles/${id}`).then(r => r.ok ? r.json() : null))
-    );
-    return results
-      .filter(r => r.status === "fulfilled" && r.value)
-      .map(r => (r as PromiseFulfilledResult<TitleDetail>).value)
-      .sort((a, b) => (b.rating?.aggregateRating ?? 0) - (a.rating?.aggregateRating ?? 0));
+  // ── Fetch IDs in batches of 5, update UI after each batch ─────────────
+  const fetchImdbBatched = async (
+    ids: string[],
+    onUpdate: (items: TitleDetail[]) => void
+  ): Promise<void> => {
+    const all: TitleDetail[] = [];
+    const BATCH = 5;
+    for (let i = 0; i < ids.length; i += BATCH) {
+      const batch = ids.slice(i, i + BATCH);
+      const settled = await Promise.allSettled(
+        batch.map(id =>
+          fetch(`${API}/titles/${id}`)
+            .then(r => r.ok ? r.json() : null)
+            .catch(() => null)
+        )
+      );
+      for (const s of settled) {
+        if (s.status === "fulfilled" && s.value) all.push(s.value);
+      }
+      const sorted = [...all].sort(
+        (a, b) => (b.rating?.aggregateRating ?? 0) - (a.rating?.aggregateRating ?? 0)
+      );
+      onUpdate(sorted);
+      await new Promise(res => setTimeout(res, 250));
+    }
   };
 
   const loadTopLists = useCallback(async () => {
     setTopLoading(true);
-    const [movRes, tvRes, animeRes] = await Promise.allSettled([
-      fetchImdbBatch(TOP_MOVIE_IDS),
-      fetchImdbBatch(TOP_TV_IDS),
-      fetch(`${JIKAN}/top/anime?limit=25`).then(r => r.json()),
+    setTopMovies([]);
+    setTopTv([]);
+    setTopAnime([]);
+
+    // Movies + TV load in parallel (each batches internally)
+    await Promise.all([
+      fetchImdbBatched(TOP_MOVIE_IDS, items => setTopMovies(items)),
+      fetchImdbBatched(TOP_TV_IDS,    items => setTopTv(items)),
     ]);
-    if (movRes.status === "fulfilled")   setTopMovies(movRes.value);
-    if (tvRes.status === "fulfilled")    setTopTv(tvRes.value);
-    if (animeRes.status === "fulfilled") setTopAnime(animeRes.value.data ?? []);
     setTopLoading(false);
+
+    // Anime: load 10 pages = 250 from MyAnimeList via Jikan, progressively
+    setAnimeLoading(true);
+    for (let page = 1; page <= 10; page++) {
+      try {
+        const r = await fetch(`${JIKAN}/top/anime?limit=25&page=${page}`);
+        if (!r.ok) break;
+        const j = await r.json();
+        const data: AnimeEntry[] = j.data ?? [];
+        if (!data.length) break;
+        setTopAnime(prev => {
+          const existingIds = new Set(prev.map(a => a.mal_id));
+          return [...prev, ...data.filter(a => !existingIds.has(a.mal_id))];
+        });
+        await new Promise(res => setTimeout(res, 450)); // Jikan rate limit
+      } catch { break; }
+    }
+    setAnimeLoading(false);
   }, []);
 
   useEffect(() => { loadTopLists(); }, [loadTopLists]);
 
-  // Suggestions — disabled when detail is open
+  // Suggestions
   useEffect(() => {
     if (detail) { setSuggestions([]); setShowSug(false); return; }
     if (query.trim().length < 2) { setSuggestions([]); setShowSug(false); return; }
@@ -214,7 +262,6 @@ export default function RatingsPage() {
     }, 350);
   }, [query, detail]);
 
-  // Open title by IMDB ID
   const selectTitle = async (id: string, title?: string) => {
     setShowSug(false); setSuggestions([]);
     if (title) setQuery(title);
@@ -251,7 +298,6 @@ export default function RatingsPage() {
     setLoading(false);
   };
 
-  // Open anime/unknown: search IMDB and auto-open first result
   const openByTitle = async (title: string) => {
     setLoading(true); setDetail(null); setError(""); setBrowseResults([]);
     try {
@@ -293,6 +339,12 @@ export default function RatingsPage() {
   const CELL = 60, ROW_LABEL = 48;
   const isEmptyState = !detail && !loading && browseResults.length === 0 && !browsing;
 
+  const ratingBadge = (rating: number) => (
+    <div style={{ position:"absolute", bottom:6, right:6, background:getRatingColor(rating), color:"#fff", fontSize:11, fontWeight:700, borderRadius:4, padding:"2px 6px" }}>
+      ⭐ {rating}
+    </div>
+  );
+
   return (
     <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", background:"var(--bg-app)", color:"var(--text-primary)", fontFamily:"var(--font)" }}>
       <style>{CSS}</style>
@@ -310,7 +362,6 @@ export default function RatingsPage() {
           <option value="TV_MOVIE">TV Movie</option>
         </select>
 
-        {/* Search input */}
         <div className="rat-search-wrap" style={{ position:"relative", flex:1, minWidth:200, maxWidth:500 }}>
           <span style={{ position:"absolute", left:10, top:"50%", transform:"translateY(-50%)", fontSize:13, color:"var(--text-muted)", pointerEvents:"none" }}>🔍</span>
           <input value={query}
@@ -321,26 +372,12 @@ export default function RatingsPage() {
             placeholder="Search movies, series, anime…"
             style={{ width:"100%", background:"var(--bg-input)", border:"1px solid var(--border)", borderRadius:"var(--radius-sm)", padding:"7px 12px 7px 30px", color:"var(--text-primary)", fontSize:14, fontFamily:"var(--font)", boxSizing:"border-box" }} />
 
-          {/* Suggestions — solid background, no transparency */}
           {!detail && showSug && suggestions.length > 0 && (
-            <div style={{
-              position:"absolute", top:"calc(100% + 4px)", left:0, right:0,
-              background:"var(--bg-surface)",
-              border:"1px solid var(--border)",
-              borderRadius:"var(--radius-md)",
-              zIndex:300,
-              boxShadow:"var(--shadow-lg)",
-              overflow:"hidden",
-              animation:"rat-fadeIn 0.12s ease",
-            }}>
+            <div style={{ position:"absolute", top:"calc(100% + 4px)", left:0, right:0, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", zIndex:300, boxShadow:"var(--shadow-lg)", overflow:"hidden", animation:"rat-fadeIn 0.12s ease" }}>
               {suggestions.map((s, i) => (
                 <div key={s.id} className="rat-sug-row"
                   onMouseDown={() => selectTitle(s.id, s.primaryTitle)}
-                  style={{
-                    display:"flex", alignItems:"center", gap:10, padding:"8px 12px",
-                    background:"var(--bg-surface)",
-                    borderBottom: i < suggestions.length - 1 ? "1px solid var(--border)" : "none",
-                  }}>
+                  style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", background:"var(--bg-surface)", borderBottom: i < suggestions.length - 1 ? "1px solid var(--border)" : "none" }}>
                   {s.primaryImage?.url
                     ? <img src={s.primaryImage.url} alt="" style={{ width:26, height:38, objectFit:"cover", borderRadius:4, flexShrink:0 }} />
                     : <div style={{ width:26, height:38, background:"var(--bg-surface2)", borderRadius:4, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11 }}>🎬</div>}
@@ -404,10 +441,9 @@ export default function RatingsPage() {
         </div>
       )}
 
-      {/* Detail */}
+      {/* Detail view */}
       {detail && !loading && (
         <div className="rat-detail" style={{ flex:1, display:"flex", overflow:"hidden" }}>
-          {/* LEFT */}
           <div style={{ width:250, flexShrink:0, borderRight:"1px solid var(--border)", overflow:"auto", padding:"18px 16px", display:"flex", flexDirection:"column", gap:12 }}>
             {detail.primaryImage?.url && (
               <div style={{ position:"relative" }}>
@@ -453,7 +489,6 @@ export default function RatingsPage() {
             </div>
           </div>
 
-          {/* RIGHT — episode grid */}
           <div style={{ flex:1, overflow:"auto", padding:"18px 24px" }}>
             {!IS_SERIES(detail.type) && (
               <div style={{ color:"var(--text-muted)", fontSize:14, marginTop:60, textAlign:"center" }}>Episode grid is only available for TV series.</div>
@@ -487,7 +522,7 @@ export default function RatingsPage() {
                               <div key={s.season} style={{ width:CELL, flexShrink:0, display:"flex", justifyContent:"center" }}>
                                 {ep ? (
                                   <div className="rat-ep"
-                                    style={{ width:CELL-6, height:40, borderRadius:8, background:getRatingColor(rating), color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, position:"relative" }}
+                                    style={{ width:CELL-6, height:40, borderRadius:8, background:getRatingColor(rating), color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700 }}
                                     onMouseEnter={e => setTooltip({ep, x:e.clientX, y:e.clientY})}
                                     onMouseMove={e  => setTooltip(t => t?{...t,x:e.clientX,y:e.clientY}:null)}
                                     onMouseLeave={() => setTooltip(null)}
@@ -516,7 +551,7 @@ export default function RatingsPage() {
         </div>
       )}
 
-      {/* Empty state — Top Lists */}
+      {/* Top Lists */}
       {isEmptyState && (
         <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
           <div style={{ display:"flex", borderBottom:"1px solid var(--border)", flexShrink:0, paddingLeft:20 }}>
@@ -535,7 +570,9 @@ export default function RatingsPage() {
           </div>
 
           <div style={{ flex:1, overflow:"auto", padding:"18px 20px" }}>
-            {topLoading && (
+
+            {/* Skeleton while first batch loads */}
+            {topLoading && topMovies.length === 0 && activeTab !== "anime" && (
               <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
                 {Array.from({length:12},(_,i) => (
                   <div key={i} style={{ borderRadius:"var(--radius-md)", overflow:"hidden", background:"var(--bg-surface)" }}>
@@ -549,71 +586,90 @@ export default function RatingsPage() {
               </div>
             )}
 
-            {/* Movies tab */}
-            {!topLoading && activeTab === "movies" && (
-              <div className="rat-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
-                {topMovies.map((r,i) => (
-                  <div key={r.id} className="rat-card"
-                    style={{ animationDelay:`${i*0.02}s`, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", overflow:"hidden" }}
-                    onClick={() => selectTitle(r.id, r.primaryTitle)}>
-                    <div style={{ position:"relative" }}>
-                      {r.primaryImage?.url
-                        ? <img src={r.primaryImage.url} alt={r.primaryTitle} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
-                        : <div style={{ width:"100%", aspectRatio:"2/3", background:"var(--bg-surface2)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:32 }}>🎬</div>}
-                      <div style={{ position:"absolute", top:6, left:6, background:"rgba(0,0,0,0.72)", color:"#fff", fontSize:10, fontWeight:700, borderRadius:4, padding:"2px 5px" }}>#{i+1}</div>
+            {/* Movies */}
+            {activeTab === "movies" && topMovies.length > 0 && (
+              <>
+                <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:12 }}>
+                  Showing {topMovies.length} / {TOP_MOVIE_IDS.length} · IMDB Top Rated Movies
+                  {topLoading && <span style={{ marginLeft:8, color:"var(--accent)" }}>⏳ loading more…</span>}
+                </div>
+                <div className="rat-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
+                  {topMovies.map((r,i) => (
+                    <div key={r.id} className="rat-card"
+                      style={{ animationDelay:`${(i%5)*0.04}s`, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", overflow:"hidden" }}
+                      onClick={() => selectTitle(r.id, r.primaryTitle)}>
+                      <div style={{ position:"relative" }}>
+                        {r.primaryImage?.url
+                          ? <img src={r.primaryImage.url} alt={r.primaryTitle} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
+                          : <div style={{ width:"100%", aspectRatio:"2/3", background:"var(--bg-surface2)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:32 }}>🎬</div>}
+                        <div style={{ position:"absolute", top:6, left:6, background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:10, fontWeight:700, borderRadius:4, padding:"2px 6px" }}>#{i+1}</div>
+                        {r.rating && ratingBadge(r.rating.aggregateRating)}
+                      </div>
+                      <div style={{ padding:"8px 10px" }}>
+                        <div style={{ fontSize:12, fontWeight:700, marginBottom:2, lineHeight:1.3 }}>{r.primaryTitle}</div>
+                        <div style={{ fontSize:11, color:"var(--text-muted)" }}>{r.startYear}</div>
+                      </div>
                     </div>
-                    <div style={{ padding:"8px 10px" }}>
-                      <div style={{ fontSize:12, fontWeight:700, marginBottom:2, lineHeight:1.3 }}>{r.primaryTitle}</div>
-                      <div style={{ fontSize:11, color:"var(--text-muted)" }}>{r.startYear}</div>
-                      {r.rating && <div style={{ fontSize:11, color:"var(--text-accent)", marginTop:3, fontWeight:600 }}>⭐ {r.rating.aggregateRating}</div>}
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              </>
             )}
 
-            {/* TV tab */}
-            {!topLoading && activeTab === "tv" && (
-              <div className="rat-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
-                {topTv.map((r,i) => (
-                  <div key={r.id} className="rat-card"
-                    style={{ animationDelay:`${i*0.02}s`, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", overflow:"hidden" }}
-                    onClick={() => selectTitle(r.id, r.primaryTitle)}>
-                    <div style={{ position:"relative" }}>
-                      {r.primaryImage?.url
-                        ? <img src={r.primaryImage.url} alt={r.primaryTitle} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
-                        : <div style={{ width:"100%", aspectRatio:"2/3", background:"var(--bg-surface2)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:32 }}>📺</div>}
-                      <div style={{ position:"absolute", top:6, left:6, background:"rgba(0,0,0,0.72)", color:"#fff", fontSize:10, fontWeight:700, borderRadius:4, padding:"2px 5px" }}>#{i+1}</div>
+            {/* TV */}
+            {activeTab === "tv" && topTv.length > 0 && (
+              <>
+                <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:12 }}>
+                  Showing {topTv.length} / {TOP_TV_IDS.length} · IMDB Top Rated TV Series
+                  {topLoading && <span style={{ marginLeft:8, color:"var(--accent)" }}>⏳ loading more…</span>}
+                </div>
+                <div className="rat-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
+                  {topTv.map((r,i) => (
+                    <div key={r.id} className="rat-card"
+                      style={{ animationDelay:`${(i%5)*0.04}s`, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", overflow:"hidden" }}
+                      onClick={() => selectTitle(r.id, r.primaryTitle)}>
+                      <div style={{ position:"relative" }}>
+                        {r.primaryImage?.url
+                          ? <img src={r.primaryImage.url} alt={r.primaryTitle} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
+                          : <div style={{ width:"100%", aspectRatio:"2/3", background:"var(--bg-surface2)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:32 }}>📺</div>}
+                        <div style={{ position:"absolute", top:6, left:6, background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:10, fontWeight:700, borderRadius:4, padding:"2px 6px" }}>#{i+1}</div>
+                        {r.rating && ratingBadge(r.rating.aggregateRating)}
+                      </div>
+                      <div style={{ padding:"8px 10px" }}>
+                        <div style={{ fontSize:12, fontWeight:700, marginBottom:2, lineHeight:1.3 }}>{r.primaryTitle}</div>
+                        <div style={{ fontSize:11, color:"var(--text-muted)" }}>{r.startYear}{r.endYear?`–${r.endYear}`:""}</div>
+                      </div>
                     </div>
-                    <div style={{ padding:"8px 10px" }}>
-                      <div style={{ fontSize:12, fontWeight:700, marginBottom:2, lineHeight:1.3 }}>{r.primaryTitle}</div>
-                      <div style={{ fontSize:11, color:"var(--text-muted)" }}>{r.startYear}{r.endYear?`–${r.endYear}`:""}</div>
-                      {r.rating && <div style={{ fontSize:11, color:"var(--text-accent)", marginTop:3, fontWeight:600 }}>⭐ {r.rating.aggregateRating}</div>}
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              </>
             )}
 
-            {/* Anime tab */}
-            {!topLoading && activeTab === "anime" && (
-              <div className="rat-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
-                {topAnime.map((a,i) => (
-                  <div key={a.mal_id} className="rat-card"
-                    style={{ animationDelay:`${i*0.02}s`, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", overflow:"hidden" }}
-                    onClick={() => openByTitle(a.title)}>
-                    <div style={{ position:"relative" }}>
-                      <img src={a.images.jpg.large_image_url} alt={a.title} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
-                      <div style={{ position:"absolute", top:6, left:6, background:"rgba(0,0,0,0.72)", color:"#fff", fontSize:10, fontWeight:700, borderRadius:4, padding:"2px 5px" }}>#{i+1}</div>
+            {/* Anime — MAL Top 250 via Jikan, loads progressively */}
+            {activeTab === "anime" && (
+              <>
+                <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:12 }}>
+                  {topAnime.length > 0
+                    ? <>Showing {topAnime.length} · MyAnimeList Top Ranked{animeLoading && <span style={{ marginLeft:8, color:"var(--accent)" }}>⏳ loading more…</span>}</>
+                    : <span style={{ color:"var(--accent)" }}>⏳ Loading MyAnimeList top 250 anime…</span>}
+                </div>
+                <div className="rat-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
+                  {topAnime.map((a,i) => (
+                    <div key={a.mal_id} className="rat-card"
+                      style={{ animationDelay:`${(i%25)*0.02}s`, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", overflow:"hidden" }}
+                      onClick={() => openByTitle(a.title)}>
+                      <div style={{ position:"relative" }}>
+                        <img src={a.images.jpg.large_image_url} alt={a.title} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
+                        <div style={{ position:"absolute", top:6, left:6, background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:10, fontWeight:700, borderRadius:4, padding:"2px 6px" }}>#{i+1}</div>
+                        {a.score && ratingBadge(a.score)}
+                      </div>
+                      <div style={{ padding:"8px 10px" }}>
+                        <div style={{ fontSize:12, fontWeight:700, marginBottom:2, lineHeight:1.3 }}>{a.title}</div>
+                        <div style={{ fontSize:11, color:"var(--text-muted)" }}>{a.year||""}{a.episodes?` · ${a.episodes} ep`:""}</div>
+                      </div>
                     </div>
-                    <div style={{ padding:"8px 10px" }}>
-                      <div style={{ fontSize:12, fontWeight:700, marginBottom:2, lineHeight:1.3 }}>{a.title}</div>
-                      <div style={{ fontSize:11, color:"var(--text-muted)" }}>{a.year||""}{a.episodes?` · ${a.episodes} ep`:""}</div>
-                      {a.score && <div style={{ fontSize:11, color:"var(--text-accent)", marginTop:3, fontWeight:600 }}>⭐ {a.score}</div>}
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              </>
             )}
           </div>
         </div>
