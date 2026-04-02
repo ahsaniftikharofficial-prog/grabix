@@ -247,13 +247,6 @@ async function resolveTmdbEpisodeNumber(tmdbId: number | null, episodeNumber: nu
   return { season: 1, episode: episodeNumber };
 }
 
-// Extract season number from anime title (e.g. "Season 3" -> 3, default 1)
-function extractAnimeSeason(title: string, altTitle?: string): number {
-  const combined = `${title} ${altTitle ?? ""}`;
-  const m = combined.match(/\bseason\s*(\d+)\b/i) || combined.match(/\b(\d+)(?:st|nd|rd|th)\s+season\b/i);
-  return m ? parseInt(m[1]) : 1;
-}
-
 export default function AnimePage() {
   const { adultContentBlocked } = useContentFilter();
   const [tab, setTab] = useState<Tab>("trending");
@@ -701,37 +694,27 @@ function AnimeDetail({
       setCandidateAnimes(nextCandidates);
 
       const titleCandidates = expandAnimeTitles(anime.title, anime.alt_title).slice(0, 4);
-      const resolvedTmdbId = tmdbResult.status === "fulfilled" ? tmdbResult.value : null;
-      // Hindi check: extract season from title, search with EXACT title only (avoid finding wrong seasons)
-      void (async () => {
-        try {
-          const checkSeason = extractAnimeSeason(anime.title, anime.alt_title);
-
-          // Only search with exact title — don't use simplified variants that match other seasons
-          const result = await searchMovieBox({
-            query: anime.title,
+      void Promise.allSettled(
+        titleCandidates.map((candidateTitle) =>
+          searchMovieBox({
+            query: candidateTitle,
             page: 1,
-            perPage: 8,
+            perPage: 6,
             mediaType: "anime",
             animeOnly: true,
             preferHindi: true,
             sortBy: "search",
-          });
-
-          const available = result.items.some((item) => {
-            if (!item.is_hindi) return false;
-            // If available_seasons provided, must include checkSeason
-            if (item.available_seasons && item.available_seasons.length > 0) {
-              return item.available_seasons.includes(checkSeason);
-            }
-            // No season data: only trust for season 1
-            return checkSeason === 1;
-          });
-          if (!cancelled) setHasHindiFallback(available);
-        } catch {
-          if (!cancelled) setHasHindiFallback(false);
-        }
-      })();
+          })
+        )
+      ).then((movieBoxResults) => {
+        if (cancelled) return;
+        const available = movieBoxResults.some(
+          (result) =>
+            result.status === "fulfilled" &&
+            result.value.items.some((item) => Boolean(item.is_hindi))
+        );
+        setHasHindiFallback(available);
+      });
 
       if (!consumetHealthy) {
         setResolvedAnime(null);
@@ -750,29 +733,25 @@ function AnimeDetail({
       }
 
       void (async () => {
-        // Fetch all candidates in parallel for speed
-        const candidateResults = await Promise.allSettled(
-          nextCandidates.map(async (candidate) => {
+        for (const candidate of nextCandidates) {
+          try {
             const detail = await fetchConsumetDomainInfo("anime", candidate.id, candidate.provider);
             const nextEpisodes = detail.item.episodes ?? await fetchConsumetAnimeEpisodes(candidate.id, candidate.provider);
-            return { candidate, detail, nextEpisodes };
-          })
-        );
-        if (cancelled) return;
-        for (const result of candidateResults) {
-          if (result.status !== "fulfilled") continue;
-          const { candidate, detail, nextEpisodes } = result.value;
-          episodeCacheRef.current = {
-            ...episodeCacheRef.current,
-            [`${candidate.provider}-${candidate.id}`]: nextEpisodes,
-          };
-          if (nextEpisodes.length > 0) {
-            setResolvedAnime({ ...candidate, ...detail.item, provider: candidate.provider, id: candidate.id });
-            setDubEpisodeCount(typeof detail.item.dub_episode_count === "number" ? detail.item.dub_episode_count : (detail.item.languages ?? []).some((l: string) => l === "en" || l === "dub") ? Infinity : 0);
-            setEpisodes(nextEpisodes);
-            setKnownEpisodeCount((current) => Math.max(current ?? 0, nextEpisodes.length));
-            setDetailHint(`Episode sources available via ${candidate.provider.toUpperCase()}`);
-            return;
+            if (cancelled) return;
+            episodeCacheRef.current = {
+              ...episodeCacheRef.current,
+              [`${candidate.provider}-${candidate.id}`]: nextEpisodes,
+            };
+            if (nextEpisodes.length > 0) {
+              setResolvedAnime({ ...candidate, ...detail.item, provider: candidate.provider, id: candidate.id });
+              setDubEpisodeCount(typeof detail.item.dub_episode_count === "number" ? detail.item.dub_episode_count : (detail.item.languages ?? []).some((l: string) => l === "en" || l === "dub") ? Infinity : 0);
+              setEpisodes(nextEpisodes);
+              setKnownEpisodeCount((current) => Math.max(current ?? 0, nextEpisodes.length));
+              setDetailHint(`Episode sources available via ${candidate.provider.toUpperCase()}`);
+              return;
+            }
+          } catch {
+            continue;
           }
         }
       })();
@@ -981,10 +960,6 @@ function AnimeDetail({
     const titleCandidates = expandAnimeTitles(anime.title, anime.alt_title).slice(0, 6);
     const movieBoxMatches = new Map<string, { id: string; title?: string; year?: number; moviebox_media_type?: "movie" | "series"; is_hindi?: boolean }>();
 
-    // Use season from anime title (Consumet episodes are season-relative, not absolute)
-    const resolvedSeason = extractAnimeSeason(anime.title, anime.alt_title);
-    const resolvedEpisode = targetEpisode;
-
     for (const candidateTitle of titleCandidates) {
       try {
         const result = await searchMovieBox({
@@ -1018,8 +993,8 @@ function AnimeDetail({
           title: item.title || title,
           mediaType: item.moviebox_media_type === "movie" ? "movie" : "series",
           year: item.year,
-          season: resolvedSeason,
-          episode: resolvedEpisode,
+          season: 1,
+          episode: targetEpisode,
         });
         if (movieBoxSources.length > 0) return movieBoxSources;
       } catch {
@@ -1032,8 +1007,8 @@ function AnimeDetail({
         const movieBoxSources = await fetchMovieBoxSources({
           title: candidateTitle,
           mediaType: isMovie ? "movie" : "anime",
-          season: resolvedSeason,
-          episode: resolvedEpisode,
+          season: 1,
+          episode: targetEpisode,
         });
         if (movieBoxSources.length > 0) return movieBoxSources;
       } catch {
@@ -1042,8 +1017,8 @@ function AnimeDetail({
           const seriesSources = await fetchMovieBoxSources({
             title: candidateTitle,
             mediaType: "series",
-            season: resolvedSeason,
-            episode: resolvedEpisode,
+            season: 1,
+            episode: targetEpisode,
           });
           if (seriesSources.length > 0) return seriesSources;
         } catch {
@@ -1420,9 +1395,9 @@ function AnimeDetail({
             <div>
               <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>Audio</div>
               <div className="anime-option-grid compact">
-                {AUDIO_BUTTONS.filter((option) => (option.id !== "hi" || hasHindiFallback || finding) && (option.id !== "en" || hasDub || dubEpisodeCount === null)).map((option) => (
-                  (option.id === "en" && dubEpisodeCount === null) || (option.id === "hi" && !hasHindiFallback && finding) ? (
-                    // Skeleton shimmer — dub/Hindi availability still loading
+                {AUDIO_BUTTONS.filter((option) => (option.id !== "hi" || hasHindiFallback) && (option.id !== "en" || hasDub || dubEpisodeCount === null)).map((option) => (
+                  option.id === "en" && dubEpisodeCount === null ? (
+                    // Skeleton shimmer — dub availability is still loading
                     <button
                       key={option.id}
                       className="anime-option-btn compact"
@@ -1430,7 +1405,7 @@ function AnimeDetail({
                       type="button"
                       style={{ cursor: "default", opacity: 0.7 }}
                     >
-                      <strong className="pulse" style={{ display: "inline-block", background: "var(--border)", borderRadius: 4, color: "transparent", minWidth: 28, lineHeight: 1.6 }}>{option.label}</strong>
+                      <strong className="pulse" style={{ display: "inline-block", background: "var(--border)", borderRadius: 4, color: "transparent", minWidth: 28, lineHeight: 1.6 }}>Dub</strong>
                       <span className="pulse" style={{ display: "inline-block", background: "var(--border)", borderRadius: 3, color: "transparent", minWidth: 72, lineHeight: 1.6 }}>Checking…</span>
                     </button>
                   ) : (
