@@ -1583,6 +1583,7 @@ def _moviebox_source_payload(media_file, captions: list[dict] | None = None) -> 
         "size_label": _format_bytes(size),
         "kind": "direct",
         "mime_type": "video/mp4",
+        "headers": {"Referer": "https://moviebox.ng/", "User-Agent": "Mozilla/5.0"},
         "subtitles": captions or [],
     }
 

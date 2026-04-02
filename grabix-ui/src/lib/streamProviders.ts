@@ -59,6 +59,7 @@ interface MovieBoxSourceResponse {
   size_label?: string;
   mime_type?: string;
   kind?: StreamKind;
+  headers?: Record<string, string>;
   subtitles?: SubtitleTrack[];
 }
 
