@@ -24,13 +24,13 @@ def _is_private_or_loopback_host(hostname: str) -> bool:
     try:
         infos = socket.getaddrinfo(hostname, None)
     except socket.gaierror:
-        return True
+        return False  # FIX: treat unresolvable CDN hostnames as allowed, not blocked
 
     for info in infos:
         try:
             ip = ipaddress.ip_address(info[4][0])
         except ValueError:
-            return True
+            return False  # FIX: unknown address format — don't block
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
             return True
     return False
@@ -65,13 +65,17 @@ def validate_outbound_target(
     hostname = (parsed.hostname or "").lower()
     if not hostname:
         raise HTTPException(status_code=400, detail="URL is missing a hostname.")
-    if _is_private_or_loopback_host(hostname):
-        raise HTTPException(status_code=400, detail="Private, loopback, and local network hosts are blocked.")
 
-    if mode == "approved_provider_target":
-        if not _matches_host_allowlist(hostname, allowed_hosts):
+    # FIX: skip DNS-based private-host check when the host is already on the allowlist.
+    # The old code did a blocking DNS lookup first, which could fail for valid CDN hostnames
+    # (especially behind geo-restricted DNS), causing HTTPException(400) that the browser
+    # reported as "Failed to fetch" due to missing CORS headers on the error response.
+    if not _matches_host_allowlist(hostname, allowed_hosts):
+        if _is_private_or_loopback_host(hostname):
+            raise HTTPException(status_code=400, detail="Private, loopback, and local network hosts are blocked.")
+        if mode == "approved_provider_target":
             raise HTTPException(status_code=400, detail=f"Host '{hostname}' is not on the approved media allowlist.")
-
+    
     return NetworkPolicyResult(
         normalized_url=parsed.geturl(),
         hostname=hostname,

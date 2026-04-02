@@ -83,7 +83,7 @@ export async function resolveSourceDownloadOptions(sources: StreamSource[]): Pro
   const results: DownloadQualityOption[] = [];
 
   for (const source of sources) {
-    const preferredUrl = source.provider === "MovieBox" ? source.url : (source.externalUrl || source.url);
+    const preferredUrl = source.provider === "MovieBox" ? (source.externalUrl || source.url) : (source.externalUrl || source.url);
     const url = (preferredUrl || "").trim();
     if (!url) continue;
     const serverLabel = (source.language || source.provider || "Server").trim();
