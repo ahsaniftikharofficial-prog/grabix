@@ -94,6 +94,18 @@ Write-Host ""
 
 $env:PYO3_PYTHON = $pythonExe
 
+# Remove old installer before building — avoids "Access is denied (os error 5)"
+# which happens when Windows Defender or Explorer still holds the previous .exe
+$oldInstaller = Join-Path $frontend "src-tauri\target\release\bundle\nsis\GRABIX_0.1.0_x64-setup.exe"
+if (Test-Path $oldInstaller) {
+    Write-Host "      Removing old installer to prevent file-lock errors..." -ForegroundColor Gray
+    Remove-Item $oldInstaller -Force -ErrorAction SilentlyContinue
+}
+$oldMsi = Join-Path $frontend "src-tauri\target\release\bundle\msi\GRABIX_0.1.0_x64_en-US.msi"
+if (Test-Path $oldMsi) {
+    Remove-Item $oldMsi -Force -ErrorAction SilentlyContinue
+}
+
 Push-Location $frontend
 npm run tauri build | Out-Host
 $buildResult = $LASTEXITCODE

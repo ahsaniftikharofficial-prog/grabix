@@ -112,20 +112,28 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ""
 Write-Host "[3/4] Packages installed." -ForegroundColor Green
 
-# Step 4: Verify
+# Step 4: Verify — write to a temp .py file to avoid PowerShell escaping issues
 Write-Host "[4/4] Verifying installation..." -ForegroundColor Yellow
 
-$verifyScript = @'
-import fastapi, uvicorn, yt_dlp
-print("fastapi:", fastapi.__version__)
-print("uvicorn:", uvicorn.__version__)
-print("yt_dlp:", yt_dlp.version.__version__)
-print("OK: All core packages importable.")
+$verifyPy = Join-Path $env:TEMP "grabix_verify.py"
+Set-Content -Path $verifyPy -Encoding UTF8 -Value @'
+import sys
+try:
+    import fastapi, uvicorn, yt_dlp
+    sys.stdout.write("fastapi " + fastapi.__version__ + "\n")
+    sys.stdout.write("uvicorn " + uvicorn.__version__ + "\n")
+    sys.stdout.write("OK: All core packages importable.\n")
+    sys.exit(0)
+except Exception as e:
+    sys.stderr.write("VERIFY FAILED: " + str(e) + "\n")
+    sys.exit(1)
 '@
 
-& $bundledPython -c $verifyScript
+& $bundledPython $verifyPy
+$verifyResult = $LASTEXITCODE
+Remove-Item $verifyPy -Force -ErrorAction SilentlyContinue
 
-if ($LASTEXITCODE -ne 0) {
+if ($verifyResult -ne 0) {
     Write-Host "WARNING: Verification failed - some packages may not have installed correctly." -ForegroundColor Yellow
 } else {
     Write-Host "[4/4] Verification passed." -ForegroundColor Green

@@ -1,5 +1,4 @@
 import asyncio
-import asyncio
 import logging
 from dataclasses import dataclass, field
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -595,6 +594,7 @@ def init_db():
 
 
 init_db()
+recover_download_jobs()
 
 
 # ---------------------------------------------------------------------------
@@ -3823,8 +3823,6 @@ def _create_download_record(dl_id: str, title: str = "", params: dict | None = N
         "speed": "",
         "eta": "",
         "downloaded": "",
-        "total": "",
-        "size": "",
         "title": title,
         "thumbnail": (params or {}).get("thumbnail", ""),
         "error": "",
@@ -3841,7 +3839,6 @@ def _create_download_record(dl_id: str, title: str = "", params: dict | None = N
         "download_engine": _effective_download_engine(params),
         "download_engine_requested": _requested_download_engine(params),
         "engine_note": _download_engine_note(params),
-        "downloaded": "",
         "total": _format_bytes(estimated_total_bytes),
         "size": _format_bytes(estimated_total_bytes),
         "bytes_downloaded": 0,
@@ -4803,8 +4800,6 @@ def _finalize_download_output(
 # Do NOT remove or replace anything already in main.py.
 # ─────────────────────────────────────────────────────────────────────────────
 
-import os
-from pathlib import Path
 
 # ── Phase 3: DB migration — add tags + category columns if missing ────────────
 

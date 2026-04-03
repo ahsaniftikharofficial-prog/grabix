@@ -23,10 +23,13 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis"
+    ],
     "windows": {
       "nsis": {
-        "installerHooks": "installer-hooks.nsh"
+        "installerHooks": "installer-hooks.nsh",
+        "compression": "zlib"
       }
     },
     "resources": [
