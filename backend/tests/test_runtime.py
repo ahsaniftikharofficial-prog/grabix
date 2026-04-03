@@ -23,9 +23,8 @@ class RuntimeHealthTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertTrue(payload["ok"])
-        self.assertIn("backend", payload["services"])
-        self.assertIn("database", payload["services"])
-        self.assertIn("downloads", payload["services"])
+        self.assertTrue(payload["core_ready"])
+        self.assertEqual(set(payload["services"].keys()), {"backend"})
 
     def test_diagnostics_logs_exposes_recent_events(self):
         logger = get_logger("backend")

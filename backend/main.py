@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-import os, uuid, sqlite3, shutil, threading, subprocess, time, json, re, hashlib, socket, ipaddress, tempfile, zipfile
+import os, uuid, sqlite3, shutil, threading, subprocess, time, json, re, hashlib, socket, ipaddress, tempfile, zipfile, importlib
 import ctypes
 from pathlib import Path
 from datetime import datetime
@@ -19,7 +19,10 @@ from app.routes.providers import router as providers_router
 from app.routes.settings import router as settings_router
 from app.routes.streaming import router as streaming_router
 from app.routes.subtitles import router as subtitles_router
-from app.services.consumet import get_health_status as get_consumet_health_status
+from app.services.consumet import (
+    get_health_status as get_consumet_health_status,
+    is_consumet_configured as is_consumet_sidecar_configured,
+)
 from app.services.logging_utils import LOG_DIR, backend_log_path, get_logger, log_event, read_recent_log_events
 from app.services.archive_installer import parse_checksum_manifest, safe_extract_zip, sha256_file
 from app.services.network_policy import validate_outbound_target
@@ -138,6 +141,7 @@ MovieBoxSession = None
 MovieBoxSubjectType = None
 MOVIEBOX_AVAILABLE = False
 MOVIEBOX_IMPORT_ERROR = ""
+MOVIEBOX_IMPORT_VARIANT = ""
 MOVIEBOX_DOWNLOAD_REQUEST_HEADERS = {}
 
 def _ensure_moviebox():
@@ -147,52 +151,47 @@ def _ensure_moviebox():
     global MovieBoxPopularSearch, MovieBoxSearch, MovieBoxTrending, MovieBoxTVSeriesDetails
     global DownloadableMovieFilesDetail, DownloadableTVSeriesFilesDetail
     global MovieBoxSession, MovieBoxSubjectType
-    global MOVIEBOX_AVAILABLE, MOVIEBOX_IMPORT_ERROR, MOVIEBOX_DOWNLOAD_REQUEST_HEADERS
+    global MOVIEBOX_AVAILABLE, MOVIEBOX_IMPORT_ERROR, MOVIEBOX_IMPORT_VARIANT, MOVIEBOX_DOWNLOAD_REQUEST_HEADERS
 
     if _moviebox_loaded and MOVIEBOX_AVAILABLE:
         return True
     # Cooldown: don't retry a failed import more than once per 60 seconds
     if _moviebox_last_fail_time and (time.time() - _moviebox_last_fail_time) < _MOVIEBOX_RETRY_COOLDOWN:
         return False
-    try:
-        from moviebox_api import (
-            Homepage as _Homepage,
-            HotMoviesAndTVSeries as _Hot,
-            MovieDetails as _MovieDetails,
-            PopularSearch as _PopularSearch,
-            Search as _Search,
-            Trending as _Trending,
-            TVSeriesDetails as _TVSeriesDetails,
-        )
-        from moviebox_api import (
-            DownloadableMovieFilesDetail as _DlMovie,
-            DownloadableTVSeriesFilesDetail as _DlTV,
-            Session as _Session,
-            SubjectType as _SubjectType,
-        )
-        from moviebox_api.constants import DOWNLOAD_REQUEST_HEADERS as _DL_HEADERS
-        MovieBoxHomepage = _Homepage
-        MovieBoxHotMoviesAndTVSeries = _Hot
-        MovieBoxMovieDetails = _MovieDetails
-        MovieBoxPopularSearch = _PopularSearch
-        MovieBoxSearch = _Search
-        MovieBoxTrending = _Trending
-        MovieBoxTVSeriesDetails = _TVSeriesDetails
-        DownloadableMovieFilesDetail = _DlMovie
-        DownloadableTVSeriesFilesDetail = _DlTV
-        MovieBoxSession = _Session
-        MovieBoxSubjectType = _SubjectType
-        MOVIEBOX_DOWNLOAD_REQUEST_HEADERS = _DL_HEADERS
-        MOVIEBOX_AVAILABLE = True
-        MOVIEBOX_IMPORT_ERROR = ""
-        _moviebox_loaded = True
-        return True
-    except Exception as exc:
-        MOVIEBOX_AVAILABLE = False
-        MOVIEBOX_IMPORT_ERROR = str(exc)
-        _moviebox_last_fail_time = time.time()
-        _moviebox_loaded = False  # allow retry after cooldown
-        return False
+    import_errors: list[str] = []
+    for api_module_name, constants_module_name in (
+        ("moviebox_api", "moviebox_api.constants"),
+        ("moviebox_api.v1", "moviebox_api.v1.constants"),
+    ):
+        try:
+            api_module = importlib.import_module(api_module_name)
+            constants_module = importlib.import_module(constants_module_name)
+            MovieBoxHomepage = getattr(api_module, "Homepage")
+            MovieBoxHotMoviesAndTVSeries = getattr(api_module, "HotMoviesAndTVSeries")
+            MovieBoxMovieDetails = getattr(api_module, "MovieDetails")
+            MovieBoxPopularSearch = getattr(api_module, "PopularSearch")
+            MovieBoxSearch = getattr(api_module, "Search")
+            MovieBoxTrending = getattr(api_module, "Trending")
+            MovieBoxTVSeriesDetails = getattr(api_module, "TVSeriesDetails")
+            DownloadableMovieFilesDetail = getattr(api_module, "DownloadableMovieFilesDetail")
+            DownloadableTVSeriesFilesDetail = getattr(api_module, "DownloadableTVSeriesFilesDetail")
+            MovieBoxSession = getattr(api_module, "Session")
+            MovieBoxSubjectType = getattr(api_module, "SubjectType")
+            MOVIEBOX_DOWNLOAD_REQUEST_HEADERS = getattr(constants_module, "DOWNLOAD_REQUEST_HEADERS")
+            MOVIEBOX_AVAILABLE = True
+            MOVIEBOX_IMPORT_ERROR = ""
+            MOVIEBOX_IMPORT_VARIANT = api_module_name
+            _moviebox_loaded = True
+            return True
+        except Exception as exc:
+            import_errors.append(f"{api_module_name}: {exc}")
+
+    MOVIEBOX_AVAILABLE = False
+    MOVIEBOX_IMPORT_VARIANT = ""
+    MOVIEBOX_IMPORT_ERROR = " | ".join(import_errors) or "moviebox-api import failed"
+    _moviebox_last_fail_time = time.time()
+    _moviebox_loaded = False  # allow retry after cooldown
+    return False
 
 app = FastAPI()
 LOCAL_APP_ORIGINS = DEFAULT_LOCAL_APP_ORIGINS
@@ -252,6 +251,17 @@ anime_resolve_cache: dict[str, tuple[float, dict]] = runtime_state.anime_resolve
 CONSUMET_HEALTH_CACHE_TTL_SECONDS = 15
 consumet_health_cache: tuple[float, dict] | None = None
 dependency_install_jobs: dict[str, dict] = runtime_state.dependency_install_jobs
+
+RUNTIME_BOOTSTRAP_LOCK = threading.Lock()
+RUNTIME_BOOTSTRAP_STATE = {
+    "started": False,
+    "completed": False,
+    "failed": False,
+    "step": "",
+    "error": "",
+}
+_network_monitor_started = False
+_auto_retry_failed_started = False
 
 
 # --- LAZY YT_DLP LOADER ---
@@ -592,9 +602,8 @@ def init_db():
     except Exception as e:
         log_event(backend_logger, logging.ERROR, event="db_init_failed", message="Database initialization failed.", details={"error": str(e)})
 
-
-init_db()
-recover_download_jobs()
+# Runtime bootstrap happens after module import so packaged startup cannot call
+# helpers before they are defined.
 
 
 # ---------------------------------------------------------------------------
@@ -695,13 +704,10 @@ def _moviebox_bg_retry_worker() -> None:
 
 def _start_moviebox_bg_retry() -> None:
     """Kick off the background retry thread once at startup."""
+    if _moviebox_bg_retry_running:
+        return
     t = threading.Thread(target=_moviebox_bg_retry_worker, daemon=True, name="moviebox-bg-retry")
     t.start()
-
-
-# Restore last-known state and start background auto-retry
-_restore_provider_status_from_db()
-_start_moviebox_bg_retry()
 
 # ---------------------------------------------------------------------------
 # RESILIENCE: Network change monitor (Fix 7)
@@ -754,7 +760,13 @@ def _network_monitor_worker() -> None:
         except Exception:
             pass
 
-threading.Thread(target=_network_monitor_worker, daemon=True, name="network-monitor").start()
+
+def _start_network_monitor() -> None:
+    global _network_monitor_started
+    if _network_monitor_started:
+        return
+    _network_monitor_started = True
+    threading.Thread(target=_network_monitor_worker, daemon=True, name="network-monitor").start()
 
 # ---------------------------------------------------------------------------
 # RESILIENCE: Auto-retry failed downloads (Fix 8)
@@ -809,7 +821,13 @@ def _auto_retry_failed_worker() -> None:
         except Exception:
             pass
 
-threading.Thread(target=_auto_retry_failed_worker, daemon=True, name="auto-retry-failed").start()
+
+def _start_auto_retry_failed_worker() -> None:
+    global _auto_retry_failed_started
+    if _auto_retry_failed_started:
+        return
+    _auto_retry_failed_started = True
+    threading.Thread(target=_auto_retry_failed_worker, daemon=True, name="auto-retry-failed").start()
 
 # Per-content-type TTLs (seconds)
 _CACHE_TTL: dict[str, int] = {
@@ -4189,6 +4207,72 @@ def recover_download_jobs():
         threading.Thread(target=_delayed_auto_resume, daemon=True, name="auto-resume").start()
 
 
+def get_runtime_bootstrap_snapshot() -> dict[str, object]:
+    with RUNTIME_BOOTSTRAP_LOCK:
+        return dict(RUNTIME_BOOTSTRAP_STATE)
+
+
+def ensure_runtime_bootstrap() -> None:
+    with RUNTIME_BOOTSTRAP_LOCK:
+        if RUNTIME_BOOTSTRAP_STATE["completed"]:
+            return
+
+        RUNTIME_BOOTSTRAP_STATE.update(
+            {
+                "started": True,
+                "completed": False,
+                "failed": False,
+                "step": "",
+                "error": "",
+            }
+        )
+
+        steps: list[tuple[str, Any]] = [
+            ("init_db", init_db),
+            ("restore_provider_status", _restore_provider_status_from_db),
+            ("recover_download_jobs", recover_download_jobs),
+            ("start_moviebox_retry", _start_moviebox_bg_retry),
+            ("start_network_monitor", _start_network_monitor),
+            ("start_auto_retry", _start_auto_retry_failed_worker),
+        ]
+
+        for step_name, action in steps:
+            RUNTIME_BOOTSTRAP_STATE["step"] = step_name
+            try:
+                action()
+            except Exception as exc:
+                RUNTIME_BOOTSTRAP_STATE["failed"] = True
+                RUNTIME_BOOTSTRAP_STATE["error"] = f"{step_name}: {exc}"
+                log_event(
+                    backend_logger,
+                    logging.ERROR,
+                    event="runtime_bootstrap_failed",
+                    message="Runtime bootstrap failed.",
+                    details={"step": step_name, "error": str(exc)},
+                )
+                raise RuntimeError(f"Runtime bootstrap failed during {step_name}: {exc}") from exc
+
+        RUNTIME_BOOTSTRAP_STATE.update(
+            {
+                "completed": True,
+                "failed": False,
+                "step": "complete",
+                "error": "",
+            }
+        )
+        log_event(
+            backend_logger,
+            logging.INFO,
+            event="runtime_bootstrap_completed",
+            message="Runtime bootstrap completed.",
+        )
+
+
+@app.on_event("startup")
+async def _runtime_startup_event():
+    ensure_runtime_bootstrap()
+
+
 # FIX 2 + FIX 3 (Library): Proper error handling so "no such table" never reaches the UI
 @app.get("/history")
 def get_history():
@@ -5693,13 +5777,14 @@ async def health_services() -> dict:
     if MOVIEBOX_AVAILABLE:
         mb_status = "online"
         mb_msg = "Movie Box provider is available."
-        mb_details: dict = {}
+        mb_details: dict = {"import_variant": MOVIEBOX_IMPORT_VARIANT or ""}
     else:
         cb_state = _get_health_cb("moviebox")
         mb_status = "degraded" if not _health_cb_is_open("moviebox") else cb_state.last_status
         mb_msg = "Movie Box is unavailable — auto-retry active. Using VidSrc/embed as fallbacks."
         mb_details = {
             "import_error": MOVIEBOX_IMPORT_ERROR or "",
+            "import_variant": MOVIEBOX_IMPORT_VARIANT or "",
             "auto_retry_active": _moviebox_bg_retry_running,
             "retry_interval_seconds": _MOVIEBOX_BG_RETRY_INTERVAL,
             "fallbacks": ["embed", "vidsrc"],
@@ -5713,11 +5798,22 @@ async def health_services() -> dict:
 
     # ── consumet (network ping — use circuit breaker + tiered status) ─────────
     global consumet_health_cache
-    consumet_cb_open = _health_cb_is_open("consumet")
+    consumet_cb_open = False
 
-    if consumet_cb_open:
-        # Circuit is open — serve last cached result without pinging
+    if not is_consumet_sidecar_configured():
+        # Packaged mode can intentionally run without a Consumet sidecar.
+        consumet_health = {
+            "configured": False,
+            "healthy": False,
+            "api_base": "",
+            "message": "Consumet sidecar is disabled for this build. Built-in anime fallback mode is active.",
+            "mode": "fallback",
+        }
+        consumet_raw_status = "degraded"
+        consumet_health_cache = (time.time() + CONSUMET_HEALTH_CACHE_TTL_SECONDS, consumet_health)
+    elif _health_cb_is_open("consumet"):
         consumet_health = (consumet_health_cache or (0, {}))[1] if consumet_health_cache else {}
+        consumet_cb_open = _health_cb_is_open("consumet")
         consumet_raw_status = _get_health_cb("consumet").last_status
     elif consumet_health_cache and consumet_health_cache[0] > time.time():
         consumet_health = consumet_health_cache[1]
@@ -5756,11 +5852,20 @@ async def health_services() -> dict:
         },
     )
 
-    anime_healthy = consumet_health.get("healthy", False)
-    anime_status  = consumet_raw_status if anime_healthy else ("degraded" if consumet_raw_status != "offline" else "degraded")
+    anime_primary_healthy = bool(consumet_health.get("healthy", False))
+    anime_fallback_ready = moviebox["status"] in {"online", "slow"}
+    anime_status = consumet_raw_status if anime_primary_healthy else ("online" if anime_fallback_ready else "degraded")
     anime = _service_payload(
         "anime", anime_status,
-        "Anime playback is fully available." if anime_healthy else "Anime running on built-in fallback stack.",
+        (
+            "Anime playback is fully available."
+            if anime_primary_healthy
+            else (
+                "Anime playback is available through GRABIX fallback providers."
+                if anime_fallback_ready
+                else "Anime running on built-in fallback stack."
+            )
+        ),
         True,
     )
 
@@ -6145,6 +6250,8 @@ def run_server() -> None:
     """
     import asyncio
     import uvicorn
+
+    ensure_runtime_bootstrap()
 
     # Windows: SelectorEventLoop works on any thread; ProactorEventLoop does not.
     if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):

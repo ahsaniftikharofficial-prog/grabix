@@ -132,8 +132,8 @@ function mapConsumetChapter(chapter: ConsumetChapter): MangaChapter {
     language: chapter.language || "en",
     pages: 0,
     published_at: chapter.released_at || "",
-    provider: "mangadex",
-    source_name: "consumet",
+    provider: chapter.provider === "comick" ? "comick" : "mangadex",
+    source_name: chapter.provider || "consumet",
   };
 }
 

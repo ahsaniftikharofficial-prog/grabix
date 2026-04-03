@@ -34,7 +34,7 @@ const CONFIG: Record<
   },
   failed: {
     bg: "rgba(200, 40, 40, 0.93)",
-    label: "Backend restart failed — please restart GRABIX",
+    label: "Backend stopped responding — please restart GRABIX",
     icon: "❌",
     pulse: false,
   },

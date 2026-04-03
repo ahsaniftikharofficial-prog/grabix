@@ -98,7 +98,7 @@ function Inner() {
     };
 
     const bootstrapBackend = async () => {
-      const coreReady = await waitForBackendCoreReady(14000, 350);
+      const coreReady = await waitForBackendCoreReady(75000, 500);
       if (cancelled) return;
 
       setBackendCoreReady(coreReady);

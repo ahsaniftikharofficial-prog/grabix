@@ -10,9 +10,9 @@
 use std::{
     fs::{create_dir_all, OpenOptions},
     io::{Read, Write},
-    net::TcpStream,
+    net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::Mutex,
     thread,
     time::{Duration, Instant},
@@ -25,10 +25,28 @@ use tauri::{AppHandle, Manager, RunEvent, State};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
+fn build_id() -> &'static str {
+    option_env!("GRABIX_BUILD_ID").unwrap_or("dev")
+}
+
+fn backend_resource_hash() -> &'static str {
+    option_env!("GRABIX_BACKEND_RESOURCE_HASH").unwrap_or("")
+}
+
+fn backend_resource_subdir() -> &'static str {
+    option_env!("GRABIX_BACKEND_RESOURCE_SUBDIR").unwrap_or("backend")
+}
+
+const PACKAGED_CONSUMET_PORT: u16 = 3100;
+
 // ── Startup state (read by React via get_startup_diagnostics) ─────────────────
 
 struct StartupState {
     snapshot: Mutex<StartupDiagnostics>,
+}
+
+struct SidecarProcessState {
+    consumet_child: Mutex<Option<Child>>,
 }
 
 #[derive(Clone, Serialize, Default)]
@@ -36,6 +54,7 @@ struct SidecarDiagnostic {
     name: String,
     status: String,
     message: String,
+    failure_code: String,
     port: u16,
     binary_path: String,
 }
@@ -43,6 +62,8 @@ struct SidecarDiagnostic {
 #[derive(Clone, Serialize, Default)]
 struct StartupDiagnostics {
     app_mode: String,
+    build_id: String,
+    backend_resource_hash: String,
     startup_ready: bool,
     log_path: String,
     diagnostics_path: String,
@@ -168,31 +189,77 @@ fn chrono_stamp() -> String {
 
 // ── Network helper ────────────────────────────────────────────────────────────
 
-fn wait_for_http_ok(port: u16, path: &str, timeout_secs: u64) -> bool {
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(timeout_secs) {
-        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(1200)));
-            let _ = stream.set_write_timeout(Some(Duration::from_millis(1200)));
-            let request = format!(
-                "GET {} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-                path
-            );
-            if stream.write_all(request.as_bytes()).is_ok() {
-                let mut response = String::new();
-                let _ = stream.read_to_string(&mut response);
-                if response.starts_with("HTTP/1.1 200")
-                    || response.starts_with("HTTP/1.0 200")
-                    || response.starts_with("HTTP/1.1 204")
-                    || response.starts_with("HTTP/1.0 204")
-                {
-                    return true;
-                }
-            }
+fn http_ok_once(port: u16, path: &str) -> bool {
+    if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(1200)));
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(1200)));
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            path
+        );
+        if stream.write_all(request.as_bytes()).is_ok() {
+            let mut response = String::new();
+            let _ = stream.read_to_string(&mut response);
+            return response.starts_with("HTTP/1.1 200")
+                || response.starts_with("HTTP/1.0 200")
+                || response.starts_with("HTTP/1.1 204")
+                || response.starts_with("HTTP/1.0 204");
         }
-        thread::sleep(Duration::from_millis(450));
     }
     false
+}
+
+fn is_port_available(port: u16) -> bool {
+    TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+fn find_consumet_dir(app: &AppHandle) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("consumet-staging").join("consumet-local"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(
+                exe_dir
+                    .join("resources")
+                    .join("consumet-staging")
+                    .join("consumet-local"),
+            );
+            candidates.push(exe_dir.join("consumet-staging").join("consumet-local"));
+        }
+    }
+    candidates.into_iter().find(|p| p.exists())
+}
+
+fn find_consumet_node(app: &AppHandle) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(
+            resource_dir
+                .join("consumet-staging")
+                .join("node-runtime")
+                .join("node.exe"),
+        );
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(
+                exe_dir
+                    .join("resources")
+                    .join("consumet-staging")
+                    .join("node-runtime")
+                    .join("node.exe"),
+            );
+            candidates.push(
+                exe_dir
+                    .join("consumet-staging")
+                    .join("node-runtime")
+                    .join("node.exe"),
+            );
+        }
+    }
+    candidates.into_iter().find(|p| p.exists())
 }
 
 // ── PyO3 runtime location helpers ─────────────────────────────────────────────
@@ -212,14 +279,24 @@ fn find_python_home(app: &AppHandle) -> Option<PathBuf> {
 }
 
 fn find_backend_dir(app: &AppHandle) -> Option<PathBuf> {
+    let backend_candidates = [
+        backend_resource_subdir(),
+        "backend",
+        "backend-staging/backend",
+        "generated/backend",
+    ];
     let mut candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
-        candidates.push(resource_dir.join("backend"));
+        for relative in backend_candidates {
+            candidates.push(resource_dir.join(relative));
+        }
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            candidates.push(exe_dir.join("resources").join("backend"));
-            candidates.push(exe_dir.join("backend"));
+            for relative in backend_candidates {
+                candidates.push(exe_dir.join("resources").join(relative));
+                candidates.push(exe_dir.join(relative));
+            }
         }
     }
     candidates.into_iter().find(|p| p.exists())
@@ -289,7 +366,10 @@ fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathB
                 log_sidecar(&app, "PyO3: Importing backend main module...");
                 let main_mod = py.import_bound("main")?;
 
-                log_sidecar(&app, "PyO3: Calling main.run_server() — uvicorn starting...");
+                log_sidecar(
+                    &app,
+                    "PyO3: Calling main.run_server() — uvicorn starting...",
+                );
                 // run_server() blocks here forever (uvicorn event loop).
                 // When the Rust process exits, this thread exits, Python exits.
                 main_mod.call_method0("run_server")?;
@@ -298,31 +378,355 @@ fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathB
             });
 
             match result {
-                Ok(_) => log_sidecar(&app, "PyO3: Python backend exited cleanly."),
-                Err(e) => log_sidecar(&app, &format!("PyO3: Python backend error: {}", e)),
+                Ok(_) => {
+                    let msg = "Embedded Python backend exited before startup completed.";
+                    log_sidecar(&app, "PyO3: Python backend exited cleanly.");
+                    update_backend_status(&app, "failed", msg, false, "python_backend_exited");
+                }
+                Err(e) => {
+                    let msg = format!("Embedded Python backend bootstrap failed: {}", e);
+                    log_sidecar(&app, &format!("PyO3: Python backend error: {}", e));
+                    update_backend_status(&app, "failed", &msg, false, "python_bootstrap_failed");
+                }
             }
         })
         .expect("Failed to spawn pyo3-backend thread");
 }
 
-fn update_backend_status(app: &AppHandle, status: &str, message: &str, ready: bool) {
+fn update_backend_status(
+    app: &AppHandle,
+    status: &str,
+    message: &str,
+    ready: bool,
+    failure_code: &str,
+) {
     if let Ok(mut snapshot) = app.state::<StartupState>().snapshot.lock() {
         snapshot.backend.status = status.to_string();
         snapshot.backend.message = message.to_string();
+        snapshot.backend.failure_code = failure_code.to_string();
         snapshot.startup_ready = ready;
+        let current = snapshot.clone();
+        drop(snapshot);
+        write_diagnostics_snapshot(app, &current);
     }
+}
+
+fn update_consumet_status(
+    app: &AppHandle,
+    status: &str,
+    message: &str,
+    failure_code: &str,
+    port: u16,
+    binary_path: &str,
+) {
+    if let Ok(mut snapshot) = app.state::<StartupState>().snapshot.lock() {
+        snapshot.consumet.status = status.to_string();
+        snapshot.consumet.message = message.to_string();
+        snapshot.consumet.failure_code = failure_code.to_string();
+        snapshot.consumet.port = port;
+        snapshot.consumet.binary_path = binary_path.to_string();
+        let current = snapshot.clone();
+        drop(snapshot);
+        write_diagnostics_snapshot(app, &current);
+    }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum ConsumetLaunchState {
+    Ready,
+    Starting,
+    Failed,
+}
+
+fn stop_consumet_sidecar(app: &AppHandle) {
+    if let Ok(mut child_slot) = app.state::<SidecarProcessState>().consumet_child.lock() {
+        if let Some(mut child) = child_slot.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn start_consumet_sidecar(app: &AppHandle) -> ConsumetLaunchState {
+    let node_binary = match find_consumet_node(app) {
+        Some(path) => path,
+        None => {
+            let msg = "Bundled HiAnime gateway runtime was not found in app resources.";
+            log_sidecar(app, msg);
+            update_consumet_status(
+                app,
+                "missing",
+                msg,
+                "consumet_runtime_missing",
+                PACKAGED_CONSUMET_PORT,
+                "",
+            );
+            return ConsumetLaunchState::Failed;
+        }
+    };
+
+    let consumet_dir = match find_consumet_dir(app) {
+        Some(path) => path,
+        None => {
+            let msg = "Bundled HiAnime gateway files were not found in app resources.";
+            log_sidecar(app, msg);
+            update_consumet_status(
+                app,
+                "missing",
+                msg,
+                "consumet_resource_missing",
+                PACKAGED_CONSUMET_PORT,
+                node_binary.to_string_lossy().as_ref(),
+            );
+            return ConsumetLaunchState::Failed;
+        }
+    };
+
+    if !is_port_available(PACKAGED_CONSUMET_PORT) {
+        if http_ok_once(PACKAGED_CONSUMET_PORT, "/") {
+            let msg = format!(
+                "Reusing an existing HiAnime gateway on port {}.",
+                PACKAGED_CONSUMET_PORT
+            );
+            log_sidecar(app, &format!("Consumet: {}", msg));
+            update_consumet_status(
+                app,
+                "reused",
+                &msg,
+                "",
+                PACKAGED_CONSUMET_PORT,
+                node_binary.to_string_lossy().as_ref(),
+            );
+            return ConsumetLaunchState::Ready;
+        }
+
+        let msg = format!(
+            "Bundled HiAnime gateway port {} is already in use.",
+            PACKAGED_CONSUMET_PORT
+        );
+        log_sidecar(app, &format!("Consumet: {}", msg));
+        update_consumet_status(
+            app,
+            "port_in_use",
+            &msg,
+            "consumet_port_in_use",
+            PACKAGED_CONSUMET_PORT,
+            node_binary.to_string_lossy().as_ref(),
+        );
+        return ConsumetLaunchState::Failed;
+    }
+
+    let log_path = diagnostics_log_path(app);
+    let stdout_log = match OpenOptions::new().create(true).append(true).open(&log_path) {
+        Ok(file) => file,
+        Err(error) => {
+            let msg = format!(
+                "Could not open the startup log for the HiAnime gateway: {}",
+                error
+            );
+            log_sidecar(app, &format!("Consumet: {}", msg));
+            update_consumet_status(
+                app,
+                "failed",
+                &msg,
+                "consumet_log_open_failed",
+                PACKAGED_CONSUMET_PORT,
+                node_binary.to_string_lossy().as_ref(),
+            );
+            return ConsumetLaunchState::Failed;
+        }
+    };
+    let stderr_log = match stdout_log.try_clone() {
+        Ok(file) => file,
+        Err(error) => {
+            let msg = format!(
+                "Could not clone the startup log handle for the HiAnime gateway: {}",
+                error
+            );
+            log_sidecar(app, &format!("Consumet: {}", msg));
+            update_consumet_status(
+                app,
+                "failed",
+                &msg,
+                "consumet_log_clone_failed",
+                PACKAGED_CONSUMET_PORT,
+                node_binary.to_string_lossy().as_ref(),
+            );
+            return ConsumetLaunchState::Failed;
+        }
+    };
+
+    update_consumet_status(
+        app,
+        "starting",
+        "Bundled HiAnime gateway initializing...",
+        "",
+        PACKAGED_CONSUMET_PORT,
+        node_binary.to_string_lossy().as_ref(),
+    );
+
+    let mut command = Command::new(&node_binary);
+    command
+        .current_dir(&consumet_dir)
+        .arg("server.cjs")
+        .arg("--port")
+        .arg(PACKAGED_CONSUMET_PORT.to_string())
+        .arg("--site-base")
+        .arg("https://aniwatchtv.to")
+        .env("PORT", PACKAGED_CONSUMET_PORT.to_string())
+        .env("HIANIME_SITE_BASE", "https://aniwatchtv.to")
+        .stdout(Stdio::from(stdout_log))
+        .stderr(Stdio::from(stderr_log));
+
+    #[cfg(target_os = "windows")]
+    command.creation_flags(0x08000000);
+
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let msg = format!("Could not launch the bundled HiAnime gateway: {}", error);
+            log_sidecar(app, &format!("Consumet: {}", msg));
+            update_consumet_status(
+                app,
+                "failed",
+                &msg,
+                "consumet_spawn_failed",
+                PACKAGED_CONSUMET_PORT,
+                node_binary.to_string_lossy().as_ref(),
+            );
+            return ConsumetLaunchState::Failed;
+        }
+    };
+
+    if let Ok(mut child_slot) = app.state::<SidecarProcessState>().consumet_child.lock() {
+        *child_slot = Some(child);
+    }
+
+    log_sidecar(
+        app,
+        &format!(
+            "Consumet: launched bundled HiAnime gateway with {} from {}",
+            node_binary.display(),
+            consumet_dir.display()
+        ),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while Instant::now() < deadline {
+        if http_ok_once(PACKAGED_CONSUMET_PORT, "/") {
+            let msg = format!(
+                "Bundled HiAnime gateway is healthy on port {}.",
+                PACKAGED_CONSUMET_PORT
+            );
+            log_sidecar(app, &format!("Consumet: {}", msg));
+            update_consumet_status(
+                app,
+                "started",
+                &msg,
+                "",
+                PACKAGED_CONSUMET_PORT,
+                node_binary.to_string_lossy().as_ref(),
+            );
+            return ConsumetLaunchState::Ready;
+        }
+
+        let exited =
+            if let Ok(mut child_slot) = app.state::<SidecarProcessState>().consumet_child.lock() {
+                if let Some(child) = child_slot.as_mut() {
+                    child.try_wait().ok().flatten()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        if let Some(status) = exited {
+            if let Ok(mut child_slot) = app.state::<SidecarProcessState>().consumet_child.lock() {
+                *child_slot = None;
+            }
+            let msg = format!(
+                "Bundled HiAnime gateway exited before startup completed (status: {}).",
+                status
+            );
+            log_sidecar(app, &format!("Consumet: {}", msg));
+            update_consumet_status(
+                app,
+                "failed",
+                &msg,
+                "consumet_exited_early",
+                PACKAGED_CONSUMET_PORT,
+                node_binary.to_string_lossy().as_ref(),
+            );
+            return ConsumetLaunchState::Failed;
+        }
+
+        thread::sleep(Duration::from_millis(350));
+    }
+
+    let msg = format!(
+        "Bundled HiAnime gateway is still warming up on port {}. The backend will keep waiting on demand.",
+        PACKAGED_CONSUMET_PORT
+    );
+    log_sidecar(app, &format!("Consumet: {}", msg));
+    update_consumet_status(
+        app,
+        "starting",
+        &msg,
+        "consumet_start_timeout",
+        PACKAGED_CONSUMET_PORT,
+        node_binary.to_string_lossy().as_ref(),
+    );
+    ConsumetLaunchState::Starting
+}
+
+fn backend_terminal_failure(app: &AppHandle) -> Option<(String, String)> {
+    app.state::<StartupState>()
+        .snapshot
+        .lock()
+        .ok()
+        .and_then(|snapshot| {
+            let status = snapshot.backend.status.clone();
+            if matches!(status.as_str(), "failed" | "missing" | "port_in_use") {
+                Some((
+                    snapshot.backend.failure_code.clone(),
+                    snapshot.backend.message.clone(),
+                ))
+            } else {
+                None
+            }
+        })
 }
 
 fn start_python_backend_async(app: AppHandle) {
     thread::Builder::new()
         .name(String::from("pyo3-orchestrator"))
         .spawn(move || {
+            let consumet_state = start_consumet_sidecar(&app);
+            match consumet_state {
+                ConsumetLaunchState::Ready | ConsumetLaunchState::Starting => {
+                    std::env::set_var(
+                        "CONSUMET_API_BASE",
+                        format!("http://127.0.0.1:{}", PACKAGED_CONSUMET_PORT),
+                    );
+                }
+                ConsumetLaunchState::Failed => {
+                    std::env::remove_var("CONSUMET_API_BASE");
+                }
+            }
+
             let python_home = match find_python_home(&app) {
                 Some(p) => p,
                 None => {
-                    let msg = "ERROR: python-runtime/ not found in app resources. Reinstall GRABIX.";
+                    let msg = "ERROR: python-runtime/ not found. Run scripts/setup-python-runtime.ps1 then rebuild.";
                     log_sidecar(&app, msg);
-                    update_backend_status(&app, "missing", msg, false);
+                    update_backend_status(
+                        &app,
+                        "missing",
+                        msg,
+                        false,
+                        "python_runtime_missing",
+                    );
                     return;
                 }
             };
@@ -332,7 +736,13 @@ fn start_python_backend_async(app: AppHandle) {
                 None => {
                     let msg = "ERROR: backend/ not found in app resources. Reinstall GRABIX.";
                     log_sidecar(&app, msg);
-                    update_backend_status(&app, "missing", msg, false);
+                    update_backend_status(
+                        &app,
+                        "missing",
+                        msg,
+                        false,
+                        "backend_resource_missing",
+                    );
                     return;
                 }
             };
@@ -346,23 +756,70 @@ fn start_python_backend_async(app: AppHandle) {
                 ),
             );
 
-            update_backend_status(&app, "starting", "Embedded Python backend initializing...", false);
+            if !is_port_available(8000) {
+                let msg = "Backend port 8000 is already in use. Close the other process and relaunch GRABIX.";
+                log_sidecar(&app, &format!("PyO3: {}", msg));
+                update_backend_status(&app, "port_in_use", msg, false, "port_in_use");
+                return;
+            }
+
+            update_backend_status(
+                &app,
+                "starting",
+                "Embedded Python backend initializing...",
+                false,
+                "",
+            );
 
             start_python_backend(app.clone(), python_home, backend_dir);
 
             // Give Python a moment to spin up before polling.
             thread::sleep(Duration::from_secs(2));
 
-            log_sidecar(&app, "PyO3: Waiting for uvicorn on port 8000 (timeout: 60s)...");
+            let timeout_secs = 90;
+            let started = Instant::now();
+            log_sidecar(
+                &app,
+                &format!(
+                    "PyO3: Waiting for uvicorn on port 8000 (timeout: {}s)...",
+                    timeout_secs
+                ),
+            );
 
-            if wait_for_http_ok(8000, "/health/ping", 60) {
-                let msg = "Embedded Python backend is healthy on port 8000.";
-                log_sidecar(&app, &format!("PyO3: {}", msg));
-                update_backend_status(&app, "started", msg, true);
-            } else {
-                let msg = "Backend did not respond within 60s. Check startup log for Python import errors.";
-                log_sidecar(&app, &format!("PyO3: TIMEOUT — {}", msg));
-                update_backend_status(&app, "timeout", msg, false);
+            loop {
+                if http_ok_once(8000, "/health/ping") {
+                    let msg = "Embedded Python backend is healthy on port 8000.";
+                    log_sidecar(&app, &format!("PyO3: {}", msg));
+                    update_backend_status(&app, "started", msg, true, "");
+                    break;
+                }
+
+                if let Some((failure_code, message)) = backend_terminal_failure(&app) {
+                    log_sidecar(
+                        &app,
+                        &format!(
+                            "PyO3: backend startup aborted early [{}] {}",
+                            failure_code, message
+                        ),
+                    );
+                    break;
+                }
+
+                if started.elapsed() >= Duration::from_secs(timeout_secs) {
+                    let msg =
+                        "Backend did not respond within 90s. Check startup log for embedded Python errors.";
+                    log_sidecar(&app, &format!("PyO3: TIMEOUT - {}", msg));
+                    update_backend_status(
+                        &app,
+                        "timeout",
+                        msg,
+                        false,
+                        "backend_start_timeout",
+                    );
+                    break;
+                }
+
+                thread::sleep(Duration::from_millis(450));
             }
 
             let snapshot = app
@@ -391,6 +848,8 @@ fn initial_diagnostics(app: &AppHandle) -> StartupDiagnostics {
         } else {
             String::from("production")
         },
+        build_id: build_id().to_string(),
+        backend_resource_hash: backend_resource_hash().to_string(),
         startup_ready: cfg!(debug_assertions),
         log_path: diagnostics_log_path(app).display().to_string(),
         diagnostics_path: diagnostics_json_path(app).display().to_string(),
@@ -407,16 +866,28 @@ fn initial_diagnostics(app: &AppHandle) -> StartupDiagnostics {
             } else {
                 String::from("Embedded Python backend initializing via PyO3...")
             },
+            failure_code: String::new(),
             port: 8000,
-            binary_path: String::from("(embedded via PyO3 — no separate process)"),
+            binary_path: String::from("(embedded via PyO3 - no separate process)"),
         },
         consumet: SidecarDiagnostic {
             name: String::from("consumet"),
-            status: String::from("internal"),
-            message: String::from(
-                "Anime provider logic is handled inside the embedded Python backend.",
-            ),
-            port: 0,
+            status: if cfg!(debug_assertions) {
+                String::from("development")
+            } else {
+                String::from("starting")
+            },
+            message: if cfg!(debug_assertions) {
+                String::from("run.bat provides the local Consumet sidecar in development.")
+            } else {
+                String::from("Bundled HiAnime gateway initializing for packaged mode...")
+            },
+            failure_code: String::new(),
+            port: if cfg!(debug_assertions) {
+                3000
+            } else {
+                PACKAGED_CONSUMET_PORT
+            },
             binary_path: String::new(),
         },
     }
@@ -431,13 +902,23 @@ pub fn run() {
         .manage(StartupState {
             snapshot: Mutex::new(StartupDiagnostics::default()),
         })
+        .manage(SidecarProcessState {
+            consumet_child: Mutex::new(None),
+        })
         .setup(|app| {
             let initial = initial_diagnostics(app.handle());
             if let Ok(mut snapshot) = app.state::<StartupState>().snapshot.lock() {
                 *snapshot = initial.clone();
             }
             write_diagnostics_snapshot(app.handle(), &initial);
-            log_sidecar(app.handle(), "GRABIX started (PyO3 embedded backend edition).");
+            log_sidecar(
+                app.handle(),
+                &format!(
+                    "GRABIX started (PyO3 embedded backend edition). build_id={} backend_hash={}",
+                    build_id(),
+                    backend_resource_hash()
+                ),
+            );
 
             if !cfg!(debug_assertions) {
                 start_python_backend_async(app.handle().clone());
@@ -456,11 +937,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
 
-    // On exit: Python lives inside this process and dies automatically.
-    // No child processes to kill — nothing to do here.
-    app.run(|_app_handle, event| {
+    // Python lives inside this process and dies automatically.
+    // The bundled HiAnime gateway is a child process and must be stopped.
+    app.run(|app_handle, event| {
         if matches!(event, RunEvent::Exit) {
-            // PyO3 cleanup is automatic when the process exits.
+            stop_consumet_sidecar(&app_handle);
         }
     });
 }

@@ -12,6 +12,12 @@ from fastapi import HTTPException
 
 from app.services.manga_anilist import get_seasonal_manga, get_trending_manga
 from app.services.manga_comick import get_frontpage as get_comick_frontpage
+from app.services.manga_mangadex import (
+    get_chapter_list as get_mangadex_chapter_list,
+    get_chapter_pages as get_mangadex_chapter_pages,
+    get_manga_details as get_mangadex_manga_details,
+    search_manga as search_mangadex_manga,
+)
 from app.services.network_policy import validate_outbound_target
 from app.services.security import DEFAULT_APPROVED_MEDIA_HOSTS
 
@@ -56,14 +62,15 @@ def _cache_set(key: str, value: Any, ttl_seconds: int) -> Any:
 
 
 def get_consumet_api_base() -> str:
-    base = os.getenv(CONSUMET_API_BASE_ENV, "http://127.0.0.1:3000").strip().rstrip("/")
-    if not base:
-        base = "http://127.0.0.1:3000"
-    return base
+    return os.getenv(CONSUMET_API_BASE_ENV, "").strip().rstrip("/")
+
+
+def is_consumet_configured() -> bool:
+    return bool(get_consumet_api_base())
 
 
 def _consumet_configured() -> bool:
-    return True
+    return is_consumet_configured()
 
 
 def _http_error(detail: str, status_code: int = 502) -> HTTPException:
@@ -461,6 +468,7 @@ def _extract_image(item: dict[str, Any]) -> str:
         )
     return _first_non_empty(
         item.get("imageUrl"),
+        item.get("cover_image"),
         item.get("img"),
         item.get("poster"),
         item.get("posterImage"),
@@ -527,6 +535,9 @@ def _normalize_media_item(item: dict[str, Any], domain: str, provider: str) -> d
     media_id = _first_non_empty(
         str(item.get("id") or ""),
         str(item.get("_id") or ""),
+        str(item.get("mangadex_id") or ""),
+        str(item.get("anilist_id") or ""),
+        str(item.get("mal_id") or ""),
         item.get("slug") or "",
         item.get("url") or "",
     )
@@ -554,6 +565,9 @@ def _normalize_media_item(item: dict[str, Any], domain: str, provider: str) -> d
         "genres": _extract_genres(item),
         "languages": _extract_languages(item),
         "url": _first_non_empty(item.get("url"), item.get("siteUrl")),
+        "anilist_id": _coerce_int(item.get("anilist_id") or item.get("anilistId")),
+        "mangadex_id": _first_non_empty(str(item.get("mangadex_id") or ""), str(item.get("mangadexId") or "")),
+        "mal_id": _coerce_int(item.get("mal_id") or item.get("malId")),
         "episodes_count": _coerce_int(item.get("totalEpisodes") or item.get("episodes")),
         "dub_episode_count": _coerce_int(item.get("dubEpisodeCount")),
         "raw": item,
@@ -587,17 +601,20 @@ def _normalize_episode_item(item: dict[str, Any], provider: str, fallback_number
 def _normalize_chapter_item(item: dict[str, Any], provider: str, fallback_number: int) -> dict[str, Any]:
     number = (
         item.get("chapterNumber")
+        or item.get("chapter_number")
         or item.get("number")
         or item.get("chapter")
         or fallback_number
     )
     chapter_id = _first_non_empty(
         str(item.get("id") or ""),
+        str(item.get("chapter_id") or ""),
         str(item.get("chapterId") or ""),
         item.get("url") or "",
     )
     released = _first_non_empty(
         item.get("releaseDate"),
+        item.get("published_at"),
         item.get("publishedAt"),
         item.get("updatedAt"),
     )
@@ -606,9 +623,39 @@ def _normalize_chapter_item(item: dict[str, Any], provider: str, fallback_number
         "provider": provider,
         "number": str(number),
         "title": _first_non_empty(item.get("title"), item.get("name")),
-        "language": _first_non_empty(item.get("language"), item.get("lang")).lower() or "en",
+        "language": _first_non_empty(item.get("language"), item.get("translatedLanguage"), item.get("lang")).lower() or "en",
         "released_at": released,
         "raw": item,
+    }
+
+
+async def _search_mangadex_manga(query: str, provider: str, page: int = 1) -> dict[str, Any]:
+    items = await search_mangadex_manga(query)
+    normalized = [
+        _normalize_media_item(item, "manga", provider)
+        for item in items
+        if isinstance(item, dict)
+    ]
+    return {"domain": "manga", "provider": provider, "query": query, "page": page, "items": normalized}
+
+
+async def _fetch_mangadex_manga_detail(media_id: str, provider: str) -> dict[str, Any]:
+    item = await get_mangadex_manga_details(media_id)
+    if not isinstance(item, dict) or not item:
+        raise _http_error("Manga details were not found.", 404)
+
+    chapters = await get_mangadex_chapter_list(media_id, "en")
+    normalized = _normalize_media_item(item, "manga", provider)
+    normalized["chapters"] = [
+        _normalize_chapter_item(chapter, provider, index + 1)
+        for index, chapter in enumerate(chapters)
+        if isinstance(chapter, dict)
+    ]
+    return {
+        "domain": "manga",
+        "provider": provider,
+        "item": normalized,
+        "raw": {"detail": item, "chapters": chapters},
     }
 
 
@@ -985,9 +1032,10 @@ async def get_health_status() -> dict[str, Any]:
     if not configured:
         return {
             "configured": False,
-            "healthy": True,
+            "healthy": False,
             "api_base": "",
-            "message": "Anime providers are handled inside the Python backend. Built-in fallbacks are ready.",
+            "message": "Consumet sidecar is disabled for this build. GRABIX is using built-in anime fallback mode.",
+            "mode": "fallback",
             "default_audio_priority": DEFAULT_AUDIO_PRIORITY,
             "default_subtitle_priority": DEFAULT_SUBTITLE_PRIORITY,
         }
@@ -1198,6 +1246,8 @@ async def search_domain(
         except (HTTPException, ConsumetConfigError):
             return await _search_jikan_anime(query, page, provider)
     elif domain == "manga":
+        if not _consumet_configured():
+            return await _search_mangadex_manga(query, provider, page)
         path = f"/manga/{provider}/{quote(query)}"
         payload = await _fetch_consumet_json(path, ttl_seconds=600)
     else:
@@ -1219,6 +1269,12 @@ async def fetch_domain_info(domain: str, provider: str, media_id: str) -> dict[s
 
     if provider == "openlibrary" or domain in {"books", "comics", "light-novels"}:
         return await _fetch_openlibrary_info(domain, media_id)
+
+    if domain == "anime" and provider == "jikan":
+        detail = await _fetch_jikan_anime_full(media_id, provider)
+        episodes = await _fetch_jikan_anime_episodes(media_id, provider)
+        detail["item"]["episodes"] = episodes.get("items") or []
+        return detail
 
     if domain == "anime" and provider in {"zoro", "hianime", "gogoanime"} and not _consumet_configured():
         detail = await _fetch_jikan_anime_full(media_id, provider)
@@ -1244,6 +1300,8 @@ async def fetch_domain_info(domain: str, provider: str, media_id: str) -> dict[s
             episodes = await _fetch_jikan_anime_episodes(media_id, provider)
             detail["item"]["episodes"] = episodes.get("items") or []
             return detail
+    elif domain == "manga" and not _consumet_configured():
+        return await _fetch_mangadex_manga_detail(media_id, provider)
     elif domain == "manga":
         path = f"/manga/{provider}/info/{quote(media_id)}"
         payload = await _fetch_consumet_json(path, ttl_seconds=1800)
@@ -1278,6 +1336,8 @@ async def fetch_domain_info(domain: str, provider: str, media_id: str) -> dict[s
 
 
 async def fetch_anime_episodes(provider: str, media_id: str) -> dict[str, Any]:
+    if provider == "jikan":
+        return await _fetch_jikan_anime_episodes(media_id, provider)
     if not _consumet_configured():
         return await _fetch_jikan_anime_episodes(media_id, provider)
     try:
@@ -1292,6 +1352,13 @@ async def fetch_anime_episodes(provider: str, media_id: str) -> dict[str, Any]:
 
 
 async def fetch_manga_chapters(provider: str, media_id: str) -> dict[str, Any]:
+    if not _consumet_configured():
+        detail = await _fetch_mangadex_manga_detail(media_id, provider)
+        return {
+            "provider": provider,
+            "id": media_id,
+            "items": detail["item"].get("chapters") or [],
+        }
     detail = await fetch_domain_info("manga", provider, media_id)
     return {
         "provider": provider,
@@ -1389,6 +1456,14 @@ async def fetch_anime_watch(
 
 
 async def fetch_manga_read(provider: str, chapter_id: str) -> dict[str, Any]:
+    if not _consumet_configured():
+        pages = await get_mangadex_chapter_pages(chapter_id)
+        return {
+            "provider": provider,
+            "chapter_id": chapter_id,
+            "pages": pages,
+            "raw": {"provider": "mangadex", "pages": pages},
+        }
     payload = await _fetch_consumet_json(
         f"/manga/{provider}/read/{quote(chapter_id)}",
         ttl_seconds=180,

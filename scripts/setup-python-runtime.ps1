@@ -147,3 +147,18 @@ Write-Host ""
 Write-Host "  Next step: run build-installer.bat" -ForegroundColor Cyan
 Write-Host "======================================================" -ForegroundColor Cyan
 Write-Host ""
+
+# ─── STEP 5: Set PYO3_PYTHON so Rust knows which Python to link against ──────
+Write-Host ""
+Write-Host "======================================================" -ForegroundColor Yellow
+Write-Host "  REQUIRED BEFORE BUILDING:" -ForegroundColor Yellow
+Write-Host "======================================================" -ForegroundColor Yellow
+$bundledPython2 = Join-Path (Join-Path (Join-Path $root "grabix-ui\src-tauri") "python-runtime") "python.exe"
+Write-Host ""
+Write-Host "  Run this in your terminal (PowerShell) before 'cargo tauri build':" -ForegroundColor White
+Write-Host ""
+Write-Host "  `$env:PYO3_PYTHON = `"$bundledPython2`"" -ForegroundColor Cyan
+Write-Host "  cd grabix-ui" -ForegroundColor Cyan
+Write-Host "  cargo tauri build" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "======================================================" -ForegroundColor Yellow

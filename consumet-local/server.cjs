@@ -3,8 +3,24 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const { HiAnime } = require("aniwatch");
 
-const port = Number(process.env.PORT || 3000);
-const siteBase = process.env.HIANIME_SITE_BASE || "https://aniwatchtv.to";
+function readOption(flag) {
+  const directPrefix = `${flag}=`;
+  for (let index = 0; index < process.argv.length; index += 1) {
+    const entry = process.argv[index];
+    if (entry === flag) {
+      return process.argv[index + 1];
+    }
+    if (entry.startsWith(directPrefix)) {
+      return entry.slice(directPrefix.length);
+    }
+  }
+  return "";
+}
+
+const cliPort = readOption("--port");
+const cliSiteBase = readOption("--site-base");
+const port = Number(cliPort || process.env.PORT || 3000);
+const siteBase = cliSiteBase || process.env.HIANIME_SITE_BASE || "https://aniwatchtv.to";
 const ajaxBase = `${siteBase}/ajax/v2`;
 const scraper = new HiAnime.Scraper();
 

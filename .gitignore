@@ -87,3 +87,5 @@ grabix-ui/src-tauri/target/
 
 grabix-ui/src-tauri/bin/grabix-backend/
 grabix-ui/src-tauri/python-runtime/
+grabix-ui/src-tauri/backend-staging/
+grabix-ui/src-tauri/consumet-staging/

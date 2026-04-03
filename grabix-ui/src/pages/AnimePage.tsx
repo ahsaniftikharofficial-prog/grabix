@@ -609,8 +609,8 @@ function AnimeDetail({
   const [finding, setFinding] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [tmdbId, setTmdbId] = useState<number | null>(null);
-  const [candidateAnimes, setCandidateAnimes] = useState<AnimeCardItem[]>(anime.provider === "jikan" ? [] : [anime]);
-  const [resolvedAnime, setResolvedAnime] = useState<AnimeCardItem | null>(anime.provider === "jikan" ? null : anime);
+  const [candidateAnimes, setCandidateAnimes] = useState<AnimeCardItem[]>([anime]);
+  const [resolvedAnime, setResolvedAnime] = useState<AnimeCardItem | null>(anime);
   const [episodes, setEpisodes] = useState<ConsumetEpisode[]>([]);
   const [episode, setEpisode] = useState(1);
   const [dubEpisodeCount, setDubEpisodeCount] = useState<number | null>(null);
@@ -667,7 +667,8 @@ function AnimeDetail({
     setAudio("original");
     setServer("auto");
     setDetailHint("");
-    setResolvedAnime(anime.provider === "jikan" ? null : anime);
+    setResolvedAnime(anime);
+    setCandidateAnimes([anime]);
     setKnownEpisodeCount(anime.episodes_count ?? null);
     episodeCacheRef.current = {};
     setHasHindiFallback(false);
@@ -678,7 +679,9 @@ function AnimeDetail({
 
     Promise.allSettled([
       findTmdbId(anime.title, anime.alt_title),
-      anime.provider === "jikan" ? searchConsumetAnime(anime.title) : Promise.resolve([] as ConsumetMediaSummary[]),
+      anime.provider === "jikan" && consumetHealthy
+        ? searchConsumetAnime(anime.title)
+        : Promise.resolve([] as ConsumetMediaSummary[]),
       fetchJikanEpisodeCount(anime.mal_id),
     ]).then(async ([tmdbResult, searchResult, jikanResult]) => {
       if (cancelled) return;
@@ -689,8 +692,8 @@ function AnimeDetail({
       }
 
       const nextCandidates = anime.provider === "jikan"
-        ? (searchResult.status === "fulfilled" ? searchResult.value.map(toCardItem) : [])
-        : [anime];
+        ? dedupeItems([anime, ...(searchResult.status === "fulfilled" ? searchResult.value.map(toCardItem) : [])])
+        : dedupeItems([anime]);
       setCandidateAnimes(nextCandidates);
 
       const titleCandidates = expandAnimeTitles(anime.title, anime.alt_title).slice(0, 4);
@@ -716,17 +719,11 @@ function AnimeDetail({
         setHasHindiFallback(available);
       });
 
-      if (!consumetHealthy) {
-        setResolvedAnime(null);
-        setEpisodes([]);
-        setDetailHint("Ready to play with GRABIX fallback providers.");
-        setFinding(false);
-        return;
-      }
-
-      setResolvedAnime(nextCandidates[0] ?? null);
+      setResolvedAnime(nextCandidates[0] ?? anime);
       setFinding(false);
-      if (nextCandidates.length > 0) {
+      if (!consumetHealthy) {
+        setDetailHint("Consumet is in fallback mode. GRABIX will use Jikan, Movie Box, and embed backups.");
+      } else if (nextCandidates.length > 0) {
         setDetailHint(`Ready to play. Using ${nextCandidates[0].provider.toUpperCase()} first.`);
       } else {
         setDetailHint("Ready to play with GRABIX fallback providers.");
@@ -753,6 +750,13 @@ function AnimeDetail({
           } catch {
             continue;
           }
+        }
+        if (!cancelled) {
+          setDetailHint(
+            consumetHealthy
+              ? "Episode metadata is limited right now. GRABIX will keep using fallback playback providers."
+              : "Episode metadata is limited, but GRABIX fallback playback is still available."
+          );
         }
       })();
     }).catch(() => {

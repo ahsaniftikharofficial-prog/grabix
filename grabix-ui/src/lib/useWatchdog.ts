@@ -1,16 +1,16 @@
 /**
- * useWatchdog — polls the backend /health/ping endpoint to detect crashes and restarts.
- * Drives the WatchdogBanner: amber while reconnecting, green on recovery, red on timeout.
+ * useWatchdog — monitors backend health AFTER it has successfully started.
+ *
+ * KEY FIX: The watchdog will NEVER show an error during initial startup.
+ * It only activates once the backend has responded successfully at least once.
+ * This prevents the "Backend restart failed" false alarm during PyO3 startup
+ * (which can take 15-60 seconds on first launch).
  *
  * States:
- *  idle         → backend is up, nothing to show
- *  reconnecting → /health/ping failing 3× in a row, banner pulses amber
- *  reconnected  → backend came back after being down, banner shows green for 3 s then hides
- *  failed       → backend stayed down for >30 s, banner shows red permanently
- *
- * FIX: Requires 3 consecutive failures (not 1) before showing the banner,
- *      and uses a 5s timeout instead of 2.5s to avoid false alerts during
- *      brief SQLite lock or heavy API calls.
+ *  idle         → backend healthy (or never connected yet — silent)
+ *  reconnecting → was working, now failing 4× in a row → amber banner
+ *  reconnected  → came back after being down → green 4s then hides
+ *  failed       → stayed down >90s after being confirmed working → red banner
  */
 import { useEffect, useRef, useState } from "react";
 import { BACKEND_API } from "./api";
@@ -22,20 +22,23 @@ export interface WatchdogState {
   isBannerVisible: boolean;
 }
 
-const POLL_MS = 4_000;               // poll every 4s (was 3s)
-const PING_TIMEOUT_MS = 5_000;       // wait up to 5s per ping (was 2.5s)
-const CONSECUTIVE_FAILS_NEEDED = 3;  // require 3 failures in a row before alerting
-const RECONNECT_TIMEOUT_MS = 30_000;
-const BANNER_LINGER_MS = 3_000;
+const POLL_MS               = 5_000;   // poll every 5s
+const PING_TIMEOUT_MS       = 6_000;   // wait up to 6s per ping
+const CONSECUTIVE_FAILS     = 4;       // 4 in a row before reacting
+const RECONNECT_TIMEOUT_MS  = 90_000;  // 90s before declaring "failed"
+const BANNER_LINGER_MS      = 4_000;   // green banner stays 4s
+const INITIAL_POLL_DELAY_MS = 5_000;   // first poll starts 5s after mount
 
 export function useWatchdog(): WatchdogState {
-  const [status, setStatus] = useState<WatchdogStatus>("idle");
-  const [isBannerVisible, setIsBannerVisible] = useState(false);
+  const [status, setStatus]           = useState<WatchdogStatus>("idle");
+  const [isBannerVisible, setVisible] = useState(false);
 
-  const wasDown = useRef(false);
-  const consecutiveFails = useRef(0);
-  const reconnectStart = useRef<number | null>(null);
-  const lingerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // CRITICAL: only show errors once this is true (backend answered successfully >=1x)
+  const hasEverConnected  = useRef(false);
+  const wasDown           = useRef(false);
+  const consecutiveFails  = useRef(0);
+  const reconnectStart    = useRef<number | null>(null);
+  const lingerTimer       = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,65 +49,63 @@ export function useWatchdog(): WatchdogState {
         const res = await fetch(`${BACKEND_API}/health/ping`, {
           method: "GET",
           signal: AbortSignal.timeout(PING_TIMEOUT_MS),
-          cache: "no-store",
+          cache:  "no-store",
         });
 
         if (!res.ok) throw new Error("non-ok");
 
-        // Success — reset failure counter
+        // SUCCESS
         consecutiveFails.current = 0;
+        hasEverConnected.current = true;
 
         if (wasDown.current) {
-          wasDown.current = false;
+          wasDown.current        = false;
           reconnectStart.current = null;
           if (!cancelled) {
             setStatus("reconnected");
-            setIsBannerVisible(true);
+            setVisible(true);
             if (lingerTimer.current) clearTimeout(lingerTimer.current);
             lingerTimer.current = setTimeout(() => {
-              if (!cancelled) {
-                setStatus("idle");
-                setIsBannerVisible(false);
-              }
+              if (!cancelled) { setStatus("idle"); setVisible(false); }
             }, BANNER_LINGER_MS);
           }
         }
       } catch {
         if (cancelled) return;
-
         consecutiveFails.current += 1;
 
-        // Only react after CONSECUTIVE_FAILS_NEEDED failures in a row
-        if (consecutiveFails.current < CONSECUTIVE_FAILS_NEEDED) {
-          return; // transient hiccup — ignore
-        }
+        // Never show an error if we have never successfully connected.
+        // This is a startup delay, not a crash — stay silent.
+        if (!hasEverConnected.current) return;
+
+        if (consecutiveFails.current < CONSECUTIVE_FAILS) return;
 
         if (!wasDown.current) {
-          wasDown.current = true;
+          wasDown.current        = true;
           reconnectStart.current = Date.now();
           setStatus("reconnecting");
-          setIsBannerVisible(true);
+          setVisible(true);
         } else if (
           reconnectStart.current !== null &&
           Date.now() - reconnectStart.current > RECONNECT_TIMEOUT_MS
         ) {
           setStatus("failed");
-          setIsBannerVisible(true);
+          setVisible(true);
         }
       }
     };
 
-    const startTimer = setTimeout(() => {
+    const startTimer = window.setTimeout(() => {
       void probe();
-      const interval = setInterval(() => void probe(), POLL_MS);
-      (startTimer as unknown as { _interval: ReturnType<typeof setInterval> })._interval = interval;
-    }, 2000);
+      const interval = window.setInterval(() => void probe(), POLL_MS);
+      (startTimer as unknown as { _iv: ReturnType<typeof setInterval> })._iv = interval;
+    }, INITIAL_POLL_DELAY_MS);
 
     return () => {
       cancelled = true;
       clearTimeout(startTimer);
-      const interval = (startTimer as unknown as { _interval?: ReturnType<typeof setInterval> })._interval;
-      if (interval !== undefined) clearInterval(interval);
+      const iv = (startTimer as unknown as { _iv?: ReturnType<typeof setInterval> })._iv;
+      if (iv !== undefined) clearInterval(iv);
       if (lingerTimer.current) clearTimeout(lingerTimer.current);
     };
   }, []);

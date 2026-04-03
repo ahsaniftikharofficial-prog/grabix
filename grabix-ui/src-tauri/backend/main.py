@@ -594,7 +594,7 @@ def init_db():
 
 
 init_db()
-recover_download_jobs()
+# recover_download_jobs() is called after app startup (defined later in this file)
 
 
 # ---------------------------------------------------------------------------

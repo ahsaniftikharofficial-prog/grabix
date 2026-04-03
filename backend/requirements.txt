@@ -1,7 +1,7 @@
 fastapi
 uvicorn[standard]
 yt-dlp
-moviebox-api
+moviebox-api==0.4.0.post1
 httpx
 bcrypt
 cinemagoer

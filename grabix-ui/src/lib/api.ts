@@ -56,12 +56,15 @@ export interface StartupSidecarDiagnostic {
   name: string;
   status: string;
   message: string;
+  failure_code?: string;
   port: number;
   binary_path: string;
 }
 
 export interface StartupDiagnosticsPayload {
   app_mode: string;
+  build_id?: string;
+  backend_resource_hash?: string;
   startup_ready: boolean;
   log_path: string;
   diagnostics_path: string;
