@@ -12,11 +12,25 @@
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
-  ; Safety net: if python311.dll somehow ended up in resources/ instead of
-  ; next to the exe, copy it up. build.rs should have handled this already.
-  IfFileExists "$INSTDIR\python311.dll" done_dll_copy 0
-    IfFileExists "$INSTDIR\resources\python-runtime\python311.dll" 0 done_dll_copy
-      DetailPrint "Copying python311.dll to application directory..."
-      CopyFiles /SILENT "$INSTDIR\resources\python-runtime\python311.dll" "$INSTDIR\python311.dll"
-  done_dll_copy:
+  ; Tauri 2 on Windows places resources directly at $INSTDIR\<folder>\
+  ; (NOT $INSTDIR\resources\<folder>\).
+  ; python311.dll is inside $INSTDIR\python-runtime\ but Windows needs it
+  ; RIGHT NEXT TO grabix-ui.exe (i.e. in $INSTDIR\) to load it at startup.
+  DetailPrint "Copying Python DLLs to application directory..."
+  IfFileExists "$INSTDIR\python-runtime\python311.dll" 0 try_resources_path
+    CopyFiles /SILENT "$INSTDIR\python-runtime\python311.dll"    "$INSTDIR\python311.dll"
+    CopyFiles /SILENT "$INSTDIR\python-runtime\python3.dll"      "$INSTDIR\python3.dll"
+    CopyFiles /SILENT "$INSTDIR\python-runtime\vcruntime140.dll" "$INSTDIR\vcruntime140.dll"
+    CopyFiles /SILENT "$INSTDIR\python-runtime\vcruntime140_1.dll" "$INSTDIR\vcruntime140_1.dll"
+    Goto dll_copy_done
+
+  try_resources_path:
+  ; Fallback: some Tauri versions use resources\ subfolder
+  IfFileExists "$INSTDIR\resources\python-runtime\python311.dll" 0 dll_copy_done
+    CopyFiles /SILENT "$INSTDIR\resources\python-runtime\python311.dll"    "$INSTDIR\python311.dll"
+    CopyFiles /SILENT "$INSTDIR\resources\python-runtime\python3.dll"      "$INSTDIR\python3.dll"
+    CopyFiles /SILENT "$INSTDIR\resources\python-runtime\vcruntime140.dll" "$INSTDIR\vcruntime140.dll"
+    CopyFiles /SILENT "$INSTDIR\resources\python-runtime\vcruntime140_1.dll" "$INSTDIR\vcruntime140_1.dll"
+
+  dll_copy_done:
 !macroend

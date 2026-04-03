@@ -115,13 +115,13 @@ Write-Host "[3/4] Packages installed." -ForegroundColor Green
 # Step 4: Verify
 Write-Host "[4/4] Verifying installation..." -ForegroundColor Yellow
 
-$verifyScript = @"
+$verifyScript = @'
 import fastapi, uvicorn, yt_dlp
 print("fastapi:", fastapi.__version__)
 print("uvicorn:", uvicorn.__version__)
 print("yt_dlp:", yt_dlp.version.__version__)
 print("OK: All core packages importable.")
-"@
+'@
 
 & $bundledPython -c $verifyScript
 

@@ -226,10 +226,10 @@ fn find_backend_dir(app: &AppHandle) -> Option<PathBuf> {
 }
 
 // ── Windows DLL loader fix ────────────────────────────────────────────────────
-// python311.dll is delay-loaded (see .cargo/config.toml) so the OS does NOT
-// attempt to find it at process startup. We call this BEFORE prepare_freethreaded_python()
-// so Windows knows exactly where to look when it does load the DLL.
-// This is the permanent fix — no DLL copying, no PATH hacks, no installer tricks.
+// python311.dll is hard-linked (no DELAYLOAD). Windows loads it at process
+// startup from the exe directory (installer-hooks.nsh copies it there).
+// We still call SetDllDirectoryW so Python can find its own extension DLLs
+// (.pyd files) inside python-runtime/ at runtime.
 #[cfg(target_os = "windows")]
 fn set_python_dll_directory(python_home: &PathBuf) {
     use std::os::windows::ffi::OsStrExt;
@@ -262,12 +262,10 @@ fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathB
                 ),
             );
 
-            // WINDOWS: Tell the OS exactly where python311.dll lives BEFORE any
-            // PyO3 call. python311.dll is delay-loaded (see .cargo/config.toml),
-            // meaning the OS does NOT load it at process startup. The first call
-            // to prepare_freethreaded_python() below triggers the load — by that
-            // point SetDllDirectoryW has already pointed Windows at python-runtime/.
-            // This is the permanent fix: no copying, no PATH hacks.
+            // WINDOWS: Tell the OS where Python's extension DLLs live.
+            // python311.dll is already loaded at this point (hard-linked),
+            // but SetDllDirectoryW ensures Python can load .pyd extension
+            // modules from python-runtime/ at runtime.
             #[cfg(target_os = "windows")]
             set_python_dll_directory(&python_home);
 

@@ -3093,8 +3093,6 @@ def _download_direct_media(
                         downloads[dl_id]["stage_label"] = "Connection stalled - reconnecting..."
                         _persist_download_record(dl_id)
                         break  # outer loop retries urlopen with Range header
-                    file_obj.write(chunk)
-                    downloaded_bytes += len(chunk)
                     pct = round((downloaded_bytes / total_bytes) * 100, 1) if total_bytes else 0
                     downloads[dl_id].update({
                         "percent": pct,
@@ -6141,14 +6139,40 @@ async def diagnostics_logs(limit: int = 20):
 # Also called when running directly: `python main.py`
 # uvicorn blocks here forever — this is intentional.
 def run_server() -> None:
-    """Start the uvicorn server. Blocks until the process exits."""
-    import uvicorn  # lazy import keeps startup fast when used as a module
-    uvicorn.run(
+    """Start the uvicorn server. Blocks until the process exits.
+
+    NOTE: When called from PyO3 (embedded in grabix.exe), Python runs on a
+    background Rust thread — NOT the main thread.  uvicorn.run() tries to
+    install signal handlers which Python only allows from the main thread,
+    so it crashes silently.  We use uvicorn.Server directly and disable
+    signal handlers.  On Windows we also force SelectorEventLoop because
+    ProactorEventLoop (Windows 3.8+ default) requires the OS main thread.
+    """
+    import asyncio
+    import uvicorn
+
+    # Windows: SelectorEventLoop works on any thread; ProactorEventLoop does not.
+    if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    config = uvicorn.Config(
         app,
         host="127.0.0.1",
         port=int(os.getenv("GRABIX_BACKEND_PORT", "8000")),
         log_level=os.getenv("GRABIX_BACKEND_LOG_LEVEL", "warning"),
+        log_config=None,  # Don't reconfigure logging — main.py already set it up
     )
+    server = uvicorn.Server(config)
+
+    # Disable signal-handler installation — not allowed outside the main thread.
+    server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(server.serve())
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":
