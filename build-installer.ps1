@@ -119,3 +119,18 @@ Write-Host "    - Backend Python source"                -ForegroundColor White
 Write-Host "  No separate grabix-backend.exe. Backend cannot crash independently." -ForegroundColor Green
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
+
+# ── Post-build: Copy python311.dll next to the exe ────────────────────────────
+# Windows loads linked DLLs before any code runs. The DLL must be in the same
+# folder as the exe, not just in resources/python-runtime/.
+$releaseDir  = Join-Path $frontend "src-tauri\target\release"
+$dllSource   = Join-Path $pythonRuntime "python311.dll"
+$dllDest     = Join-Path $releaseDir "python311.dll"
+
+if (Test-Path $dllSource) {
+    Write-Host "Copying python311.dll next to exe for direct launch support..." -ForegroundColor Yellow
+    Copy-Item $dllSource $dllDest -Force
+    Write-Host "python311.dll copied to: $releaseDir" -ForegroundColor Green
+} else {
+    Write-Host "WARNING: python311.dll not found at $dllSource" -ForegroundColor Yellow
+}

@@ -225,6 +225,28 @@ fn find_backend_dir(app: &AppHandle) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
+// ── Windows DLL loader fix ────────────────────────────────────────────────────
+// python311.dll is delay-loaded (see .cargo/config.toml) so the OS does NOT
+// attempt to find it at process startup. We call this BEFORE prepare_freethreaded_python()
+// so Windows knows exactly where to look when it does load the DLL.
+// This is the permanent fix — no DLL copying, no PATH hacks, no installer tricks.
+#[cfg(target_os = "windows")]
+fn set_python_dll_directory(python_home: &PathBuf) {
+    use std::os::windows::ffi::OsStrExt;
+    extern "system" {
+        fn SetDllDirectoryW(lpPathName: *const u16) -> i32;
+    }
+    let wide: Vec<u16> = python_home
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0u16))
+        .collect();
+    let result = unsafe { SetDllDirectoryW(wide.as_ptr()) };
+    if result == 0 {
+        eprintln!("WARNING: SetDllDirectoryW failed for {:?}", python_home);
+    }
+}
+
 // ── PyO3 backend startup ──────────────────────────────────────────────────────
 
 fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathBuf) {
@@ -240,6 +262,15 @@ fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathB
                 ),
             );
 
+            // WINDOWS: Tell the OS exactly where python311.dll lives BEFORE any
+            // PyO3 call. python311.dll is delay-loaded (see .cargo/config.toml),
+            // meaning the OS does NOT load it at process startup. The first call
+            // to prepare_freethreaded_python() below triggers the load — by that
+            // point SetDllDirectoryW has already pointed Windows at python-runtime/.
+            // This is the permanent fix: no copying, no PATH hacks.
+            #[cfg(target_os = "windows")]
+            set_python_dll_directory(&python_home);
+
             // CRITICAL: Set PYTHONHOME before interpreter initializes.
             // PYTHONHOME tells Python where its stdlib and site-packages live.
             // PYTHONPATH adds our backend/ source directory to the import path.
@@ -247,15 +278,6 @@ fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathB
             std::env::set_var("PYTHONPATH", backend_dir.to_str().unwrap_or(""));
             std::env::set_var("PYTHONDONTWRITEBYTECODE", "1");
             std::env::set_var("PYTHONUNBUFFERED", "1");
-
-            // On Windows: add python-runtime/ to PATH so python311.dll is found.
-            #[cfg(target_os = "windows")]
-            {
-                let dlls_dir = python_home.to_str().unwrap_or("").to_string();
-                if let Ok(current_path) = std::env::var("PATH") {
-                    std::env::set_var("PATH", format!("{};{}", dlls_dir, current_path));
-                }
-            }
 
             // Initialize Python interpreter (must happen before with_gil).
             pyo3::prepare_freethreaded_python();

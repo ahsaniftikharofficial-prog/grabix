@@ -1,0 +1,15 @@
+# Delay-load python311.dll on Windows.
+#
+# Without this: Windows loads python311.dll BEFORE main() runs (hard dependency).
+# The exe fails instantly at launch if the DLL isn't in the same folder.
+#
+# With this: python311.dll is loaded LAZILY — only when the first PyO3 function
+# is called. By then our Rust code has already run SetDllDirectoryW pointing
+# at the bundled python-runtime/ inside the app's resource folder.
+# The DLL is found there automatically. No copying needed anywhere.
+
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "link-arg=/DELAYLOAD:python311.dll",
+    "-C", "link-arg=delayimp.lib"
+]
