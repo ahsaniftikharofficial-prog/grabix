@@ -1,151 +1,121 @@
-# scripts/setup-python-runtime.ps1
-# Downloads cpython-3.11 (python-build-standalone) for Windows x64,
-# extracts it, and pip-installs all GRABIX backend requirements into it.
+# build-installer.ps1
+# GRABIX Installer Build - PyO3 Embedded Backend Edition
 #
-# Output: grabix-ui/src-tauri/python-runtime/
-#         (a self-contained Python that gets bundled into the installer)
+# What this does:
+#   1. Runs setup-python-runtime.ps1 to download and prepare bundled Python
+#   2. Copies backend/ Python source into src-tauri/backend/ (bundled as resource)
+#   3. Sets PYO3_PYTHON so Cargo links against the bundled Python DLL
+#   4. Runs npm run tauri build
 #
-# Run this once before building. Re-run any time requirements.txt changes.
+# Output: grabix-ui\src-tauri\target\release\bundle\nsis\
 
 param(
-    [string]$PythonVersion = "3.11.10",
-    [string]$BuildDate     = "20241016",
-    [switch]$Force
+    [switch]$SkipFrontendInstall,
+    [switch]$SkipPythonSetup,
+    [switch]$SkipNpmInstall
 )
 
 $ErrorActionPreference = "Stop"
 
-$root      = Split-Path -Parent $PSScriptRoot
-$tauriDir  = Join-Path $root "grabix-ui\src-tauri"
-$outputDir = Join-Path $tauriDir "python-runtime"
-$backend   = Join-Path $root "backend"
-$tmpDir    = Join-Path $env:TEMP "grabix-python-setup"
+$root          = Split-Path -Parent $MyInvocation.MyCommand.Path
+$frontend      = Join-Path $root "grabix-ui"
+$backend       = Join-Path $root "backend"
+$tauriDir      = Join-Path $frontend "src-tauri"
+$pythonRuntime = Join-Path $tauriDir "python-runtime"
+$tauriBackend  = Join-Path $tauriDir "backend"
 
-$archiveName = "cpython-$PythonVersion+$BuildDate-x86_64-pc-windows-msvc-install_only.tar.gz"
-$downloadUrl = "https://github.com/indygreg/python-build-standalone/releases/download/$BuildDate/$archiveName"
-$archivePath = Join-Path $tmpDir $archiveName
+function Require-Command([string]$name) {
+    if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
+        throw "Required command not found: $name. Please install it and try again."
+    }
+}
 
 Write-Host ""
-Write-Host "======================================================" -ForegroundColor Cyan
-Write-Host "  GRABIX Python Runtime Setup (python-build-standalone)" -ForegroundColor Cyan
-Write-Host "======================================================" -ForegroundColor Cyan
+Write-Host "==========================================" -ForegroundColor Cyan
+Write-Host "  GRABIX Installer Build (PyO3 Edition)"   -ForegroundColor Cyan
+Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  Python version : $PythonVersion"
-Write-Host "  Output dir     : $outputDir"
+Write-Host "  Architecture: Python embedded inside grabix.exe via PyO3"
+Write-Host "  No separate grabix-backend.exe - crash structurally impossible."
 Write-Host ""
 
-# Step 1: Skip if already set up
-if ((Test-Path (Join-Path $outputDir "python.exe")) -and -not $Force) {
-    Write-Host "[1/4] python-runtime already exists. Skipping download." -ForegroundColor Green
-    Write-Host "      (Use -Force to re-download)"
+Require-Command "npm"
+Require-Command "cargo"
+
+# Step 1: Python runtime
+if ($SkipPythonSetup -and (Test-Path (Join-Path $pythonRuntime "python.exe"))) {
+    Write-Host "[1/5] python-runtime/ found. Skipping setup." -ForegroundColor Green
 } else {
-    # Step 1: Download
-    Write-Host "[1/4] Downloading Python $PythonVersion (python-build-standalone)..." -ForegroundColor Yellow
-
-    New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
-
-    if (-not (Test-Path $archivePath) -or $Force) {
-        Write-Host "      URL: $downloadUrl"
-        try {
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath -UseBasicParsing
-            Write-Host "      Download complete." -ForegroundColor Green
-        } catch {
-            Write-Host ""
-            Write-Host "ERROR: Download failed: $_" -ForegroundColor Red
-            Write-Host "Try downloading manually from:" -ForegroundColor Yellow
-            Write-Host "  $downloadUrl" -ForegroundColor Yellow
-            Write-Host "and saving to: $archivePath" -ForegroundColor Yellow
-            exit 1
-        }
-    } else {
-        Write-Host "      Archive already cached at $archivePath"
+    Write-Host "[1/5] Setting up bundled Python runtime..." -ForegroundColor Yellow
+    $setupScript = Join-Path $root "scripts\setup-python-runtime.ps1"
+    if (-not (Test-Path $setupScript)) {
+        throw "Setup script not found: $setupScript"
     }
-
-    # Step 2: Extract
-    Write-Host "[2/4] Extracting Python runtime..." -ForegroundColor Yellow
-
-    $extractDir = Join-Path $tmpDir "extracted"
-    if (Test-Path $extractDir) {
-        Remove-Item $extractDir -Recurse -Force
-    }
-    New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-
-    # Use tar (available on Windows 10+)
-    & tar -xzf $archivePath -C $extractDir
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: tar extraction failed." -ForegroundColor Red
-        exit 1
-    }
-
-    # The archive extracts to a 'python/' subfolder
-    $extractedPython = Join-Path $extractDir "python"
-    if (-not (Test-Path $extractedPython)) {
-        $extractedPython = Get-ChildItem $extractDir -Directory | Select-Object -First 1 -ExpandProperty FullName
-    }
-
-    if (-not (Test-Path (Join-Path $extractedPython "python.exe"))) {
-        Write-Host "ERROR: python.exe not found in extracted archive at $extractedPython" -ForegroundColor Red
-        exit 1
-    }
-
-    # Move to final output location
-    if (Test-Path $outputDir) {
-        Remove-Item $outputDir -Recurse -Force
-    }
-    Move-Item $extractedPython $outputDir
-    Write-Host "      Extracted to: $outputDir" -ForegroundColor Green
+    & powershell -ExecutionPolicy Bypass -File $setupScript
+    if ($LASTEXITCODE -ne 0) { throw "Python runtime setup failed." }
 }
 
-# Step 3: Install pip packages
-Write-Host "[3/4] Installing GRABIX backend requirements into bundled Python..." -ForegroundColor Yellow
-
-$bundledPython = Join-Path $outputDir "python.exe"
-$requirementsFile = Join-Path $backend "requirements.txt"
-
-if (-not (Test-Path $requirementsFile)) {
-    Write-Host "ERROR: requirements.txt not found at $requirementsFile" -ForegroundColor Red
-    exit 1
+$pythonExe = Join-Path $pythonRuntime "python.exe"
+if (-not (Test-Path $pythonExe)) {
+    throw "python.exe not found at $pythonExe. Run scripts\setup-python-runtime.ps1 first."
 }
+Write-Host "[1/5] Python runtime ready at: $pythonRuntime" -ForegroundColor Green
 
-Write-Host "      Using: $bundledPython"
-Write-Host "      Requirements: $requirementsFile"
-Write-Host ""
+# Step 2: Copy backend source into src-tauri/backend/
+Write-Host "[2/5] Copying backend Python source to src-tauri/backend/..." -ForegroundColor Yellow
 
-& $bundledPython -m pip install --upgrade pip --quiet
-& $bundledPython -m pip install -r $requirementsFile --no-warn-script-location
+if (Test-Path $tauriBackend) { Remove-Item $tauriBackend -Recurse -Force }
+Copy-Item $backend $tauriBackend -Recurse
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: pip install failed." -ForegroundColor Red
-    exit 1
-}
+Get-ChildItem $tauriBackend -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem $tauriBackend -Recurse -Directory -Filter "tests"       | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem $tauriBackend -Recurse -Filter "*.pyc"                  | Remove-Item -Force -ErrorAction SilentlyContinue
 
-Write-Host ""
-Write-Host "[3/4] Packages installed." -ForegroundColor Green
+Write-Host "[2/5] Backend source copied." -ForegroundColor Green
 
-# Step 4: Verify
-Write-Host "[4/4] Verifying installation..." -ForegroundColor Yellow
-
-$verifyScript = @"
-import fastapi, uvicorn, yt_dlp
-print("fastapi:", fastapi.__version__)
-print("uvicorn:", uvicorn.__version__)
-print("yt_dlp:", yt_dlp.version.__version__)
-print("OK: All core packages importable.")
-"@
-
-& $bundledPython -c $verifyScript
-
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "WARNING: Verification failed - some packages may not have installed correctly." -ForegroundColor Yellow
+# Step 3: npm install
+if ($SkipNpmInstall -or $SkipFrontendInstall) {
+    Write-Host "[3/5] Skipping npm install." -ForegroundColor Gray
 } else {
-    Write-Host "[4/4] Verification passed." -ForegroundColor Green
+    Write-Host "[3/5] Installing npm dependencies..." -ForegroundColor Yellow
+    Push-Location $frontend
+    npm install | Out-Host
+    Pop-Location
+    Write-Host "[3/5] npm install done." -ForegroundColor Green
 }
 
+# Step 4: Build
+Write-Host "[4/5] Building GRABIX with Tauri + PyO3..." -ForegroundColor Yellow
+Write-Host "      PYO3_PYTHON = $pythonExe"
 Write-Host ""
-Write-Host "======================================================" -ForegroundColor Cyan
-Write-Host "  Python runtime ready at:" -ForegroundColor Cyan
-Write-Host "  $outputDir" -ForegroundColor White
+Write-Host "  Cargo will link grabix.exe against python311.dll from python-runtime/."
+Write-Host "  Python is embedded inside the exe."
 Write-Host ""
-Write-Host "  Next step: run build-installer.ps1" -ForegroundColor Cyan
-Write-Host "======================================================" -ForegroundColor Cyan
+
+$env:PYO3_PYTHON = $pythonExe
+
+Push-Location $frontend
+npm run tauri build | Out-Host
+$buildResult = $LASTEXITCODE
+Pop-Location
+
+if ($buildResult -ne 0) { throw "Tauri build failed (exit code $buildResult)." }
+
+Write-Host "[4/5] Build succeeded." -ForegroundColor Green
+
+# Step 5: Summary
+Write-Host ""
+Write-Host "[5/5] All done!" -ForegroundColor Green
+Write-Host ""
+Write-Host "==========================================" -ForegroundColor Cyan
+Write-Host "  Installer output:"                        -ForegroundColor Cyan
+Write-Host "  $frontend\src-tauri\target\release\bundle\nsis" -ForegroundColor White
+Write-Host ""
+Write-Host "  grabix.exe now contains:"                 -ForegroundColor White
+Write-Host "    - Rust/Tauri shell + React UI"          -ForegroundColor White
+Write-Host "    - Python 3.11 interpreter via PyO3"     -ForegroundColor White
+Write-Host "    - All pip packages: FastAPI, yt-dlp, etc." -ForegroundColor White
+Write-Host "    - Backend Python source"                -ForegroundColor White
+Write-Host "  No separate grabix-backend.exe. Backend cannot crash independently." -ForegroundColor Green
+Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""

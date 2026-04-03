@@ -13,8 +13,8 @@ import {
   IconServers,
   IconSettings,
   IconSubtitle,
-} from "./Icons";
-import SubtitlePanel from "./SubtitlePanel";
+} from "../components/Icons";
+import SubtitlePanel from "../components/SubtitlePanel";
 import { BACKEND_API } from "../lib/api";
 import { fetchStreamVariants, inferStreamKind } from "../lib/streamProviders";
 import type { StreamSource } from "../lib/streamProviders";

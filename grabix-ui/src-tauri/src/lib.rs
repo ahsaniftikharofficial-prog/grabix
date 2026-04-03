@@ -262,12 +262,12 @@ fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathB
 
             let result = Python::with_gil(|py| -> PyResult<()> {
                 // Put backend_dir at front of sys.path so `import main` works.
-                let sys = py.import("sys")?;
+                let sys = py.import_bound("sys")?;
                 let path = sys.getattr("path")?;
                 path.call_method1("insert", (0, backend_dir.to_str().unwrap_or("")))?;
 
                 log_sidecar(&app, "PyO3: Importing backend main module...");
-                let main_mod = py.import("main")?;
+                let main_mod = py.import_bound("main")?;
 
                 log_sidecar(&app, "PyO3: Calling main.run_server() — uvicorn starting...");
                 // run_server() blocks here forever (uvicorn event loop).
