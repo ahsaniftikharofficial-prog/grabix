@@ -3,6 +3,8 @@ import { useTheme } from "../context/ThemeContext";
 import { useContentFilter } from "../context/ContentFilterContext";
 import {
   BACKEND_API,
+  backendFetch,
+  backendJson,
   fetchDiagnosticsLogs,
   fetchStartupDiagnostics,
   openStartupLog,
@@ -44,6 +46,7 @@ export default function SettingsPage() {
   const [notifications, setNotifications] = useState(true);
   const [format, setFormat] = useState("mp4");
   const [quality, setQuality] = useState("1080p");
+  const [downloadFolder, setDownloadFolder] = useState("~/Downloads/GRABIX");
   const [downloadEngine, setDownloadEngine] = useState<"standard" | "aria2">("standard");
   const [aria2Available, setAria2Available] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -58,13 +61,15 @@ export default function SettingsPage() {
   const [diagnosticsLogs, setDiagnosticsLogs] = useState<DiagnosticsLogsPayload | null>(null);
 
   useEffect(() => {
-    fetch(`${BACKEND_API}/settings`)
-      .then((response) => response.json())
+    backendJson<Record<string, unknown>>(`${BACKEND_API}/settings`)
       .then((data: Record<string, unknown>) => {
         if (typeof data.auto_fetch === "boolean") setAutoFetch(data.auto_fetch);
         if (typeof data.notifications === "boolean") setNotifications(data.notifications);
         if (typeof data.default_format === "string") setFormat(data.default_format);
         if (typeof data.default_quality === "string") setQuality(data.default_quality);
+        if (typeof data.download_folder === "string" && data.download_folder.trim()) {
+          setDownloadFolder(data.download_folder);
+        }
         if (data.default_download_engine === "aria2" || data.default_download_engine === "standard") {
           setDownloadEngine(data.default_download_engine);
         }
@@ -73,8 +78,7 @@ export default function SettingsPage() {
         // Keep defaults when backend settings are unavailable.
       });
 
-    fetch(`${BACKEND_API}/download-engines`)
-      .then((response) => response.json())
+    backendJson<{ engines?: Array<{ id?: string; available?: boolean }> }>(`${BACKEND_API}/download-engines`)
       .then((data: { engines?: Array<{ id?: string; available?: boolean }> }) => {
         const aria2 = data.engines?.find((entry) => entry.id === "aria2");
         setAria2Available(Boolean(aria2?.available));
@@ -87,7 +91,7 @@ export default function SettingsPage() {
 
   const save = () => {
     setSaveError(false);
-    fetch(`${BACKEND_API}/settings`, {
+    backendFetch(`${BACKEND_API}/settings`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -98,8 +102,11 @@ export default function SettingsPage() {
         default_quality: quality,
         default_download_engine: downloadEngine,
       }),
-    })
-      .then(() => {
+    }, { sensitive: true })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Settings save failed with ${response.status}`);
+        }
         setSaved(true);
         setTimeout(() => setSaved(false), 2000);
       })
@@ -141,8 +148,7 @@ export default function SettingsPage() {
   const runSelfTest = async () => {
     setSelfTestRunning(true);
     try {
-      const response = await fetch(`${BACKEND_API}/diagnostics/self-test`);
-      const payload = (await response.json()) as Record<string, unknown>;
+      const payload = await backendJson<Record<string, unknown>>(`${BACKEND_API}/diagnostics/self-test`);
       setSelfTest(payload);
     } catch {
       setSelfTest({
@@ -160,7 +166,7 @@ export default function SettingsPage() {
   const exportDiagnostics = async () => {
     try {
       const [backendPayload, startupPayload] = await Promise.all([
-        fetch(`${BACKEND_API}/diagnostics/export`).then((response) => response.json()),
+        backendJson(`${BACKEND_API}/diagnostics/export`, undefined, { sensitive: true }),
         fetchStartupDiagnostics(),
       ]);
       const blob = new Blob(
@@ -208,7 +214,7 @@ export default function SettingsPage() {
           <SettingRow label="Download folder" sub="Where files are saved on your computer">
             <button className="btn btn-ghost" style={{ gap: 6, fontSize: 12 }}>
               <IconFolder size={14} />
-              ~/Downloads/GRABIX
+              {downloadFolder}
             </button>
           </SettingRow>
           <SettingRow label="Default format" sub="Format used when starting a video download">

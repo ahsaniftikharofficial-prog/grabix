@@ -1,3 +1,5 @@
+import { readJsonStorage, versionedStorageKey, writeJsonStorage } from "./persistentState";
+
 type PerfMetric = {
   name: string;
   startedAt: number;
@@ -5,28 +7,16 @@ type PerfMetric = {
   durationMs: number;
 };
 
-const PERF_STORAGE_KEY = "grabix:perf-metrics";
+const PERF_STORAGE_KEY = versionedStorageKey("grabix:perf-metrics", "v2");
 const perfMarks = new Map<string, number>();
 
 function readMetrics(): PerfMetric[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.sessionStorage.getItem(PERF_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as PerfMetric[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  const value = readJsonStorage<unknown>("session", PERF_STORAGE_KEY, []);
+  return Array.isArray(value) ? (value as PerfMetric[]) : [];
 }
 
 function writeMetrics(metrics: PerfMetric[]) {
-  if (typeof window === "undefined") return;
-  try {
-    window.sessionStorage.setItem(PERF_STORAGE_KEY, JSON.stringify(metrics.slice(-40)));
-  } catch {
-    // Ignore storage failures.
-  }
+  writeJsonStorage("session", PERF_STORAGE_KEY, metrics.slice(-40));
 }
 
 export function markPerf(name: string) {

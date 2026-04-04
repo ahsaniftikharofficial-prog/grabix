@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { IconDownload, IconPlay, IconSearch, IconStar, IconX } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
@@ -9,15 +9,8 @@ import { useContentFilter } from "../context/ContentFilterContext";
 import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
 import { filterAdultContent } from "../lib/contentFilter";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
-import { BACKEND_API } from "../lib/api";
+import { TMDB_BACKDROP_BASE as IMG_LG, TMDB_IMAGE_BASE as IMG_BASE, discoverTmdbMedia, fetchTmdbDetails, fetchTmdbTvSeason, searchTmdbMedia } from "../lib/tmdb";
 import { fetchMovieBoxSources, getTvSources, resolveTvPlaybackSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
-
-const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzdWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
-const TMDB = "https://api.themoviedb.org/3";
-const IMG_BASE = "https://image.tmdb.org/t/p/w500";
-const IMG_LG = "https://image.tmdb.org/t/p/w780";
-const GRABIX = BACKEND_API;
-const HEADERS = { Authorization: `Bearer ${TMDB_TOKEN}`, "Content-Type": "application/json" };
 
 interface Show {
   id: number;
@@ -51,19 +44,24 @@ export default function TVSeriesPage() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  const tf = async (endpoint: string) => (await fetch(`${TMDB}${endpoint}`, { headers: HEADERS })).json();
+  const tf = useCallback(async (kind: "details" | "season", id: number, seasonNumber?: number) => {
+    if (kind === "season" && typeof seasonNumber === "number") {
+      return await fetchTmdbTvSeason(id, seasonNumber);
+    }
+    return await fetchTmdbDetails("tv", id, "external_ids");
+  }, []);
 
   const fetchTMDB = async (nextTab: Tab, nextPage = 1) => {
     setLoading(true);
     setPageError("");
     try {
-      const endpoints: Record<Tab, string> = {
-        trending: `/trending/tv/week?page=${nextPage}`,
-        popular: `/tv/popular?page=${nextPage}`,
-        toprated: `/tv/top_rated?page=${nextPage}`,
-        onair: `/tv/on_the_air?page=${nextPage}`,
+      const endpoints: Record<Tab, "trending" | "popular" | "top_rated" | "on_the_air"> = {
+        trending: "trending",
+        popular: "popular",
+        toprated: "top_rated",
+        onair: "on_the_air",
       };
-      const data = await tf(endpoints[nextTab]);
+      const data = await discoverTmdbMedia("tv", endpoints[nextTab], nextPage);
       const nextShows = (data.results ?? []) as Show[];
       setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
     } catch {
@@ -78,7 +76,7 @@ export default function TVSeriesPage() {
     setLoading(true);
     setPageError("");
     try {
-      const data = await tf(`/search/tv?query=${encodeURIComponent(nextQuery)}&page=${nextPage}`);
+      const data = await searchTmdbMedia("tv", nextQuery, nextPage);
       const nextShows = (data.results ?? []) as Show[];
       setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
     } catch {
@@ -228,7 +226,7 @@ function SeriesActions({ onPlay, onDownload, favId, favItem }: { onPlay: () => v
   );
 }
 
-function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint: string) => Promise<any>; onClose: () => void; onPlay: (player: { title: string; subtitle?: string; poster?: string; sources: StreamSource[] }) => void }) {
+function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (kind: "details" | "season", id: number, seasonNumber?: number) => Promise<any>; onClose: () => void; onPlay: (player: { title: string; subtitle?: string; poster?: string; sources: StreamSource[] }) => void }) {
   const [full, setFull] = useState<Show | null>(null);
   const [season, setSeason] = useState(1);
   const [episode, setEpisode] = useState(1);
@@ -242,7 +240,7 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
   const [downloadError, setDownloadError] = useState("");
 
   useEffect(() => {
-    tf(`/tv/${show.id}?append_to_response=external_ids`).then(setFull).catch(() => {});
+    tf("details", show.id).then(setFull).catch(() => {});
   }, [show.id, tf]);
   useEffect(() => {
     let cancelled = false;
@@ -267,7 +265,7 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
   useEffect(() => {
     let cancelled = false;
     const seasonOwner = full ?? show;
-    tf(`/tv/${show.id}/season/${season}`)
+    tf("season", show.id, season)
       .then((seasonData) => {
         if (cancelled) return;
         const episodes = Array.isArray(seasonData?.episodes) ? seasonData.episodes.length : 0;
@@ -444,15 +442,27 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (endpoint
     const thumbnail = data.poster_path ? `${IMG_BASE}${data.poster_path}` : "";
     const labelBase = `${data.name} — S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")} — English`;
     if (movieBoxDirectSource) {
-      await fetch(`${GRABIX}/download?url=${encodeURIComponent(movieBoxDirectSource.url)}&dl_type=video&title=${encodeURIComponent(`${labelBase} — ${movieBoxDirectSource.quality || "Auto"}`)}&thumbnail=${encodeURIComponent(thumbnail)}`);
-      window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
+      await queueVideoDownload({
+        url: movieBoxDirectSource.url,
+        title: `${labelBase} — ${movieBoxDirectSource.quality || "Auto"}`,
+        thumbnail,
+        category: "TV Series",
+        tags: [`S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}`],
+      });
       return;
     }
 
     const fallbackSource = getTvSources({ tmdbId: show.id, imdbId: data.external_ids?.imdb_id }, { season, episode })[0];
     if (fallbackSource) {
-      await fetch(`${GRABIX}/download?url=${encodeURIComponent(fallbackSource.url)}&dl_type=video&title=${encodeURIComponent(`${labelBase} — ${fallbackSource.quality || "Auto"}`)}&thumbnail=${encodeURIComponent(thumbnail)}`);
-      window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
+      await queueVideoDownload({
+        url: fallbackSource.url,
+        title: `${labelBase} — ${fallbackSource.quality || "Auto"}`,
+        thumbnail,
+        headers: fallbackSource.requestHeaders,
+        forceHls: fallbackSource.kind === "hls",
+        category: "TV Series",
+        tags: [`S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}`],
+      });
     }
   };
   void handleDownload;

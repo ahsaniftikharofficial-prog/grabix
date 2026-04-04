@@ -48,7 +48,6 @@ DEFAULT_APPROVED_MEDIA_HOSTS = (
     "megacloud",
     "rabbitstream",
     "dokicloud",
-    "*",
 )
 
 

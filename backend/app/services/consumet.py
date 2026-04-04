@@ -19,6 +19,7 @@ from app.services.manga_mangadex import (
     search_manga as search_mangadex_manga,
 )
 from app.services.network_policy import validate_outbound_target
+from app.services.runtime_config import has_tmdb_token, tmdb_bearer_token
 from app.services.security import DEFAULT_APPROVED_MEDIA_HOSTS
 
 CONSUMET_API_BASE_ENV = "CONSUMET_API_BASE"
@@ -28,12 +29,6 @@ HTTP_TIMEOUT = 20.0
 HEALTH_TIMEOUT = 0.9
 JIKAN_API_BASE = "https://api.jikan.moe/v4"
 TMDB_API_BASE = "https://api.themoviedb.org/3"
-TMDB_BEARER_TOKEN = (
-    "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIs"
-    "Im5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzdWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLC"
-    "JzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7"
-    "953kJZy7mw"
-)
 _CACHE: dict[str, tuple[float, Any]] = {}
 
 
@@ -143,6 +138,8 @@ async def _fetch_text_url(
 
 
 async def _fetch_tmdb_json(path: str, *, params: dict[str, Any] | None = None, ttl_seconds: int = 600) -> Any:
+    if not has_tmdb_token():
+        raise _http_error("TMDB is not configured for this build.", 503)
     filtered = {key: value for key, value in (params or {}).items() if value is not None and value != ""}
     key = _cache_key("tmdb-json", path, filtered)
     cached = _cache_get(key)
@@ -152,7 +149,7 @@ async def _fetch_tmdb_json(path: str, *, params: dict[str, Any] | None = None, t
     headers = {
         "User-Agent": "GRABIX/1.0",
         "Accept": "application/json, text/plain;q=0.9, */*;q=0.8",
-        "Authorization": f"Bearer {TMDB_BEARER_TOKEN}",
+        "Authorization": f"Bearer {tmdb_bearer_token()}",
         "Content-Type": "application/json",
     }
     try:

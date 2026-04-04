@@ -89,6 +89,7 @@ set "BACKEND_BASE=http://127.0.0.1:%BACKEND_PORT%"
 set "FRONTEND_BASE=http://127.0.0.1:%FRONTEND_PORT%"
 set "CONSUMET_BASE=http://127.0.0.1:%CONSUMET_PORT%"
 set "FRONTEND_ENV_FILE=%FRONTEND%\.env.development.local"
+set "RUNTIME_CONFIG_FILE=%ROOT%runtime-config.local.json"
 
 > "%FRONTEND_ENV_FILE%" (
     echo VITE_GRABIX_API_BASE=%BACKEND_BASE%
@@ -104,7 +105,7 @@ powershell -NoProfile -Command ^
 set "CONSUMET_API_BASE=%CONSUMET_BASE%"
 
 echo  [START] Launching backend on %BACKEND_BASE%
-start "GRABIX Backend" /min cmd /c call "%SCRIPTS%\start-backend.cmd" "%BACKEND%" "%BACKEND_PORT%" "%BACKEND_BASE%" "%BACKEND_LOG%" "%CONSUMET_API_BASE%"
+start "GRABIX Backend" /min cmd /c call "%SCRIPTS%\start-backend.cmd" "%BACKEND%" "%BACKEND_PORT%" "%BACKEND_BASE%" "%BACKEND_LOG%" "%CONSUMET_API_BASE%" "%RUNTIME_CONFIG_FILE%"
 
 echo  [WAIT] Waiting for backend health...
 powershell -NoProfile -Command ^

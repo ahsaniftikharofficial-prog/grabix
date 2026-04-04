@@ -1,7 +1,7 @@
 // grabix-ui/src/pages/MoviesPage.tsx
 // Updated: Play (VidSrc), Download, Favorite buttons
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { IconSearch, IconStar, IconPlay, IconDownload, IconX } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
@@ -10,18 +10,11 @@ import { useFavorites } from "../context/FavoritesContext";
 import { useContentFilter } from "../context/ContentFilterContext";
 import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
 import { filterAdultContent } from "../lib/contentFilter";
-import { BACKEND_API } from "../lib/api";
 import { getCachedJson } from "../lib/cache";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
+import { TMDB_BACKDROP_BASE as IMG_LG, TMDB_IMAGE_BASE as IMG_BASE, discoverTmdbMedia, fetchTmdbDetails, searchTmdbMedia } from "../lib/tmdb";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import { fetchMovieBoxSources, getArchiveMovieSources, getMovieSources, resolveMoviePlaybackSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
-
-const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzdWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
-const TMDB     = "https://api.themoviedb.org/3";
-const IMG_BASE = "https://image.tmdb.org/t/p/w500";
-const IMG_LG   = "https://image.tmdb.org/t/p/w780";
-const GRABIX   = BACKEND_API;
-const HEADERS  = { "Authorization": `Bearer ${TMDB_TOKEN}`, "Content-Type": "application/json" };
 
 interface Movie {
   id: number; title: string; overview: string;
@@ -52,20 +45,18 @@ export default function MoviesPage() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  const tf = async (ep: string) => await getCachedJson<any>({
-    key: `tmdb:${ep}`,
-    url: `${TMDB}${ep}`,
-    ttlMs: 180_000,
-    scope: "session",
-    init: { headers: HEADERS },
-  });
+  const tf = useCallback(async (id: number) => await fetchTmdbDetails("movie", id), []);
 
   const fetchTMDB = async (t: Tab, p = 1) => {
     setLoading(true);
     setPageError("");
     try {
-      const eps: Record<string, string> = { trending: `/trending/movie/week?page=${p}`, popular: `/movie/popular?page=${p}`, toprated: `/movie/top_rated?page=${p}` };
-      const d = await tf(eps[t]);
+      const categories: Record<Exclude<Tab, "free">, "trending" | "popular" | "top_rated"> = {
+        trending: "trending",
+        popular: "popular",
+        toprated: "top_rated",
+      };
+      const d = await discoverTmdbMedia("movie", categories[t as Exclude<Tab, "free">], p);
       setMovies(p === 1 ? (d.results ?? []) : prev => [...prev, ...(d.results ?? [])]);
     } catch {
       setMovies([]);
@@ -94,7 +85,7 @@ export default function MoviesPage() {
     setLoading(true);
     setPageError("");
     try {
-      const d = await tf(`/search/movie?query=${encodeURIComponent(q)}&page=${p}`);
+      const d = await searchTmdbMedia("movie", q, p);
       setMovies(p === 1 ? (d.results ?? []) : prev => [...prev, ...(d.results ?? [])]);
     } catch {
       setMovies([]);
@@ -268,7 +259,7 @@ function ActionButtons({ onPlay, onDownload, onHindi, favId, favItem }: { onPlay
   );
 }
 
-function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: () => void; tf: (e: string) => Promise<any>; onPlay: (player: { title: string; subtitle?: string; poster?: string; sources: StreamSource[] }) => void }) {
+function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: () => void; tf: (id: number) => Promise<any>; onPlay: (player: { title: string; subtitle?: string; poster?: string; sources: StreamSource[] }) => void }) {
   const [full, setFull]       = useState<Movie | null>(null);
   const [altTitles, setAltTitles] = useState<string[]>([]);
   const [prefetchedPlaybackSources, setPrefetchedPlaybackSources] = useState<StreamSource[]>([]);
@@ -280,7 +271,7 @@ function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: ()
   const [downloadLoading, setDownloadLoading] = useState(false);
   const [downloadError, setDownloadError] = useState("");
 
-  useEffect(() => { tf(`/movie/${movie.id}`).then(setFull).catch(() => {}); }, [movie.id]);
+  useEffect(() => { tf(movie.id).then(setFull).catch(() => {}); }, [movie.id, tf]);
   useEffect(() => {
     let cancelled = false;
     fetchConsumetMetaSearch(movie.title, "movie")
@@ -453,15 +444,25 @@ function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: ()
     const thumbnail = d.poster_path ? `${IMG_BASE}${d.poster_path}` : "";
     const englishTitle = `${d.title} — English — ${movieBoxDirectSource?.quality || "Auto"}`;
     if (movieBoxDirectSource) {
-      await fetch(`${GRABIX}/download?url=${encodeURIComponent(movieBoxDirectSource.url)}&dl_type=video&title=${encodeURIComponent(englishTitle)}&thumbnail=${encodeURIComponent(thumbnail)}`);
-      window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
+      await queueVideoDownload({
+        url: movieBoxDirectSource.url,
+        title: englishTitle,
+        thumbnail,
+        category: "Movies",
+      });
       return;
     }
 
     const fallbackSource = getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id })[0];
     if (fallbackSource) {
-      await fetch(`${GRABIX}/download?url=${encodeURIComponent(fallbackSource.url)}&dl_type=video&title=${encodeURIComponent(`${d.title} — English — ${fallbackSource.quality || "Auto"}`)}&thumbnail=${encodeURIComponent(thumbnail)}`);
-      window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
+      await queueVideoDownload({
+        url: fallbackSource.url,
+        title: `${d.title} — English — ${fallbackSource.quality || "Auto"}`,
+        thumbnail,
+        headers: fallbackSource.requestHeaders,
+        forceHls: fallbackSource.kind === "hls",
+        category: "Movies",
+      });
     }
   };
   void handleDownload;
@@ -561,7 +562,14 @@ function FreeDetail({ movie, onClose, onPlay }: { movie: ArchiveItem; onClose: (
   const archiveUrl = `https://archive.org/details/${movie.identifier}`;
 
   const sendDl = async () => {
-    try { await fetch(`${GRABIX}/download?url=${encodeURIComponent(archiveUrl)}&dl_type=video&title=${encodeURIComponent(`${movie.title} — English — Source`)}&thumbnail=${encodeURIComponent(movie.thumb ?? "")}`); }
+    try {
+      await queueVideoDownload({
+        url: archiveUrl,
+        title: `${movie.title} — English — Source`,
+        thumbnail: movie.thumb ?? "",
+        category: "Movies",
+      });
+    }
     catch { /* ignore */ }
   };
 

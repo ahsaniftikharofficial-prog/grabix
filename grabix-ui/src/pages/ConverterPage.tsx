@@ -2,7 +2,7 @@ import { useState, useRef } from "react";
 import {
   IconConvert, IconFolder, IconX, IconAlert, IconUpload,
 } from "../components/Icons";
-import { BACKEND_API } from "../lib/api";
+import { BACKEND_API, backendFetch } from "../lib/api";
 const API = BACKEND_API;
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -83,10 +83,14 @@ export default function ConverterPage() {
     setInputPath("");
 
     try {
-      const res = await fetch(
+      const res = await backendFetch(
         `${API}/convert?input_path=${encodeURIComponent(path)}&output_format=${outputFormat}`,
-        { method: "POST" }
+        { method: "POST" },
+        { sensitive: true }
       );
+      if (!res.ok) {
+        throw new Error(`Convert start failed with ${res.status}`);
+      }
       const data = await res.json();
       const jobId = data.job_id;
 
@@ -133,7 +137,10 @@ export default function ConverterPage() {
   const openOutput = async (path: string) => {
     if (!path) return;
     try {
-      await fetch(`${API}/open-download-folder?path=${encodeURIComponent(path)}`, { method: "POST" });
+      const response = await backendFetch(`${API}/open-download-folder?path=${encodeURIComponent(path)}`, { method: "POST" }, { sensitive: true });
+      if (!response.ok) {
+        throw new Error(`Could not open folder (${response.status})`);
+      }
     } catch { /* offline */ }
   };
 

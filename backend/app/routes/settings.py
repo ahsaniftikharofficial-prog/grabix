@@ -1,8 +1,14 @@
-import sys
-from importlib import import_module
-
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
+
+from app.services.settings_service import (
+    configure_adult_content_password,
+    get_settings_payload,
+    unlock_adult_content_password,
+    update_settings_payload,
+)
+from db_helpers import DEFAULT_SETTINGS, load_settings, save_settings_to_disk
+from app.services.runtime_config import default_download_dir
 
 
 class AdultContentUnlockRequest(BaseModel):
@@ -15,35 +21,35 @@ class AdultContentConfigureRequest(BaseModel):
 router = APIRouter()
 
 
-def _main_module():
-    main_module = sys.modules.get("main") or sys.modules.get("__main__") or sys.modules.get("backend.main")
-    if main_module is not None:
-        return main_module
-    try:
-        return import_module("main")
-    except ModuleNotFoundError:
-        return import_module("backend.main")
-
-
 @router.get("/settings")
 def get_settings():
-    main_module = _main_module()
-    return main_module.get_settings()
+    return get_settings_payload(default_settings=DEFAULT_SETTINGS, load_settings=load_settings)
 
 
 @router.post("/settings")
 def update_settings(data: dict):
-    main_module = _main_module()
-    return main_module.update_settings(data)
+    return update_settings_payload(
+        data,
+        default_settings=DEFAULT_SETTINGS,
+        load_settings=load_settings,
+        save_settings_to_disk=save_settings_to_disk,
+        default_download_dir=str(default_download_dir()),
+    )
 
 
 @router.post("/settings/adult-content/configure")
 def configure_adult_content(data: AdultContentConfigureRequest):
-    main_module = _main_module()
-    return main_module.configure_adult_content(data)
+    return configure_adult_content_password(
+        data.password,
+        load_settings=load_settings,
+        save_settings_to_disk=save_settings_to_disk,
+    )
 
 
 @router.post("/settings/adult-content/unlock")
 def unlock_adult_content(data: AdultContentUnlockRequest, request: Request):
-    main_module = _main_module()
-    return main_module.unlock_adult_content(data, request)
+    return unlock_adult_content_password(
+        data.password,
+        request,
+        load_settings=load_settings,
+    )

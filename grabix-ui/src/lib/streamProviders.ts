@@ -1,4 +1,4 @@
-import { BACKEND_API } from "./api";
+import { BACKEND_API, extractBackendErrorMessage } from "./api";
 export { BACKEND_API } from "./api";
 import { getCachedJson } from "./cache";
 
@@ -269,7 +269,7 @@ async function readProviderResolutionError(response: Response): Promise<string> 
     const payload = (await response.json()) as { error?: ProviderResolutionError; detail?: unknown };
     const message =
       payload.error?.message ||
-      (typeof payload.detail === "string" ? payload.detail : "") ||
+      extractBackendErrorMessage(payload, "") ||
       `Request failed with ${response.status}`;
     const action = payload.error?.user_action ? ` ${payload.error.user_action}` : "";
     return `${message}${action}`.trim();

@@ -1,20 +1,9 @@
-import sys
-from importlib import import_module
-
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from app.services.route_registry import get_route_handler
+
 router = APIRouter()
-
-
-def _main_module():
-    main_module = sys.modules.get("main") or sys.modules.get("__main__") or sys.modules.get("backend.main")
-    if main_module is not None:
-        return main_module
-    try:
-        return import_module("main")
-    except ModuleNotFoundError:
-        return import_module("backend.main")
 
 
 class DownloadRequest(BaseModel):
@@ -59,8 +48,8 @@ def start_download(
     tags_csv: str = "",
     download_engine: str = "",
 ):
-    main_module = _main_module()
-    return main_module.start_download(
+    start_download_handler = get_route_handler("downloads", "start_download")
+    return start_download_handler(
         url=url,
         title=title,
         thumbnail=thumbnail,
@@ -84,8 +73,8 @@ def start_download(
 
 @router.post("/download")
 def start_download_post(payload: DownloadRequest):
-    main_module = _main_module()
-    return main_module.start_download(
+    start_download_handler = get_route_handler("downloads", "start_download")
+    return start_download_handler(
         url=payload.url,
         title=payload.title,
         thumbnail=payload.thumbnail,
@@ -109,59 +98,49 @@ def start_download_post(payload: DownloadRequest):
 
 @router.get("/download-status/{dl_id}")
 def download_status(dl_id: str):
-    main_module = _main_module()
-    return main_module.download_status(dl_id)
+    return get_route_handler("downloads", "download_status")(dl_id)
 
 
 @router.get("/progress/{dl_id}")
 def progress_alias(dl_id: str):
-    main_module = _main_module()
-    return main_module.progress_alias(dl_id)
+    return get_route_handler("downloads", "progress_alias")(dl_id)
 
 
 @router.get("/downloads")
 def list_downloads():
-    main_module = _main_module()
-    return main_module.list_downloads()
+    return get_route_handler("downloads", "list_downloads")()
 
 
 @router.post("/open-download-folder")
 def open_download_folder(path: str = ""):
-    main_module = _main_module()
-    return main_module.open_download_folder(path)
+    return get_route_handler("downloads", "open_download_folder")(path)
 
 
 @router.post("/open-local-file")
 def open_local_file(path: str):
-    main_module = _main_module()
-    return main_module.open_local_file(path)
+    return get_route_handler("downloads", "open_local_file")(path)
 
 
 @router.post("/downloads/{dl_id}/action")
 def download_action(dl_id: str, action: str):
-    main_module = _main_module()
-    return main_module.download_action(dl_id, action)
+    return get_route_handler("downloads", "download_action")(dl_id, action)
 
 
 @router.delete("/downloads/{dl_id}")
 def delete_download(dl_id: str):
-    main_module = _main_module()
-    return main_module.delete_download(dl_id)
+    return get_route_handler("downloads", "delete_download")(dl_id)
 
 
 @router.post("/downloads/stop-all")
 def stop_all_downloads():
-    main_module = _main_module()
-    return main_module.stop_all_downloads()
+    return get_route_handler("downloads", "stop_all_downloads")()
 
 
 @router.get("/runtime/dependencies")
 def get_runtime_dependencies():
-    main_module = _main_module()
-    return main_module.get_runtime_dependencies()
+    return get_route_handler("downloads", "get_runtime_dependencies")()
 
 
 @router.post("/runtime/dependencies/install")
 def install_runtime_dependency(dep_id: str):
-    main_module = _main_module()
-    return main_module.install_runtime_dependency(dep_id)
+    return get_route_handler("downloads", "install_runtime_dependency")(dep_id)

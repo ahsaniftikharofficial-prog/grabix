@@ -1,10 +1,11 @@
 import json
 import logging
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
 from typing import Any
 
-LOG_DIR = Path.home() / "Downloads" / "GRABIX" / "logs"
+from app.services.runtime_config import logs_dir
+
+LOG_DIR = logs_dir()
 MAX_LOG_BYTES = 1_000_000
 BACKUP_COUNT = 3
 _CONFIGURED = False

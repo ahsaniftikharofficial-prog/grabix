@@ -15,7 +15,7 @@ import {
   IconX,
 } from "../components/Icons";
 import { PageEmptyState, PageErrorState } from "../components/PageStates";
-import { BACKEND_API } from "../lib/api";
+import { BACKEND_API, backendFetch, backendJson } from "../lib/api";
 import { deleteOfflineMangaRecord, listOfflineMangaRecords, type OfflineMangaRecord } from "../lib/mangaOffline";
 
 const API = BACKEND_API;
@@ -256,7 +256,7 @@ export default function LibraryPage() {
     setLoading(true);
     setPageError("");
     Promise.all([
-      fetch(`${API}/library/index`).then((response) => response.json() as Promise<Array<Record<string, unknown>>>),
+      backendJson<Array<Record<string, unknown>>>(`${API}/library/index`),
       listOfflineMangaRecords().catch(() => []),
     ])
       .then(([rows, offlineManga]) => {
@@ -348,7 +348,10 @@ export default function LibraryPage() {
       return;
     }
     try {
-      await fetch(`${API}/open-download-folder?path=${encodeURIComponent(item.file_path)}`, { method: "POST" });
+      const response = await backendFetch(`${API}/open-download-folder?path=${encodeURIComponent(item.file_path)}`, { method: "POST" }, { sensitive: true });
+      if (!response.ok) {
+        throw new Error(`Reveal failed with ${response.status}`);
+      }
     } catch {
       // Ignore browser-only failures.
     }
@@ -365,7 +368,7 @@ export default function LibraryPage() {
       return;
     }
     try {
-      const response = await fetch(`${API}/open-local-file?path=${encodeURIComponent(item.file_path)}`, { method: "POST" });
+      const response = await backendFetch(`${API}/open-local-file?path=${encodeURIComponent(item.file_path)}`, { method: "POST" }, { sensitive: true });
       if (!response.ok) {
         throw new Error(`Open failed with ${response.status}`);
       }
@@ -378,11 +381,14 @@ export default function LibraryPage() {
     if (item.source_type === "offline-manga") {
       await deleteOfflineMangaRecord(item.offline_key);
     } else if (item.source_type === "untracked") {
-      await fetch(`${API}/library/file?path=${encodeURIComponent(item.file_path)}`, { method: "DELETE" });
+      const response = await backendFetch(`${API}/library/file?path=${encodeURIComponent(item.file_path)}`, { method: "DELETE" }, { sensitive: true });
+      if (!response.ok) throw new Error(`Delete failed with ${response.status}`);
     } else if (item.source_type === "history" && item.broken) {
-      await fetch(`${API}/library/stale/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+      const response = await backendFetch(`${API}/library/stale/${encodeURIComponent(item.id)}`, { method: "DELETE" }, { sensitive: true });
+      if (!response.ok) throw new Error(`Delete failed with ${response.status}`);
     } else {
-      await fetch(`${API}/history/${item.id}?delete_file=true`, { method: "DELETE" });
+      const response = await backendFetch(`${API}/history/${item.id}?delete_file=true`, { method: "DELETE" }, { sensitive: true });
+      if (!response.ok) throw new Error(`Delete failed with ${response.status}`);
     }
     setItems((current) => current.filter((entry) => entry.id !== item.id));
     setSelectedIds((current) => {
@@ -417,14 +423,17 @@ export default function LibraryPage() {
         return;
       }
       if (item.source_type === "untracked") {
-        await fetch(`${API}/library/file?path=${encodeURIComponent(item.file_path)}`, { method: "DELETE" });
+        const response = await backendFetch(`${API}/library/file?path=${encodeURIComponent(item.file_path)}`, { method: "DELETE" }, { sensitive: true });
+        if (!response.ok) throw new Error(`Delete failed with ${response.status}`);
         return;
       }
       if (item.source_type === "history" && item.broken) {
-        await fetch(`${API}/library/stale/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+        const response = await backendFetch(`${API}/library/stale/${encodeURIComponent(item.id)}`, { method: "DELETE" }, { sensitive: true });
+        if (!response.ok) throw new Error(`Delete failed with ${response.status}`);
         return;
       }
-      await fetch(`${API}/history/${item.id}?delete_file=true`, { method: "DELETE" });
+      const response = await backendFetch(`${API}/history/${item.id}?delete_file=true`, { method: "DELETE" }, { sensitive: true });
+      if (!response.ok) throw new Error(`Delete failed with ${response.status}`);
     }));
     setItems((current) => current.filter((item) => !selectedIds.has(item.id)));
     setSelectedIds(new Set());
@@ -446,7 +455,10 @@ export default function LibraryPage() {
   const organizeLibrary = async () => {
     setOrganizing(true);
     try {
-      const response = await fetch(`${API}/library/organize`, { method: "POST" });
+      const response = await backendFetch(`${API}/library/organize`, { method: "POST" }, { sensitive: true });
+      if (!response.ok) {
+        throw new Error(`Library organize failed with ${response.status}`);
+      }
       const payload = (await response.json()) as { moved?: number };
       showToast(`Organized ${payload.moved || 0} file(s).`);
       load();
@@ -460,7 +472,10 @@ export default function LibraryPage() {
   const reconcileLibrary = async () => {
     setReconciling(true);
     try {
-      const response = await fetch(`${API}/library/reconcile`, { method: "POST" });
+      const response = await backendFetch(`${API}/library/reconcile`, { method: "POST" }, { sensitive: true });
+      if (!response.ok) {
+        throw new Error(`Library reconcile failed with ${response.status}`);
+      }
       const payload = (await response.json()) as {
         marked_missing?: number;
         restored?: number;
@@ -479,10 +494,14 @@ export default function LibraryPage() {
 
   const saveMetadata = async (tags: string, category: string) => {
     if (!editItem || editItem.source_type !== "history") return;
-    await fetch(
+    const response = await backendFetch(
       `${API}/history/${editItem.id}?tags=${encodeURIComponent(tags)}&category=${encodeURIComponent(category)}`,
-      { method: "PATCH" }
+      { method: "PATCH" },
+      { sensitive: true }
     );
+    if (!response.ok) {
+      throw new Error(`Save failed with ${response.status}`);
+    }
     setItems((current) =>
       current.map((item) => (item.id === editItem.id ? { ...item, tags, category } : item))
     );

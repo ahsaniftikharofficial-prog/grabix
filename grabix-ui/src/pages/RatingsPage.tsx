@@ -1,11 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from "react";
+import { discoverTmdbMedia, TMDB_IMAGE_BASE as IMG_BASE } from "../lib/tmdb";
 
 const API        = "https://api.imdbapi.dev";
 const JIKAN      = "https://api.jikan.moe/v4";
-const TMDB       = "https://api.themoviedb.org/3";
-const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzdWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
-const IMG_BASE   = "https://image.tmdb.org/t/p/w500";
-const TMDB_HEADERS: Record<string,string> = { "Authorization": `Bearer ${TMDB_TOKEN}`, "Content-Type": "application/json" };
 
 interface SearchResult {
   id: string; primaryTitle: string; startYear: number; endYear?: number;
@@ -104,7 +101,7 @@ export default function RatingsPage() {
     // Movies — 3 pages (~60 items)
     try {
       const pages = await Promise.allSettled([1,2,3].map(p =>
-        fetch(`${TMDB}/movie/top_rated?page=${p}`, { headers: TMDB_HEADERS }).then(r => r.json())
+        discoverTmdbMedia("movie", "top_rated", p)
       ));
       const movies: TmdbMovie[] = pages
         .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled")
@@ -114,7 +111,7 @@ export default function RatingsPage() {
     // TV — 3 pages (~60 items)
     try {
       const pages = await Promise.allSettled([1,2,3].map(p =>
-        fetch(`${TMDB}/tv/top_rated?page=${p}`, { headers: TMDB_HEADERS }).then(r => r.json())
+        discoverTmdbMedia("tv", "top_rated", p)
       ));
       const shows: TmdbShow[] = pages
         .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled")

@@ -1,4 +1,4 @@
-import { BACKEND_API } from "./api";
+import { BACKEND_API, extractBackendErrorMessage } from "./api";
 import { getCachedJson } from "./cache";
 
 export const MANGA_SOURCES = {
@@ -111,12 +111,8 @@ async function getCachedMangaJson<T>(key: string, url: string, ttlMs: number, sc
     mapError: async (response) => {
       let detail = "";
       try {
-        const data = (await response.json()) as { detail?: string | { message?: string } };
-        detail = typeof data?.detail === "string"
-          ? data.detail
-          : typeof data?.detail === "object" && typeof data.detail?.message === "string"
-            ? data.detail.message
-            : "";
+        const data = await response.json();
+        detail = extractBackendErrorMessage(data, "");
       } catch {
         detail = "";
       }

@@ -14,18 +14,22 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
 from app.services.logging_utils import get_logger, log_event
+from app.services.runtime_config import db_path, default_download_dir, settings_path
 
 # ── Path constants (single source of truth) ──────────────────────────────────
-DOWNLOAD_DIR = str(Path.home() / "Downloads" / "GRABIX")
-DB_PATH      = str(Path.home() / "Downloads" / "GRABIX" / "grabix.db")
-SETTINGS_PATH = str(Path.home() / "Downloads" / "GRABIX" / "grabix_settings.json")
+DOWNLOAD_DIR = str(default_download_dir())
+DB_PATH = str(db_path())
+SETTINGS_PATH = str(settings_path())
 
 # Ensure download dir exists before any DB or file operations
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+Path(SETTINGS_PATH).parent.mkdir(parents=True, exist_ok=True)
 
 backend_logger   = get_logger("backend")
 downloads_logger = get_logger("downloads")
@@ -215,14 +219,39 @@ def load_settings() -> dict:
                 data = json.load(fh)
             return {**DEFAULT_SETTINGS, **data}
     except Exception:
-        pass
+        backup_path = f"{SETTINGS_PATH}.bak"
+        try:
+            if os.path.exists(backup_path):
+                with open(backup_path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                return {**DEFAULT_SETTINGS, **data}
+        except Exception:
+            pass
     return dict(DEFAULT_SETTINGS)
 
 
 def save_settings_to_disk(data: dict) -> None:
+    target = Path(SETTINGS_PATH)
+    backup = Path(f"{SETTINGS_PATH}.bak")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, indent=2, ensure_ascii=True)
     try:
-        with open(SETTINGS_PATH, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            delete=False,
+            dir=str(target.parent),
+            prefix="grabix-settings-",
+            suffix=".tmp",
+        ) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+
+        if target.exists():
+            shutil.copy2(target, backup)
+        temp_path.replace(target)
     except Exception as e:
         log_event(
             backend_logger, logging.ERROR,
@@ -230,6 +259,7 @@ def save_settings_to_disk(data: dict) -> None:
             message="Settings save failed.",
             details={"error": str(e)},
         )
+        raise
 
 
 # ── Format / byte utilities ───────────────────────────────────────────────────

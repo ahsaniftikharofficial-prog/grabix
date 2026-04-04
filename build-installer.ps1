@@ -20,11 +20,14 @@ $tauriBackend = Join-Path $tauriBackendRoot "backend"
 $tauriConsumetRoot = Join-Path $tauriDir "consumet-staging"
 $tauriConsumetApp = Join-Path $tauriConsumetRoot "consumet-local"
 $tauriConsumetRuntime = Join-Path $tauriConsumetRoot "node-runtime"
+$tauriGeneratedRoot = Join-Path $tauriDir "generated"
+$tauriRuntimeConfig = Join-Path $tauriGeneratedRoot "runtime-config.json"
 $releaseDir = Join-Path $frontend "src-tauri\target\release"
 $releaseExe = Join-Path $releaseDir "grabix-ui.exe"
 $startupDiagnosticsDir = Join-Path $env:LOCALAPPDATA "com.grabix.app\diagnostics"
 $startupLogPath = Join-Path $startupDiagnosticsDir "sidecar-startup.log"
 $startupJsonPath = Join-Path $startupDiagnosticsDir "startup-diagnostics.json"
+$desktopAuthPath = Join-Path (Join-Path $env:LOCALAPPDATA "com.grabix.app") "desktop-auth.json"
 $bundleBackendSubdir = "backend-staging/backend"
 $packagedConsumetPort = 3100
 $installerNsis = Join-Path $frontend "src-tauri\target\release\bundle\nsis\GRABIX_0.1.0_x64-setup.exe"
@@ -51,10 +54,94 @@ function Require-Command([string]$Name) {
     }
 }
 
+function Throw-BuildFailure(
+    [string]$Code,
+    [string]$Step,
+    [string]$Message,
+    [string]$Hint = "",
+    [string]$DiagnosticsPath = "",
+    [string]$LogPath = ""
+) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("[$Code] $Step") | Out-Null
+    $lines.Add($Message) | Out-Null
+    if (-not [string]::IsNullOrWhiteSpace($DiagnosticsPath)) {
+        $lines.Add("Diagnostics: $DiagnosticsPath") | Out-Null
+    }
+    if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+        $lines.Add("Startup log: $LogPath") | Out-Null
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Hint)) {
+        $lines.Add("Next action: $Hint") | Out-Null
+    }
+    throw ([string]::Join("`n", $lines))
+}
+
 function Remove-PathIfPresent([string]$Path) {
     if (Test-Path -LiteralPath $Path) {
         Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Write-PackagedRuntimeConfig([string]$DestinationPath) {
+    $runtimeConfigSource = [string]$env:GRABIX_RUNTIME_CONFIG_SOURCE
+    $tmdbToken = [string]$env:GRABIX_TMDB_BEARER_TOKEN
+    if ([string]::IsNullOrWhiteSpace($runtimeConfigSource)) {
+        $defaultLocalRuntimeConfig = Join-Path $root "runtime-config.local.json"
+        if (Test-Path -LiteralPath $defaultLocalRuntimeConfig) {
+            $runtimeConfigSource = $defaultLocalRuntimeConfig
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($runtimeConfigSource)) {
+        if (-not (Test-Path -LiteralPath $runtimeConfigSource)) {
+            Throw-BuildFailure `
+                -Code "tmdb_config_missing" `
+                -Step "Runtime config staging" `
+                -Message "GRABIX_RUNTIME_CONFIG_SOURCE was set, but the file does not exist: $runtimeConfigSource" `
+                -Hint "Point GRABIX_RUNTIME_CONFIG_SOURCE at a valid JSON file that contains tmdb_bearer_token."
+        }
+
+        $raw = Get-Content -LiteralPath $runtimeConfigSource -Raw -ErrorAction Stop
+        try {
+            $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            Throw-BuildFailure `
+                -Code "tmdb_config_missing" `
+                -Step "Runtime config staging" `
+                -Message "The runtime config file is not valid JSON: $runtimeConfigSource" `
+                -Hint "Fix the JSON syntax and make sure it contains tmdb_bearer_token."
+        }
+        $resolvedToken = [string]$parsed.tmdb_bearer_token
+        if ([string]::IsNullOrWhiteSpace($resolvedToken)) {
+            Throw-BuildFailure `
+                -Code "tmdb_config_missing" `
+                -Step "Runtime config staging" `
+                -Message "The runtime config file does not contain tmdb_bearer_token: $runtimeConfigSource" `
+                -Hint "Add tmdb_bearer_token to the runtime config JSON before building the installer."
+        }
+
+        New-Item -ItemType Directory -Path (Split-Path -Parent $DestinationPath) -Force | Out-Null
+        Set-Content -LiteralPath $DestinationPath -Value $raw -Encoding UTF8
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($tmdbToken)) {
+        Throw-BuildFailure `
+            -Code "tmdb_config_missing" `
+            -Step "Runtime config staging" `
+            -Message "No TMDB runtime configuration was provided for this release build." `
+            -Hint "Set GRABIX_TMDB_BEARER_TOKEN, set GRABIX_RUNTIME_CONFIG_SOURCE, or create runtime-config.local.json before running build-installer.bat."
+    }
+
+    $payload = [ordered]@{
+        managed_by = "build-installer"
+        generated_at_utc = (Get-Date).ToUniversalTime().ToString("o")
+        tmdb_bearer_token = $tmdbToken.Trim()
+    }
+
+    New-Item -ItemType Directory -Path (Split-Path -Parent $DestinationPath) -Force | Out-Null
+    $payload | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $DestinationPath -Encoding UTF8
 }
 
 function Test-IncludedBackendFile([System.IO.FileInfo]$File, [string]$RootPath) {
@@ -207,6 +294,39 @@ function Get-BackendManifestHash([string]$RootPath) {
     }
 }
 
+function Assert-NoTmdbSecrets([string]$RootPath, [string]$Label) {
+    if (-not (Test-Path -LiteralPath $RootPath)) {
+        return
+    }
+
+    $patterns = @(
+        "eyJhbGciOiJIUzI1NiJ9",
+        "TMDB_TOKEN",
+        "TMDB_BEARER_TOKEN"
+    )
+    $matches = @()
+
+    foreach ($pattern in $patterns) {
+        $results = Get-ChildItem -LiteralPath $RootPath -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch "\\node_modules\\" } |
+            Select-String -Pattern $pattern -SimpleMatch -ErrorAction SilentlyContinue
+        if ($results) {
+            $matches += $results
+        }
+    }
+
+    if ($matches.Count -gt 0) {
+        $summary = $matches |
+            Select-Object -First 8 |
+            ForEach-Object { "$($_.Path):$($_.LineNumber)" }
+        Throw-BuildFailure `
+            -Code "tmdb_secret_scan_failed" `
+            -Step "Secret scan ($Label)" `
+            -Message ("Direct TMDB secrets were found in $Label.`n$([string]::Join("`n", $summary))") `
+            -Hint "Remove frontend or generated-asset TMDB secrets before shipping this installer."
+    }
+}
+
 function Remove-StaleBackendArtifacts([string]$ReleaseRoot) {
     $targets = @(
         (Join-Path $ReleaseRoot "backend"),
@@ -277,6 +397,111 @@ function Read-JsonFileIfReady([string]$Path) {
     }
 }
 
+function Get-DesktopAuthToken([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return ""
+    }
+    try {
+        $payload = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -ErrorAction Stop
+        return [string]($payload.token)
+    } catch {
+        return ""
+    }
+}
+
+function Assert-SettingsRoundTrip(
+    [string]$DesktopAuthToken,
+    [string]$DiagnosticsPath,
+    [string]$LogPath
+) {
+    if ([string]::IsNullOrWhiteSpace($DesktopAuthToken)) {
+        Throw-BuildFailure `
+            -Code "desktop_auth_init_failed" `
+            -Step "Packaged smoke test" `
+            -Message "desktop-auth.json was not written or did not contain a token." `
+            -DiagnosticsPath $DiagnosticsPath `
+            -LogPath $LogPath `
+            -Hint "Delete the installed app-data folder and rerun the build so desktop auth can initialize cleanly."
+    }
+
+    $headers = @{ "X-Grabix-Desktop-Auth" = $DesktopAuthToken }
+    try {
+        $current = Invoke-RestMethod -Uri "http://127.0.0.1:8000/settings" -Method Get -TimeoutSec 8
+    } catch {
+        Throw-BuildFailure `
+            -Code "settings_read_failed" `
+            -Step "Packaged smoke test" `
+            -Message "Could not read packaged backend settings during smoke test." `
+            -DiagnosticsPath $DiagnosticsPath `
+            -LogPath $LogPath `
+            -Hint "Inspect startup diagnostics and confirm the backend is responding on port 8000."
+    }
+
+    $currentTheme = [string]($current.theme)
+    $newTheme = if ($currentTheme -eq "light") { "dark" } else { "light" }
+
+    try {
+        Invoke-RestMethod `
+            -Uri "http://127.0.0.1:8000/settings" `
+            -Method Post `
+            -Headers $headers `
+            -ContentType "application/json" `
+            -Body (@{ theme = $newTheme } | ConvertTo-Json -Compress) `
+            -TimeoutSec 8 | Out-Null
+
+        $updated = Invoke-RestMethod -Uri "http://127.0.0.1:8000/settings" -Method Get -TimeoutSec 8
+        if ([string]($updated.theme) -ne $newTheme) {
+            Throw-BuildFailure `
+                -Code "settings_write_failed" `
+                -Step "Packaged smoke test" `
+                -Message "Settings POST completed, but the packaged backend did not persist the new theme value." `
+                -DiagnosticsPath $DiagnosticsPath `
+                -LogPath $LogPath `
+                -Hint "Inspect app-state write permissions and the backend settings path in diagnostics."
+        }
+    } finally {
+        if (-not [string]::IsNullOrWhiteSpace($currentTheme)) {
+            try {
+                Invoke-RestMethod `
+                    -Uri "http://127.0.0.1:8000/settings" `
+                    -Method Post `
+                    -Headers $headers `
+                    -ContentType "application/json" `
+                    -Body (@{ theme = $currentTheme } | ConvertTo-Json -Compress) `
+                    -TimeoutSec 8 | Out-Null
+            } catch {
+            }
+        }
+    }
+}
+
+function Assert-DiagnosticsRuntimeConfig(
+    [string]$DiagnosticsPath,
+    [string]$LogPath
+) {
+    try {
+        $payload = Invoke-RestMethod -Uri "http://127.0.0.1:8000/diagnostics/self-test" -Method Get -TimeoutSec 8
+    } catch {
+        Throw-BuildFailure `
+            -Code "backend_boot_failed" `
+            -Step "Packaged smoke test" `
+            -Message "The packaged backend did not respond to /diagnostics/self-test." `
+            -DiagnosticsPath $DiagnosticsPath `
+            -LogPath $LogPath `
+            -Hint "Inspect startup diagnostics and backend logs to find the first runtime initialization failure."
+    }
+
+    if (-not [bool]$payload.config.tmdb_configured) {
+        Throw-BuildFailure `
+            -Code "tmdb_config_missing" `
+            -Step "Packaged smoke test" `
+            -Message "The packaged backend started, but diagnostics reported tmdb_configured=false." `
+            -DiagnosticsPath $DiagnosticsPath `
+            -LogPath $LogPath `
+            -Hint "Make sure build-installer staged runtime-config.json from GRABIX_TMDB_BEARER_TOKEN or GRABIX_RUNTIME_CONFIG_SOURCE."
+    }
+}
+
 function Read-StartupFailureDetails([string]$DiagnosticsPath, [string]$LogPath) {
     $details = New-Object System.Collections.Generic.List[string]
 
@@ -332,14 +557,23 @@ function Invoke-PackagedSmokeTest(
     [string]$ExpectedBackendHash,
     [int]$ConsumetPort,
     [string]$DiagnosticsPath,
-    [string]$LogPath
+    [string]$LogPath,
+    [string]$DesktopAuthPath
 ) {
     $backendPort = 8000
     if (-not (Test-LocalPortAvailable $backendPort)) {
-        throw (Get-PortConflictMessage $backendPort)
+        Throw-BuildFailure `
+            -Code "backend_port_in_use" `
+            -Step "Packaged smoke test" `
+            -Message (Get-PortConflictMessage $backendPort) `
+            -Hint "Stop the local GRABIX backend or any other process using port 8000, then rerun build-installer.bat."
     }
     if (-not (Test-LocalPortAvailable $ConsumetPort)) {
-        throw (Get-PortConflictMessage $ConsumetPort)
+        Throw-BuildFailure `
+            -Code "consumet_port_in_use" `
+            -Step "Packaged smoke test" `
+            -Message (Get-PortConflictMessage $ConsumetPort) `
+            -Hint "Stop the process using the packaged consumet port before rerunning the installer build."
     }
 
     New-Item -ItemType Directory -Path (Split-Path -Parent $DiagnosticsPath) -Force | Out-Null
@@ -393,25 +627,88 @@ function Invoke-PackagedSmokeTest(
 
         if (-not $backendReady -or -not $consumetReady) {
             $failureDetails = Read-StartupFailureDetails -DiagnosticsPath $DiagnosticsPath -LogPath $LogPath
-            throw "Packaged smoke test failed. The built executable did not bring up both the embedded backend and the bundled HiAnime gateway.`n$failureDetails"
+            Throw-BuildFailure `
+                -Code "release_gate_failed" `
+                -Step "Packaged smoke test" `
+                -Message ("The built executable did not bring up both the embedded backend and the bundled HiAnime gateway.`n$failureDetails") `
+                -DiagnosticsPath $DiagnosticsPath `
+                -LogPath $LogPath `
+                -Hint "Open the diagnostics JSON and startup log, then fix the first startup failure before rebuilding."
         }
 
         $diagnostics = Read-JsonFileIfReady $DiagnosticsPath
         if ($null -eq $diagnostics) {
-            throw "Packaged smoke test passed /health/ping, but startup-diagnostics.json was not written."
+            Throw-BuildFailure `
+                -Code "startup_diagnostics_missing" `
+                -Step "Packaged smoke test" `
+                -Message "The packaged backend responded, but startup-diagnostics.json was not written." `
+                -DiagnosticsPath $DiagnosticsPath `
+                -LogPath $LogPath `
+                -Hint "Verify that the packaged app can write to its local app-data diagnostics folder."
         }
         if ([string]$diagnostics.build_id -ne $ExpectedBuildId) {
-            throw "Packaged smoke test build_id mismatch. Expected '$ExpectedBuildId' but got '$($diagnostics.build_id)'."
+            Throw-BuildFailure `
+                -Code "build_id_mismatch" `
+                -Step "Packaged smoke test" `
+                -Message "Expected build id '$ExpectedBuildId' but got '$($diagnostics.build_id)'." `
+                -DiagnosticsPath $DiagnosticsPath `
+                -LogPath $LogPath `
+                -Hint "Clear stale release artifacts and rebuild so the packaged app uses the current bundle."
         }
         if ([string]$diagnostics.backend_resource_hash -ne $ExpectedBackendHash) {
-            throw "Packaged smoke test backend hash mismatch. Expected '$ExpectedBackendHash' but got '$($diagnostics.backend_resource_hash)'."
+            Throw-BuildFailure `
+                -Code "backend_hash_mismatch" `
+                -Step "Packaged smoke test" `
+                -Message "Expected backend hash '$ExpectedBackendHash' but got '$($diagnostics.backend_resource_hash)'." `
+                -DiagnosticsPath $DiagnosticsPath `
+                -LogPath $LogPath `
+                -Hint "Rebuild after clearing stale staged backend resources."
         }
         if ($null -eq $diagnostics.consumet) {
-            throw "Packaged smoke test did not produce consumet startup diagnostics."
+            Throw-BuildFailure `
+                -Code "consumet_diagnostics_missing" `
+                -Step "Packaged smoke test" `
+                -Message "The packaged app did not produce consumet startup diagnostics." `
+                -DiagnosticsPath $DiagnosticsPath `
+                -LogPath $LogPath `
+                -Hint "Confirm consumet-local and its bundled node runtime were staged into src-tauri/consumet-staging."
         }
         if ([string]$diagnostics.consumet.status -notin @("started", "online", "reused", "starting")) {
-            throw "Packaged smoke test consumet status was '$($diagnostics.consumet.status)' instead of a ready state."
+            Throw-BuildFailure `
+                -Code "consumet_boot_failed" `
+                -Step "Packaged smoke test" `
+                -Message "Consumet status was '$($diagnostics.consumet.status)' instead of a ready state." `
+                -DiagnosticsPath $DiagnosticsPath `
+                -LogPath $LogPath `
+                -Hint "Inspect the startup log tail for the bundled HiAnime gateway failure."
         }
+        if ($null -eq $diagnostics.desktop_auth) {
+            Throw-BuildFailure `
+                -Code "desktop_auth_diagnostics_missing" `
+                -Step "Packaged smoke test" `
+                -Message "The packaged app did not produce desktop auth diagnostics." `
+                -DiagnosticsPath $DiagnosticsPath `
+                -LogPath $LogPath `
+                -Hint "Confirm the Tauri shell initialized local app-data and wrote startup diagnostics."
+        }
+        if (-not [bool]$diagnostics.desktop_auth.ready) {
+            Throw-BuildFailure `
+                -Code "desktop_auth_init_failed" `
+                -Step "Packaged smoke test" `
+                -Message "Desktop auth was not ready in packaged mode." `
+                -DiagnosticsPath $DiagnosticsPath `
+                -LogPath $LogPath `
+                -Hint "Inspect the packaged app-data folder and desktop auth token file."
+        }
+
+        $desktopAuthToken = Get-DesktopAuthToken $DesktopAuthPath
+        Assert-SettingsRoundTrip `
+            -DesktopAuthToken $desktopAuthToken `
+            -DiagnosticsPath $DiagnosticsPath `
+            -LogPath $LogPath
+        Assert-DiagnosticsRuntimeConfig `
+            -DiagnosticsPath $DiagnosticsPath `
+            -LogPath $LogPath
     } finally {
         if ($process -and -not $process.HasExited) {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
@@ -499,15 +796,21 @@ if ($SkipNpmInstall -or $SkipFrontendInstall) {
 
 Write-Host "[3/6] Staging backend and HiAnime gateway resources..." -ForegroundColor Yellow
 Remove-PathIfPresent $tauriBackendRoot
+Remove-PathIfPresent $tauriGeneratedRoot
 New-Item -ItemType Directory -Path $tauriBackendRoot -Force | Out-Null
 Copy-IncludedBackendFiles -SourceRoot $backend -DestinationRoot $tauriBackend
 Copy-ConsumetBundle -SourceRoot $consumetSource -DestinationRoot $tauriConsumetApp
 $stagedNodeExe = Sync-ConsumetNodeRuntime -DestinationRoot $tauriConsumetRuntime
+Write-PackagedRuntimeConfig -DestinationPath $tauriRuntimeConfig
 
 $backendSourceHash = Get-BackendManifestHash $backend
 $backendStagedHash = Get-BackendManifestHash $tauriBackend
 if ($backendSourceHash -ne $backendStagedHash) {
-    throw "Backend staging hash mismatch. source=$backendSourceHash staged=$backendStagedHash"
+    Throw-BuildFailure `
+        -Code "backend_hash_mismatch" `
+        -Step "Resource staging" `
+        -Message "Backend staging hash mismatch. source=$backendSourceHash staged=$backendStagedHash" `
+        -Hint "Delete src-tauri/backend-staging and rerun the build so resources are copied fresh from backend/."
 }
 
 $buildId = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
@@ -515,12 +818,15 @@ Write-Host "[3/6] Resource staging complete." -ForegroundColor Green
 Write-Host "      build_id = $buildId"
 Write-Host "      backend_resource_hash = $backendSourceHash"
 Write-Host "      consumet_node_runtime = $stagedNodeExe"
+Write-Host "      runtime_config = $tauriRuntimeConfig"
 
 Write-Host "[4/6] Building GRABIX with Tauri + PyO3..." -ForegroundColor Yellow
 Write-Host "      PYO3_PYTHON = $pythonExe"
 Write-Host "      GRABIX_BUILD_ID = $buildId"
 Write-Host "      GRABIX_BACKEND_RESOURCE_HASH = $backendSourceHash"
 Write-Host "      GRABIX_BACKEND_RESOURCE_SUBDIR = $bundleBackendSubdir"
+
+Assert-NoTmdbSecrets -RootPath (Join-Path $frontend "src") -Label "frontend source"
 
 $previousEnv = @{
     PYO3_PYTHON = $env:PYO3_PYTHON
@@ -553,15 +859,24 @@ try {
     }
 
     if ($buildResult -ne 0) {
-        throw "Tauri build failed (exit code $buildResult)."
+        Throw-BuildFailure `
+            -Code "frontend_build_failed" `
+            -Step "Tauri build" `
+            -Message "Tauri build failed (exit code $buildResult)." `
+            -Hint "Inspect the npm/cargo output above and fix the first reported compile error before rebuilding."
     }
 
     Sync-PythonRuntimeDlls -RuntimeDir $pythonRuntime -ReleaseRoot $releaseDir
+    Assert-NoTmdbSecrets -RootPath (Join-Path $frontend "dist") -Label "built frontend assets"
     Write-Host "[4/6] Build succeeded." -ForegroundColor Green
 
     Write-Host "[5/6] Smoke-testing packaged executable..." -ForegroundColor Yellow
     if (-not (Test-Path -LiteralPath $releaseExe)) {
-        throw "Built executable not found: $releaseExe"
+        Throw-BuildFailure `
+            -Code "frontend_build_failed" `
+            -Step "Packaged smoke test" `
+            -Message "Built executable not found: $releaseExe" `
+            -Hint "Inspect the Tauri build output for the first compile or bundle failure."
     }
 
     Invoke-PackagedSmokeTest `
@@ -570,7 +885,8 @@ try {
         -ExpectedBackendHash $backendSourceHash `
         -ConsumetPort $packagedConsumetPort `
         -DiagnosticsPath $startupJsonPath `
-        -LogPath $startupLogPath
+        -LogPath $startupLogPath `
+        -DesktopAuthPath $desktopAuthPath
 
     Write-Host "[5/6] Smoke test passed." -ForegroundColor Green
 } finally {

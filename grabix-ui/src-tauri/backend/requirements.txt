@@ -1,7 +1,0 @@
-fastapi
-uvicorn[standard]
-yt-dlp
-moviebox-api
-httpx
-bcrypt
-cinemagoer

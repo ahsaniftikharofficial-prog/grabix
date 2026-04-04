@@ -8,7 +8,7 @@ import {
 } from "../components/Icons";
 import { PageEmptyState } from "../components/PageStates";
 import TrimSlider from "../components/TrimSlider";
-import { BACKEND_API } from "../lib/api";
+import { BACKEND_API, backendFetch, backendJson } from "../lib/api";
 import { invoke } from "@tauri-apps/api/core";
 const API = BACKEND_API;
 
@@ -224,7 +224,7 @@ export default function DownloaderPage() {
 
     const syncDependencies = async () => {
       try {
-        const response = await fetch(`${API}/runtime/dependencies`);
+        const response = await backendFetch(`${API}/runtime/dependencies`);
         if (!response.ok) return;
         const data = (await response.json()) as { dependencies?: Record<string, RuntimeDependency> };
         if (!active) return;
@@ -235,8 +235,7 @@ export default function DownloaderPage() {
       }
     };
 
-    fetch(`${API}/settings`)
-      .then((response) => response.json())
+    backendJson<Record<string, unknown>>(`${API}/settings`)
       .then((data: Record<string, unknown>) => {
         if (!active) return;
         if (data.default_download_engine === "aria2" || data.default_download_engine === "standard") {
@@ -342,7 +341,10 @@ export default function DownloaderPage() {
 
   const installDependency = async (depId: string) => {
     try {
-      await fetch(`${API}/runtime/dependencies/install?dep_id=${encodeURIComponent(depId)}`, { method: "POST" });
+      const response = await backendFetch(`${API}/runtime/dependencies/install?dep_id=${encodeURIComponent(depId)}`, { method: "POST" }, { sensitive: true });
+      if (!response.ok) {
+        throw new Error(`Could not start ${depId} installation.`);
+      }
     } catch {
       setErrMsg(`Could not start ${depId} installation.`);
       setStatus("error");
@@ -389,7 +391,10 @@ export default function DownloaderPage() {
 
     try {
       const trimEnabled = trimOpen && trimEnd - trimStart < info!.duration;
-      const res = await fetch(`${API}/download?url=${encodeURIComponent(url)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`);
+      const res = await backendFetch(`${API}/download?url=${encodeURIComponent(url)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`, undefined, { sensitive: true });
+      if (!res.ok) {
+        throw new Error(`Download request failed with ${res.status}`);
+      }
       const data = await res.json();
       const serverTaskId = data.task_id ?? taskId;
 
@@ -469,7 +474,10 @@ export default function DownloaderPage() {
       setQueue(prev => [newItem, ...prev]);
       try {
         const trimEnabled = trimOpen && info && trimEnd - trimStart < info.duration;
-        const res = await fetch(`${API}/download?url=${encodeURIComponent(bUrl)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`);
+        const res = await backendFetch(`${API}/download?url=${encodeURIComponent(bUrl)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`, undefined, { sensitive: true });
+        if (!res.ok) {
+          throw new Error(`Download request failed with ${res.status}`);
+        }
         const data = await res.json();
         const serverTaskId = data.task_id ?? taskId;
       setQueue(prev => prev.map(q => q.id === taskId ? { ...q, id: serverTaskId, serverId: serverTaskId } : q));
@@ -528,7 +536,7 @@ export default function DownloaderPage() {
 
     if (item.serverId) {
       try {
-        await fetch(`${API}/downloads/${item.serverId}`, { method: "DELETE" });
+        await backendFetch(`${API}/downloads/${item.serverId}`, { method: "DELETE" }, { sensitive: true });
       } catch {
         // Ignore backend delete errors and still remove locally.
       }
@@ -544,7 +552,7 @@ export default function DownloaderPage() {
     await Promise.allSettled(
       items
         .filter((item) => item.serverId)
-        .map((item) => fetch(`${API}/downloads/${item.serverId}`, { method: "DELETE" }))
+        .map((item) => backendFetch(`${API}/downloads/${item.serverId}`, { method: "DELETE" }, { sensitive: true }))
     );
     setQueue([]);
   };
@@ -568,7 +576,10 @@ export default function DownloaderPage() {
       )
     );
     try {
-      await fetch(`${API}/downloads/${item.serverId}/action?action=${action}`, { method: "POST" });
+      const response = await backendFetch(`${API}/downloads/${item.serverId}/action?action=${action}`, { method: "POST" }, { sensitive: true });
+      if (!response.ok) {
+        throw new Error(`Action failed with ${response.status}`);
+      }
     } catch {
       setQueue((prev) => prev.map((entry) => entry.id === item.id ? item : entry));
     }
@@ -577,7 +588,10 @@ export default function DownloaderPage() {
   const doReveal = async (item: QueueItem) => {
     if (!item.filePath) return;
     try {
-      await fetch(`${API}/open-download-folder?path=${encodeURIComponent(item.filePath)}`, { method: "POST" });
+      const response = await backendFetch(`${API}/open-download-folder?path=${encodeURIComponent(item.filePath)}`, { method: "POST" }, { sensitive: true });
+      if (!response.ok) {
+        throw new Error(`Open folder failed with ${response.status}`);
+      }
     } catch { /* offline */ }
   };
 

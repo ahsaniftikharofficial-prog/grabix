@@ -1,4 +1,5 @@
-import { BACKEND_API, fetchStreamVariants, type StreamSource } from "./streamProviders";
+import { fetchStreamVariants, type StreamSource } from "./streamProviders";
+import { BACKEND_API, backendFetch } from "./api";
 
 export interface DownloadQueueRequest {
   url: string;
@@ -144,7 +145,7 @@ export async function queueVideoDownload(request: DownloadQueueRequest): Promise
       tags_csv: Array.isArray(request.tags) ? request.tags.filter(Boolean).join(",") : "",
       download_engine: request.downloadEngine || "",
     });
-    response = await fetch(`${BACKEND_API}/download?${params.toString()}`);
+    response = await backendFetch(`${BACKEND_API}/download?${params.toString()}`, undefined, { sensitive: true });
   } catch (error) {
     throw new Error(error instanceof Error ? error.message : "Downloader could not be reached.");
   }
@@ -178,7 +179,7 @@ export async function queueSubtitleDownload(request: SubtitleDownloadRequest): P
       tags_csv: Array.isArray(request.tags) ? request.tags.filter(Boolean).join(",") : "",
       download_engine: request.downloadEngine || "",
     });
-    response = await fetch(`${BACKEND_API}/download?${params.toString()}`);
+    response = await backendFetch(`${BACKEND_API}/download?${params.toString()}`, undefined, { sensitive: true });
   } catch (error) {
     throw new Error(error instanceof Error ? error.message : "Subtitle downloader could not be reached.");
   }

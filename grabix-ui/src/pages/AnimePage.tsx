@@ -21,11 +21,10 @@ import {
   type ConsumetHealth,
   type ConsumetMediaSummary,
 } from "../lib/consumetProviders";
+import { fetchTmdbSeasonMap as fetchTmdbSeasonMapFromBackend, searchTmdbMedia } from "../lib/tmdb";
 import { fetchMovieBoxSources, resolveAnimePlaybackSources, searchMovieBox, type StreamSource } from "../lib/streamProviders";
 
 const JIKAN = "https://api.jikan.moe/v4";
-const TMDB = "https://api.themoviedb.org/3";
-const TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5OTk3Y2E5ZjY2NGZhZmI5ZWJkZmNhNDMyNGY0YTBmOCIsIm5iZiI6MTc3NDU2NDcyMC44NDYwMDAyLCJzYWIiOiI2OWM1YjU3MGE4NTBkNjcxOTE4OWJjN2MiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.uv8_l7Ub7WRhSfWtd07Sx_Yg13jubgyU7953kJZy7mw";
 
 type Tab = "trending" | "popular" | "toprated" | "seasonal" | "movie";
 type TmdbEpisodeRef = { season: number; episode: number };
@@ -178,18 +177,12 @@ function expandAnimeTitles(...titles: Array<string | undefined>): string[] {
 }
 
 async function searchTmdbTv(query: string): Promise<number | null> {
-  const response = await fetch(`${TMDB}/search/tv?query=${encodeURIComponent(query)}`, {
-    headers: { Authorization: `Bearer ${TMDB_TOKEN}` },
-  });
-  const data = (await response.json()) as { results?: Array<{ id?: number; name?: string; original_name?: string }> };
+  const data = (await searchTmdbMedia("tv", query, 1)) as { results?: Array<{ id?: number; name?: string; original_name?: string }> };
   return data.results?.[0]?.id ?? null;
 }
 
 async function searchTmdbMulti(query: string): Promise<number | null> {
-  const response = await fetch(`${TMDB}/search/multi?query=${encodeURIComponent(query)}`, {
-    headers: { Authorization: `Bearer ${TMDB_TOKEN}` },
-  });
-  const data = (await response.json()) as { results?: Array<{ id?: number; media_type?: string }> };
+  const data = (await searchTmdbMedia("multi", query, 1)) as { results?: Array<{ id?: number; media_type?: string }> };
   const tvMatch = data.results?.find((item) => item.media_type === "tv");
   return tvMatch?.id ?? null;
 }
@@ -213,17 +206,7 @@ async function fetchTmdbSeasonMap(tmdbId: number): Promise<Array<{ season: numbe
   const cached = tmdbSeasonCache.get(tmdbId);
   if (cached) return cached;
 
-  const response = await fetch(`${TMDB}/tv/${tmdbId}`, {
-    headers: { Authorization: `Bearer ${TMDB_TOKEN}` },
-  });
-  const data = (await response.json()) as { seasons?: Array<{ season_number?: number; episode_count?: number }> };
-  const seasons = (data.seasons ?? [])
-    .map((season) => ({
-      season: season.season_number ?? 0,
-      count: season.episode_count ?? 0,
-    }))
-    .filter((season) => season.season > 0 && season.count > 0)
-    .sort((left, right) => left.season - right.season);
+  const seasons = await fetchTmdbSeasonMapFromBackend(tmdbId);
   tmdbSeasonCache.set(tmdbId, seasons);
   return seasons;
 }

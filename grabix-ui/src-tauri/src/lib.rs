@@ -8,7 +8,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 use std::{
-    fs::{create_dir_all, OpenOptions},
+    fs::{create_dir_all, read_to_string, OpenOptions},
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -19,7 +19,8 @@ use std::{
 };
 
 use pyo3::prelude::*;
-use serde::Serialize;
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, RunEvent, State};
 
 #[cfg(target_os = "windows")]
@@ -38,6 +39,10 @@ fn backend_resource_subdir() -> &'static str {
 }
 
 const PACKAGED_CONSUMET_PORT: u16 = 3100;
+const DESKTOP_AUTH_FILE_NAME: &str = "desktop-auth.json";
+const RUNTIME_CONFIG_FILE_NAME: &str = "runtime-config.json";
+const BACKEND_STATE_DIR_NAME: &str = "backend-state";
+const GENERATED_RUNTIME_CONFIG_SUBPATH: &str = "generated/runtime-config.json";
 
 // ── Startup state (read by React via get_startup_diagnostics) ─────────────────
 
@@ -47,6 +52,18 @@ struct StartupState {
 
 struct SidecarProcessState {
     consumet_child: Mutex<Option<Child>>,
+}
+
+#[derive(Clone, Default)]
+struct DesktopAuthContext {
+    token: String,
+    required: bool,
+    token_path: String,
+    app_state_root: String,
+}
+
+struct DesktopAuthState {
+    context: Mutex<DesktopAuthContext>,
 }
 
 #[derive(Clone, Serialize, Default)]
@@ -60,6 +77,16 @@ struct SidecarDiagnostic {
 }
 
 #[derive(Clone, Serialize, Default)]
+struct DesktopAuthDiagnostic {
+    required: bool,
+    ready: bool,
+    mode: String,
+    message: String,
+    token_path: String,
+    app_state_root: String,
+}
+
+#[derive(Clone, Serialize, Default)]
 struct StartupDiagnostics {
     app_mode: String,
     build_id: String,
@@ -70,6 +97,19 @@ struct StartupDiagnostics {
     resource_dir: String,
     backend: SidecarDiagnostic,
     consumet: SidecarDiagnostic,
+    desktop_auth: DesktopAuthDiagnostic,
+}
+
+#[derive(Clone, Serialize, Default)]
+struct BackendRequestContext {
+    desktop_auth_token: String,
+    desktop_auth_required: bool,
+    app_mode: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct DesktopAuthPersisted {
+    token: String,
 }
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
@@ -88,6 +128,29 @@ fn read_clipboard_text() -> Result<String, String> {
 #[tauri::command]
 fn get_startup_diagnostics(state: State<'_, StartupState>) -> StartupDiagnostics {
     state.snapshot.lock().map(|s| s.clone()).unwrap_or_default()
+}
+
+#[tauri::command]
+fn get_backend_request_context(
+    startup_state: State<'_, StartupState>,
+    auth_state: State<'_, DesktopAuthState>,
+) -> BackendRequestContext {
+    let app_mode = startup_state
+        .snapshot
+        .lock()
+        .map(|snapshot| snapshot.app_mode.clone())
+        .unwrap_or_else(|_| String::from("unknown"));
+    let context = auth_state
+        .context
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_default();
+
+    BackendRequestContext {
+        desktop_auth_token: context.token,
+        desktop_auth_required: context.required,
+        app_mode,
+    }
 }
 
 #[tauri::command]
@@ -133,6 +196,96 @@ fn open_startup_log(state: State<'_, StartupState>) -> Result<String, String> {
     Err(String::from(
         "Opening the startup log is currently implemented for Windows only.",
     ))
+}
+
+fn app_state_dir(app: &AppHandle) -> PathBuf {
+    if let Ok(dir) = app.path().app_local_data_dir() {
+        return dir;
+    }
+    std::env::temp_dir().join("grabix-app-state")
+}
+
+fn backend_state_dir(app: &AppHandle) -> PathBuf {
+    app_state_dir(app).join(BACKEND_STATE_DIR_NAME)
+}
+
+fn desktop_auth_path(app: &AppHandle) -> PathBuf {
+    app_state_dir(app).join(DESKTOP_AUTH_FILE_NAME)
+}
+
+fn runtime_config_path(app: &AppHandle) -> PathBuf {
+    backend_state_dir(app).join(RUNTIME_CONFIG_FILE_NAME)
+}
+
+fn generate_desktop_auth_token() -> String {
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{:02x}", byte)).collect()
+}
+
+fn load_or_create_desktop_auth(app: &AppHandle) -> Result<DesktopAuthContext, String> {
+    let app_state = app_state_dir(app);
+    create_dir_all(&app_state).map_err(|e| e.to_string())?;
+    let backend_state = backend_state_dir(app);
+    create_dir_all(&backend_state).map_err(|e| e.to_string())?;
+
+    let token_path = desktop_auth_path(app);
+    let token = match read_to_string(&token_path) {
+        Ok(raw) => match serde_json::from_str::<DesktopAuthPersisted>(&raw) {
+            Ok(payload) if !payload.token.trim().is_empty() => payload.token,
+            _ => {
+                let fresh = generate_desktop_auth_token();
+                let payload = DesktopAuthPersisted {
+                    token: fresh.clone(),
+                };
+                let serialized = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
+                std::fs::write(&token_path, serialized).map_err(|e| e.to_string())?;
+                fresh
+            }
+        },
+        Err(_) => {
+            let fresh = generate_desktop_auth_token();
+            let payload = DesktopAuthPersisted {
+                token: fresh.clone(),
+            };
+            let serialized = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
+            std::fs::write(&token_path, serialized).map_err(|e| e.to_string())?;
+            fresh
+        }
+    };
+
+    Ok(DesktopAuthContext {
+        token,
+        required: !cfg!(debug_assertions),
+        token_path: token_path.display().to_string(),
+        app_state_root: backend_state.display().to_string(),
+    })
+}
+
+fn apply_backend_runtime_env(context: &DesktopAuthContext) {
+    std::env::set_var("GRABIX_APP_STATE_ROOT", &context.app_state_root);
+    std::env::set_var(
+        "GRABIX_RUNTIME_CONFIG_PATH",
+        PathBuf::from(&context.app_state_root)
+            .join(RUNTIME_CONFIG_FILE_NAME)
+            .display()
+            .to_string(),
+    );
+    if context.required {
+        std::env::set_var("GRABIX_PACKAGED_MODE", "1");
+        std::env::set_var("GRABIX_DESKTOP_AUTH_REQUIRED", "1");
+        std::env::remove_var("GRABIX_DESKTOP_AUTH_OBSERVE_ONLY");
+    } else {
+        std::env::remove_var("GRABIX_PACKAGED_MODE");
+        std::env::remove_var("GRABIX_DESKTOP_AUTH_REQUIRED");
+        std::env::set_var("GRABIX_DESKTOP_AUTH_OBSERVE_ONLY", "1");
+    }
+
+    if context.token.is_empty() {
+        std::env::remove_var("GRABIX_DESKTOP_AUTH_TOKEN");
+    } else {
+        std::env::set_var("GRABIX_DESKTOP_AUTH_TOKEN", &context.token);
+    }
 }
 
 // ── Diagnostics helpers ───────────────────────────────────────────────────────
@@ -279,12 +432,7 @@ fn find_python_home(app: &AppHandle) -> Option<PathBuf> {
 }
 
 fn find_backend_dir(app: &AppHandle) -> Option<PathBuf> {
-    let backend_candidates = [
-        backend_resource_subdir(),
-        "backend",
-        "backend-staging/backend",
-        "generated/backend",
-    ];
+    let backend_candidates = [backend_resource_subdir(), "backend-staging/backend", "generated/backend"];
     let mut candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
         for relative in backend_candidates {
@@ -299,7 +447,47 @@ fn find_backend_dir(app: &AppHandle) -> Option<PathBuf> {
             }
         }
     }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            for ancestor in exe_dir.ancestors() {
+                let workspace_backend = ancestor.join("backend");
+                if workspace_backend.join("main.py").exists() {
+                    candidates.push(workspace_backend);
+                }
+            }
+        }
+    }
     candidates.into_iter().find(|p| p.exists())
+}
+
+fn find_packaged_runtime_config(app: &AppHandle) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join(GENERATED_RUNTIME_CONFIG_SUBPATH));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("resources").join(GENERATED_RUNTIME_CONFIG_SUBPATH));
+            candidates.push(exe_dir.join(GENERATED_RUNTIME_CONFIG_SUBPATH));
+        }
+    }
+    candidates.into_iter().find(|path| path.exists())
+}
+
+fn sync_packaged_runtime_config(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    let source = match find_packaged_runtime_config(app) {
+        Some(path) => path,
+        None => return Ok(None),
+    };
+
+    let target = runtime_config_path(app);
+    if let Some(parent) = target.parent() {
+        create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let payload = std::fs::read(&source).map_err(|e| e.to_string())?;
+    std::fs::write(&target, payload).map_err(|e| e.to_string())?;
+    Ok(Some(target))
 }
 
 // ── Windows DLL loader fix ────────────────────────────────────────────────────
@@ -890,6 +1078,22 @@ fn initial_diagnostics(app: &AppHandle) -> StartupDiagnostics {
             },
             binary_path: String::new(),
         },
+        desktop_auth: DesktopAuthDiagnostic {
+            required: !cfg!(debug_assertions),
+            ready: false,
+            mode: if cfg!(debug_assertions) {
+                String::from("development-observe-only")
+            } else {
+                String::from("packaged-required")
+            },
+            message: if cfg!(debug_assertions) {
+                String::from("Desktop auth stays permissive in development mode.")
+            } else {
+                String::from("Desktop auth token will be created before the backend starts.")
+            },
+            token_path: desktop_auth_path(app).display().to_string(),
+            app_state_root: backend_state_dir(app).display().to_string(),
+        },
     }
 }
 
@@ -905,8 +1109,38 @@ pub fn run() {
         .manage(SidecarProcessState {
             consumet_child: Mutex::new(None),
         })
+        .manage(DesktopAuthState {
+            context: Mutex::new(DesktopAuthContext::default()),
+        })
         .setup(|app| {
-            let initial = initial_diagnostics(app.handle());
+            let desktop_auth = load_or_create_desktop_auth(app.handle())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+            let runtime_config_sync = sync_packaged_runtime_config(app.handle());
+            apply_backend_runtime_env(&desktop_auth);
+            if let Ok(mut state) = app.state::<DesktopAuthState>().context.lock() {
+                *state = desktop_auth.clone();
+            }
+
+            let mut initial = initial_diagnostics(app.handle());
+            initial.desktop_auth.ready = !desktop_auth.token.is_empty();
+            initial.desktop_auth.required = desktop_auth.required;
+            initial.desktop_auth.token_path = desktop_auth.token_path.clone();
+            initial.desktop_auth.app_state_root = desktop_auth.app_state_root.clone();
+            initial.desktop_auth.message = if desktop_auth.required {
+                match runtime_config_sync {
+                    Ok(Some(ref path)) => format!(
+                        "Desktop auth token is ready and runtime config was synced to {}.",
+                        path.display()
+                    ),
+                    Ok(None) => String::from("Desktop auth token is ready for packaged localhost protection."),
+                    Err(ref error) => format!(
+                        "Desktop auth token is ready, but runtime config sync failed: {}",
+                        error
+                    ),
+                }
+            } else {
+                String::from("Desktop auth is running in observe-only mode for development.")
+            };
             if let Ok(mut snapshot) = app.state::<StartupState>().snapshot.lock() {
                 *snapshot = initial.clone();
             }
@@ -914,9 +1148,11 @@ pub fn run() {
             log_sidecar(
                 app.handle(),
                 &format!(
-                    "GRABIX started (PyO3 embedded backend edition). build_id={} backend_hash={}",
+                    "GRABIX started (PyO3 embedded backend edition). build_id={} backend_hash={} desktop_auth_ready={} app_state_root={}",
                     build_id(),
-                    backend_resource_hash()
+                    backend_resource_hash(),
+                    initial.desktop_auth.ready,
+                    initial.desktop_auth.app_state_root
                 ),
             );
 
@@ -930,6 +1166,7 @@ pub fn run() {
             greet,
             read_clipboard_text,
             get_startup_diagnostics,
+            get_backend_request_context,
             open_startup_log
         ]);
 

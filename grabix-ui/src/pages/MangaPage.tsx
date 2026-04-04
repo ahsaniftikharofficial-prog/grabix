@@ -27,7 +27,7 @@ import { useContentFilter } from "../context/ContentFilterContext";
 import { filterAdultContent } from "../lib/contentFilter";
 import { IconDownload, IconFolder, IconPause, IconPlay, IconSearch, IconStar, IconStop, IconX } from "../components/Icons";
 import { PageEmptyState, PageErrorState } from "../components/PageStates";
-import { BACKEND_API } from "../lib/api";
+import { BACKEND_API, backendFetch } from "../lib/api";
 import {
   getOfflineChapterPages,
   listOfflineChapterPageKeys,
@@ -330,9 +330,10 @@ export default function MangaPage() {
     if (!selectedItem) return;
     const mangaKey = getOfflineMangaKey(selectedItem);
     try {
-      const response = await fetch(
+      const response = await backendFetch(
         `${BACKEND_API}/open-download-folder?path=${encodeURIComponent("")}`,
-        { method: "POST" }
+        { method: "POST" },
+        { sensitive: true }
       );
       if (!response.ok) {
         throw new Error(`Reveal failed with ${response.status}`);

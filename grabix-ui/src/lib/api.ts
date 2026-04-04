@@ -61,6 +61,15 @@ export interface StartupSidecarDiagnostic {
   binary_path: string;
 }
 
+export interface StartupDesktopAuthDiagnostic {
+  required: boolean;
+  ready: boolean;
+  mode: string;
+  message: string;
+  token_path: string;
+  app_state_root: string;
+}
+
 export interface StartupDiagnosticsPayload {
   app_mode: string;
   build_id?: string;
@@ -71,6 +80,7 @@ export interface StartupDiagnosticsPayload {
   resource_dir: string;
   backend: StartupSidecarDiagnostic;
   consumet: StartupSidecarDiagnostic;
+  desktop_auth?: StartupDesktopAuthDiagnostic;
 }
 
 export interface DiagnosticsLogEvent {
@@ -86,6 +96,67 @@ export interface DiagnosticsLogEvent {
 export interface DiagnosticsLogsPayload {
   backend_log_path: string;
   events: DiagnosticsLogEvent[];
+}
+
+export interface BackendRequestContext {
+  desktop_auth_token: string;
+  desktop_auth_required: boolean;
+  app_mode: string;
+}
+
+let backendRequestContextPromise: Promise<BackendRequestContext> | null = null;
+
+function normalizeHeaders(input?: HeadersInit): Headers {
+  return new Headers(input || {});
+}
+
+async function getBackendRequestContext(): Promise<BackendRequestContext> {
+  if (!backendRequestContextPromise) {
+    backendRequestContextPromise = invoke<BackendRequestContext>("get_backend_request_context")
+      .catch(() => ({
+        desktop_auth_token: "",
+        desktop_auth_required: false,
+        app_mode: "browser",
+      }));
+  }
+  return backendRequestContextPromise;
+}
+
+async function buildBackendRequestInit(init?: RequestInit, sensitive = false): Promise<RequestInit> {
+  const nextInit: RequestInit = { ...(init || {}) };
+  const headers = normalizeHeaders(init?.headers);
+  if (sensitive) {
+    const context = await getBackendRequestContext();
+    if (context.desktop_auth_token) {
+      headers.set("X-Grabix-Desktop-Auth", context.desktop_auth_token);
+    }
+  }
+  nextInit.headers = headers;
+  return nextInit;
+}
+
+export function extractBackendErrorMessage(payload: unknown, fallback: string): string {
+  if (typeof payload === "string" && payload.trim()) {
+    return payload.trim();
+  }
+  if (!payload || typeof payload !== "object") {
+    return fallback;
+  }
+
+  const record = payload as Record<string, unknown>;
+  if (typeof record.message === "string" && record.message.trim()) {
+    return record.message.trim();
+  }
+  if (typeof record.detail === "string" && record.detail.trim()) {
+    return record.detail.trim();
+  }
+  if (record.detail && typeof record.detail === "object") {
+    const detailRecord = record.detail as Record<string, unknown>;
+    if (typeof detailRecord.message === "string" && detailRecord.message.trim()) {
+      return detailRecord.message.trim();
+    }
+  }
+  return fallback;
 }
 
 export function deriveRuntimeState(options: {
@@ -192,12 +263,35 @@ export async function waitForRuntimeHealth(timeoutMs = 20000, intervalMs = 600):
   return null;
 }
 
-export async function backendFetch(input: string, init?: RequestInit): Promise<Response> {
+export async function backendFetch(
+  input: string,
+  init?: RequestInit,
+  options?: { sensitive?: boolean }
+): Promise<Response> {
   try {
-    return await fetch(input.startsWith("http") ? input : `${BACKEND_API}${input}`, init);
+    const requestInit = await buildBackendRequestInit(init, options?.sensitive === true);
+    return await fetch(input.startsWith("http") ? input : `${BACKEND_API}${input}`, requestInit);
   } catch (error) {
     throw new Error(error instanceof Error ? error.message : BACKEND_OFFLINE_MESSAGE);
   }
+}
+
+export async function backendJson<T>(
+  input: string,
+  init?: RequestInit,
+  options?: { sensitive?: boolean }
+): Promise<T> {
+  const response = await backendFetch(input, init, options);
+  if (!response.ok) {
+    let payload: unknown = null;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+    throw new Error(extractBackendErrorMessage(payload, `Request failed with ${response.status}`));
+  }
+  return (await response.json()) as T;
 }
 
 export async function fetchStartupDiagnostics(): Promise<StartupDiagnosticsPayload | null> {

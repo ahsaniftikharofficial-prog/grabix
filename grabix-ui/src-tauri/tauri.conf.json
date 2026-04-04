@@ -18,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' asset: tauri: data: blob: http://127.0.0.1:* http://localhost:* https:; connect-src 'self' asset: tauri: data: blob: ws://127.0.0.1:* ws://localhost:* http://127.0.0.1:* http://localhost:* https:; img-src 'self' asset: data: blob: http://127.0.0.1:* http://localhost:* https:; media-src 'self' asset: data: blob: http://127.0.0.1:* http://localhost:* https:; frame-src 'self' asset: data: blob: http://127.0.0.1:* http://localhost:* https:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data: https:;"
     }
   },
   "bundle": {
@@ -35,7 +35,8 @@
     "resources": [
       "python-runtime/**/*",
       "backend-staging/backend/**/*",
-      "consumet-staging/**/*"
+      "consumet-staging/**/*",
+      "generated/**/*"
     ],
     "icon": [
       "icons/32x32.png",

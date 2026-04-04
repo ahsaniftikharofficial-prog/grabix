@@ -3,7 +3,7 @@ import logging
 from dataclasses import dataclass, field
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import os, uuid, sqlite3, shutil, threading, subprocess, time, json, re, hashlib, socket, ipaddress, tempfile, zipfile, importlib
 import ctypes
 from pathlib import Path
@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from app.routes.consumet import router as consumet_router
 from app.routes.downloads import router as downloads_router
 from app.routes.manga import router as manga_router
+from app.routes.metadata import router as metadata_router
 from app.routes.providers import router as providers_router
 from app.routes.settings import router as settings_router
 from app.routes.streaming import router as streaming_router
@@ -23,9 +24,29 @@ from app.services.consumet import (
     get_health_status as get_consumet_health_status,
     is_consumet_configured as is_consumet_sidecar_configured,
 )
+from app.services.errors import json_error_response
 from app.services.logging_utils import LOG_DIR, backend_log_path, get_logger, log_event, read_recent_log_events
 from app.services.archive_installer import parse_checksum_manifest, safe_extract_zip, sha256_file
+from app.services.desktop_auth import DESKTOP_AUTH_HEADER, desktop_auth_state_snapshot, validate_desktop_auth_request
 from app.services.network_policy import validate_outbound_target
+from app.services.route_registry import register_route_handlers
+from app.services.runtime_config import (
+    app_state_root,
+    backend_port,
+    db_path as runtime_db_path,
+    default_download_dir,
+    public_base_url,
+    runtime_config_snapshot,
+    runtime_tools_dir,
+    settings_path as runtime_settings_path,
+)
+from app.services.settings_service import (
+    configure_adult_content_password,
+    get_settings_payload as build_settings_payload,
+    settings_public_payload as build_public_settings_payload,
+    unlock_adult_content_password,
+    update_settings_payload as build_updated_settings_payload,
+)
 from app.services.runtime_state import RuntimeStateRegistry
 from app.services.security import (
     DEFAULT_APPROVED_MEDIA_HOSTS,
@@ -194,17 +215,18 @@ def _ensure_moviebox():
     return False
 
 app = FastAPI()
-LOCAL_APP_ORIGINS = DEFAULT_LOCAL_APP_ORIGINS
+LOCAL_APP_ORIGINS = list(DEFAULT_LOCAL_APP_ORIGINS)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=LOCAL_APP_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "Range"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "Range", "X-Request-ID", DESKTOP_AUTH_HEADER],
 )
 app.include_router(consumet_router, prefix="/consumet")
 app.include_router(downloads_router)
 app.include_router(manga_router, prefix="/manga")
+app.include_router(metadata_router)
 app.include_router(providers_router)
 app.include_router(settings_router)
 app.include_router(streaming_router)
@@ -214,10 +236,10 @@ downloads_logger = get_logger("downloads")
 library_logger = get_logger("library")
 playback_logger = get_logger("playback")
 
-DOWNLOAD_DIR = str(Path.home() / "Downloads" / "GRABIX")
-DB_PATH = str(Path.home() / "Downloads" / "GRABIX" / "grabix.db")
-SETTINGS_PATH = str(Path.home() / "Downloads" / "GRABIX" / "grabix_settings.json")
-RUNTIME_TOOLS_DIR = Path(DOWNLOAD_DIR) / "runtime-tools"
+DOWNLOAD_DIR = str(default_download_dir())
+DB_PATH = str(runtime_db_path())
+SETTINGS_PATH = str(runtime_settings_path())
+RUNTIME_TOOLS_DIR = runtime_tools_dir()
 
 # Always create the download directory before any DB or file operations
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -228,7 +250,8 @@ downloads: dict = runtime_state.downloads
 download_controls: dict = runtime_state.download_controls
 FFMPEG_PATH = shutil.which("ffmpeg")
 ARIA2_PATH = shutil.which("aria2c")
-SELF_BASE_URL = os.getenv("GRABIX_PUBLIC_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+SELF_BASE_URL = public_base_url()
+SELF_BASE_URL = public_base_url()
 STREAM_EXTRACT_CACHE_TTL_SECONDS = 900
 stream_extract_cache: dict[str, tuple[float, dict]] = runtime_state.stream_extract_cache
 ADULT_UNLOCK_WINDOW_SECONDS = 300
@@ -269,8 +292,8 @@ _auto_retry_failed_started = False
 # Saves ~1 second of startup time (yt_dlp is a heavy import).
 _yt_dlp_mod = None
 
-def _get_yt_dlp():
-    """Return the yt_dlp module, importing it on first call."""
+def _load_yt_dlp():
+    """Return the real yt_dlp module, importing it on first call."""
     global _yt_dlp_mod
     if _yt_dlp_mod is None:
         try:
@@ -279,6 +302,18 @@ def _get_yt_dlp():
         except Exception as exc:
             raise RuntimeError(f"yt_dlp is not available: {exc}") from exc
     return _yt_dlp_mod
+
+
+class _LazyYtDlpProxy:
+    def __getattr__(self, name: str):
+        return getattr(_load_yt_dlp(), name)
+
+
+yt_dlp = _LazyYtDlpProxy()
+
+
+def _get_yt_dlp():
+    return yt_dlp
 
 
 def refresh_runtime_tools() -> None:
@@ -340,6 +375,25 @@ def _correlation_id_from_request(request: Request | None) -> str:
 async def correlation_middleware(request: Request, call_next):
     correlation_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
     request.state.correlation_id = correlation_id
+    auth_failure = validate_desktop_auth_request(request)
+    if auth_failure is not None:
+        payload = dict(auth_failure["payload"])
+        log_event(
+            backend_logger,
+            logging.WARNING,
+            event=str(payload.get("code") or "desktop_auth_rejected"),
+            message=f"{request.method} {request.url.path} was blocked by desktop auth.",
+            correlation_id=correlation_id,
+            details={"path": request.url.path, "method": request.method},
+        )
+        response = json_error_response(
+            status_code=int(auth_failure["status_code"]),
+            detail=payload,
+            request=request,
+            service="security",
+        )
+        response.headers["X-Request-ID"] = correlation_id
+        return response
     try:
         response = await call_next(request)
     except Exception as exc:
@@ -362,6 +416,31 @@ async def correlation_middleware(request: Request, call_next):
             correlation_id=correlation_id,
             details={"path": request.url.path, "method": request.method, "status_code": response.status_code},
         )
+    return response
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return json_error_response(status_code=exc.status_code, detail=exc.detail, request=request)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    correlation_id = _correlation_id_from_request(request)
+    log_event(
+        backend_logger,
+        logging.ERROR,
+        event="unhandled_exception",
+        message=f"{request.method} {request.url.path} crashed unexpectedly.",
+        correlation_id=correlation_id,
+        details={"error": str(exc), "path": request.url.path, "method": request.method},
+    )
+    response = json_error_response(
+        status_code=500,
+        detail="An unexpected backend error occurred.",
+        request=request,
+    )
+    response.headers["X-Request-ID"] = correlation_id
     return response
 
 
@@ -523,6 +602,13 @@ def init_db():
     try:
         con = get_db_connection()
         con.execute("""
+            CREATE TABLE IF NOT EXISTS schema_version (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        con.execute("""
             CREATE TABLE IF NOT EXISTS history (
                 id TEXT PRIMARY KEY,
                 url TEXT,
@@ -596,6 +682,16 @@ def init_db():
         """)
         con.execute("CREATE INDEX IF NOT EXISTS idx_health_log_service ON health_log(service)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_health_log_recorded ON health_log(recorded_at)")
+        con.execute(
+            """
+            INSERT INTO schema_version (id, version, updated_at)
+            VALUES (1, 1, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                version = CASE WHEN schema_version.version < excluded.version THEN excluded.version ELSE schema_version.version END,
+                updated_at = CASE WHEN schema_version.version < excluded.version THEN excluded.updated_at ELSE schema_version.updated_at END
+            """,
+            (datetime.now().isoformat(),),
+        )
         con.commit()
         con.close()
         log_event(backend_logger, logging.INFO, event="db_init", message="Database initialized successfully.")
@@ -1116,11 +1212,7 @@ async def _timed_ping(coro, service: str) -> tuple[str, float | None, str]:
 # ---------------------------------------------------------------------------
 
 def _settings_public_payload(data: dict) -> dict:
-    payload = {**DEFAULT_SETTINGS, **(data or {})}
-    payload.pop("adult_password_hash", None)
-    payload["adult_content_enabled"] = False
-    payload["adult_password_configured"] = bool((data or {}).get("adult_password_hash"))
-    return payload
+    return build_public_settings_payload(DEFAULT_SETTINGS, data)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -4465,16 +4557,17 @@ def stop_all_downloads():
 
 # ── Settings routes ───────────────────────────────────────────────────────────
 def get_settings():
-    return _settings_public_payload(load_settings())
+    return build_settings_payload(default_settings=DEFAULT_SETTINGS, load_settings=load_settings)
 
 
 def update_settings(data: dict):
-    sanitized = dict(data or {})
-    sanitized.pop("adult_password_hash", None)
-    sanitized["adult_content_enabled"] = False
-    sanitized.pop("adult_password_configured", None)
-    save_settings_to_disk(sanitized)
-    return _settings_public_payload(load_settings())
+    return build_updated_settings_payload(
+        data,
+        default_settings=DEFAULT_SETTINGS,
+        load_settings=load_settings,
+        save_settings_to_disk=save_settings_to_disk,
+        default_download_dir=DOWNLOAD_DIR,
+    )
 
 
 @app.get("/download-engines")
@@ -4740,35 +4833,19 @@ def install_runtime_dependency(dep_id: str):
 
 
 def configure_adult_content(data: AdultContentConfigureRequest):
-    password = (data.password or "").strip()
-    if len(password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
-
-    settings = load_settings()
-    save_settings_to_disk({
-        **settings,
-        "adult_password_hash": _hash_adult_password(password),
-        "adult_password_configured": True,
-        "adult_content_enabled": False,
-    })
-    return {"configured": True}
+    return configure_adult_content_password(
+        data.password,
+        load_settings=load_settings,
+        save_settings_to_disk=save_settings_to_disk,
+    )
 
 
 def unlock_adult_content(data: AdultContentUnlockRequest, request: Request):
-    settings = load_settings()
-    expected_hash = settings.get("adult_password_hash") or ""
-    if not expected_hash:
-        raise HTTPException(status_code=428, detail="Set an adult-content password first.")
-
-    client_key = _client_key(request)
-    _ensure_unlock_not_throttled(client_key)
-    if not _verify_adult_password(data.password or "", expected_hash):
-        attempts = _record_unlock_failure(client_key)
-        remaining = max(0, ADULT_UNLOCK_MAX_ATTEMPTS - attempts)
-        raise HTTPException(status_code=403, detail=f"Incorrect password. {remaining} attempt(s) remaining before a temporary lockout.")
-
-    adult_unlock_attempts.pop(client_key, None)
-    return {"unlocked": True}
+    return unlock_adult_content_password(
+        data.password,
+        request,
+        load_settings=load_settings,
+    )
 
 
 # ── Download Task ─────────────────────────────────────────────────────────────
@@ -6111,6 +6188,7 @@ async def _diagnostics_payload() -> dict:
     return {
         "generated_at": datetime.now().isoformat(),
         "runtime": runtime,
+        "config": redact_for_diagnostics(runtime_config_snapshot()),
         "providers": providers,
         "ffmpeg": ffmpeg,
         "storage": storage,
@@ -6136,6 +6214,7 @@ async def _diagnostics_payload() -> dict:
             "local_origins_only": True,
             "approved_media_host_count": len(APPROVED_MEDIA_HOSTS),
             "managed_download_root": str(Path(DOWNLOAD_DIR).resolve()),
+            "desktop_auth": redact_for_diagnostics(desktop_auth_state_snapshot()),
         },
     }
 
@@ -6238,6 +6317,31 @@ async def diagnostics_logs(limit: int = 20):
 # Called by the Rust/PyO3 embed in lib.rs instead of spawning a child process.
 # Also called when running directly: `python main.py`
 # uvicorn blocks here forever — this is intentional.
+register_route_handlers(
+    "downloads",
+    start_download=start_download,
+    download_status=download_status,
+    progress_alias=progress_alias,
+    list_downloads=list_downloads,
+    open_download_folder=open_download_folder,
+    open_local_file=open_local_file,
+    download_action=download_action,
+    delete_download=delete_download,
+    stop_all_downloads=stop_all_downloads,
+    get_runtime_dependencies=get_runtime_dependencies,
+    install_runtime_dependency=install_runtime_dependency,
+)
+
+register_route_handlers(
+    "streaming",
+    resolve_embed=resolve_embed,
+    stream_proxy=stream_proxy,
+    stream_variants=stream_variants,
+    ffmpeg_status=ffmpeg_status,
+    extract_stream=extract_stream,
+)
+
+
 def run_server() -> None:
     """Start the uvicorn server. Blocks until the process exits.
 
@@ -6260,7 +6364,7 @@ def run_server() -> None:
     config = uvicorn.Config(
         app,
         host="127.0.0.1",
-        port=int(os.getenv("GRABIX_BACKEND_PORT", "8000")),
+        port=backend_port(),
         log_level=os.getenv("GRABIX_BACKEND_LOG_LEVEL", "warning"),
         log_config=None,  # Don't reconfigure logging — main.py already set it up
     )

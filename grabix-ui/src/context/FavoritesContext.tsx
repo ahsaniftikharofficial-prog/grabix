@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { readJsonStorage, versionedStorageKey, writeJsonStorage } from "../lib/persistentState";
 
 export interface FavItem {
   id: string;
@@ -23,23 +24,19 @@ interface FavCtx {
   remove: (id: string) => void;
 }
 
-const STORAGE_KEY = "grabix_favorites";
+const STORAGE_KEY = versionedStorageKey("grabix-favorites", "v2");
 const FavoritesContext = createContext<FavCtx | null>(null);
 
 function loadFavorites(): FavItem[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as FavItem[]) : [];
-  } catch {
-    return [];
-  }
+  const value = readJsonStorage<unknown>("local", STORAGE_KEY, []);
+  return Array.isArray(value) ? (value as FavItem[]) : [];
 }
 
 export function FavoritesProvider({ children }: { children: ReactNode }) {
   const [favorites, setFavorites] = useState<FavItem[]>(loadFavorites);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(favorites));
+    writeJsonStorage("local", STORAGE_KEY, favorites);
   }, [favorites]);
 
   const isFav = (id: string) => favorites.some((favorite) => favorite.id === id);

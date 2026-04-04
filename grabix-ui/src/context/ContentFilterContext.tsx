@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { BACKEND_API } from "../lib/api";
+import { BACKEND_API, backendFetch, backendJson } from "../lib/api";
 
 interface ContentFilterContextValue {
   adultContentBlocked: boolean;
@@ -15,8 +15,7 @@ export function ContentFilterProvider({ children }: { children: ReactNode }) {
   const [adultPasswordConfigured, setAdultPasswordConfigured] = useState(false);
 
   useEffect(() => {
-    fetch(`${BACKEND_API}/settings`)
-      .then((response) => response.json())
+    backendJson<Record<string, unknown>>(`${BACKEND_API}/settings`)
       .then((data: Record<string, unknown>) => {
         setAdultContentBlocked(data.adult_content_enabled !== true);
         setAdultPasswordConfigured(data.adult_password_configured === true);
@@ -31,26 +30,36 @@ export function ContentFilterProvider({ children }: { children: ReactNode }) {
     adultContentBlocked,
     adultPasswordConfigured,
     configureAdultContent: async (password: string) => {
-      const response = await fetch(`${BACKEND_API}/settings/adult-content/configure`, {
+      const response = await backendFetch(`${BACKEND_API}/settings/adult-content/configure`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),
-      });
+      }, { sensitive: true });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(typeof payload.detail === "string" ? payload.detail : "Could not save the password.");
+        const message =
+          typeof payload.message === "string" ? payload.message :
+          typeof payload.detail === "string" ? payload.detail :
+          typeof payload.detail?.message === "string" ? payload.detail.message :
+          "Could not save the password.";
+        throw new Error(message);
       }
       setAdultPasswordConfigured(true);
     },
     unlockAdultContent: async (password: string) => {
-      const response = await fetch(`${BACKEND_API}/settings/adult-content/unlock`, {
+      const response = await backendFetch(`${BACKEND_API}/settings/adult-content/unlock`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),
-      });
+      }, { sensitive: true });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(typeof payload.detail === "string" ? payload.detail : "Incorrect password");
+        const message =
+          typeof payload.message === "string" ? payload.message :
+          typeof payload.detail === "string" ? payload.detail :
+          typeof payload.detail?.message === "string" ? payload.detail.message :
+          "Incorrect password";
+        throw new Error(message);
       }
       setAdultContentBlocked(false);
     },

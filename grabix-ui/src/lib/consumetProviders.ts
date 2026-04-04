@@ -1,3 +1,4 @@
+import { extractBackendErrorMessage } from "./api";
 import { BACKEND_API, type StreamSource } from "./streamProviders";
 
 export type ConsumetDomain = "anime" | "manga" | "books" | "comics" | "light-novels";
@@ -188,8 +189,8 @@ async function getJson<T>(path: string): Promise<T> {
   if (!response.ok) {
     let detail = "";
     try {
-      const payload = (await response.json()) as { detail?: string };
-      detail = typeof payload?.detail === "string" ? payload.detail : "";
+      const payload = await response.json();
+      detail = extractBackendErrorMessage(payload, "");
     } catch {
       detail = "";
     }

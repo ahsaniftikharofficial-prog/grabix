@@ -50,9 +50,18 @@ def _infer_library_display_layout(url: str, title: str, dl_type: str, category: 
 # ── DB schema helpers ─────────────────────────────────────────────────────────
 
 def migrate_db() -> None:
-    """Add columns to the history table if they don't exist yet (schema migration)."""
+    """Apply lightweight schema migrations with a tracked version row."""
     try:
         con = get_db_connection()
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_version (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         cols = [row[1] for row in con.execute("PRAGMA table_info(history)").fetchall()]
         if "tags" not in cols:
             con.execute("ALTER TABLE history ADD COLUMN tags TEXT DEFAULT ''")
@@ -60,6 +69,16 @@ def migrate_db() -> None:
             con.execute("ALTER TABLE history ADD COLUMN category TEXT DEFAULT ''")
         if "file_size" not in cols:
             con.execute("ALTER TABLE history ADD COLUMN file_size INTEGER DEFAULT 0")
+        con.execute(
+            """
+            INSERT INTO schema_version (id, version, updated_at)
+            VALUES (1, 2, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                version = CASE WHEN schema_version.version < excluded.version THEN excluded.version ELSE schema_version.version END,
+                updated_at = CASE WHEN schema_version.version < excluded.version THEN excluded.updated_at ELSE schema_version.updated_at END
+            """,
+            (datetime.now().isoformat(),),
+        )
         con.commit()
         con.close()
         log_event(

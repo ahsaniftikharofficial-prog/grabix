@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import {
-  BACKEND_API,
   fetchMovieBoxDetails,
   fetchMovieBoxDiscover,
   fetchMovieBoxSources,
@@ -27,8 +26,6 @@ import {
   IconStar,
   IconX,
 } from "../components/Icons";
-
-const GRABIX = BACKEND_API;
 
 type Filter = "all" | "movie" | "series" | "anime" | "hindi";
 
@@ -653,10 +650,14 @@ function MovieBoxDetail({
       const mediaLabel = details.moviebox_media_type === "movie"
         ? `${details.title} — ${details.is_hindi ? "Hindi" : "English"} — ${quality}`
         : `${details.title} — S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")} — ${details.is_hindi ? "Hindi" : "English"} — ${quality}`;
-      const response = await fetch(`${GRABIX}/download?url=${encodeURIComponent(source.url)}&dl_type=video&title=${encodeURIComponent(mediaLabel)}&thumbnail=${encodeURIComponent(details.poster_proxy || details.poster || "")}`);
-      if (!response.ok) {
-        throw new Error(`Downloader returned ${response.status}`);
-      }
+      await queueVideoDownload({
+        url: source.url,
+        title: mediaLabel,
+        thumbnail: details.poster_proxy || details.poster || "",
+        headers: source.requestHeaders,
+        forceHls: source.kind === "hls",
+        category: details.moviebox_media_type === "movie" ? "Movies" : "TV Series",
+      });
       setSent(true);
       setToast({ message: "Movie Box download queued. Open Downloader to track progress.", variant: "success" });
       window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "downloader" } }));
