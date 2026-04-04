@@ -47,6 +47,8 @@ interface Props {
   activeDownloads: number;
   runtimeState: RuntimeState;
   runtimeHealth: RuntimeHealthPayload | null;
+  statusOverride?: string;
+  statusToneOverride?: "online" | "offline" | "busy";
 }
 
 const GROUPS = [
@@ -79,20 +81,30 @@ const GROUPS = [
   },
 ];
 
-export default function Sidebar({ page, setPage, activeDownloads, runtimeState, runtimeHealth }: Props) {
+export default function Sidebar({
+  page,
+  setPage,
+  activeDownloads,
+  runtimeState,
+  runtimeHealth,
+  statusOverride,
+  statusToneOverride,
+}: Props) {
   const { theme, toggle } = useTheme();
   const degradedCount = runtimeHealth?.summary.degraded_services.length ?? 0;
   const backendOk = runtimeState !== "offline" && runtimeState !== "starting";
   const statusText =
-    runtimeState === "starting"
-      ? "Starting local services"
+    statusOverride ||
+    (runtimeState === "starting"
+      ? "Opening GRABIX"
       : runtimeState === "recovering"
-        ? "Recovering local services"
+        ? "Almost ready"
         : runtimeState === "degraded"
-          ? `${degradedCount} service${degradedCount === 1 ? "" : "s"} degraded`
+          ? (degradedCount <= 1 ? "One feature is still warming up" : "A few features are still warming up")
           : runtimeState === "ready"
-            ? "All core services ready"
-            : "Backend offline";
+            ? "Ready"
+            : "GRABIX is offline");
+  const statusTone = statusToneOverride || (backendOk ? "online" : "offline");
 
   return (
     <aside style={{ width: "var(--sidebar-w)", background: "var(--bg-sidebar)", borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", flexShrink: 0, height: "100vh" }}>
@@ -129,7 +141,7 @@ export default function Sidebar({ page, setPage, activeDownloads, runtimeState, 
 
       <div style={{ padding: "10px 8px", borderTop: "1px solid var(--border)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", marginBottom: 4 }}>
-          <span className={`status-dot ${backendOk ? "online" : "offline"}`} />
+          <span className={`status-dot ${statusTone}`} />
           <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
             {statusText}
           </span>

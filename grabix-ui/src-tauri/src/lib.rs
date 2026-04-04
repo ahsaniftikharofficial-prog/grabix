@@ -192,10 +192,50 @@ fn open_startup_log(state: State<'_, StartupState>) -> Result<String, String> {
         return Ok(target.display().to_string());
     }
 
-    #[allow(unreachable_code)]
+#[allow(unreachable_code)]
     Err(String::from(
         "Opening the startup log is currently implemented for Windows only.",
     ))
+}
+
+#[tauri::command]
+fn restart_consumet_sidecar(app: AppHandle) -> Result<String, String> {
+    if cfg!(debug_assertions) {
+        return Err(String::from(
+            "Restarting the bundled Anime engine is only available in packaged builds.",
+        ));
+    }
+
+    stop_consumet_sidecar(&app);
+    std::env::set_var(
+        "CONSUMET_API_BASE",
+        format!("http://127.0.0.1:{}", PACKAGED_CONSUMET_PORT),
+    );
+    update_consumet_status(
+        &app,
+        "starting",
+        "Restarting the bundled HiAnime gateway...",
+        "",
+        PACKAGED_CONSUMET_PORT,
+        "",
+    );
+
+    match start_consumet_sidecar(&app) {
+        ConsumetLaunchState::Failed => Err(String::from(
+            "GRABIX could not restart the Anime engine. Check the startup log for details.",
+        )),
+        ConsumetLaunchState::Ready => Ok(String::from(
+            "The bundled HiAnime gateway restarted successfully.",
+        )),
+        ConsumetLaunchState::Starting => Ok(String::from(
+            "The bundled HiAnime gateway is restarting in the background.",
+        )),
+    }
+}
+
+#[tauri::command]
+fn restart_grabix(app: AppHandle) {
+    app.request_restart();
 }
 
 fn app_state_dir(app: &AppHandle) -> PathBuf {
@@ -635,6 +675,75 @@ fn stop_consumet_sidecar(app: &AppHandle) {
     }
 }
 
+fn monitor_consumet_sidecar_startup(app: AppHandle, binary_path: String) {
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while Instant::now() < deadline {
+        if http_ok_once(PACKAGED_CONSUMET_PORT, "/") {
+            let msg = format!(
+                "Bundled HiAnime gateway is healthy on port {}.",
+                PACKAGED_CONSUMET_PORT
+            );
+            log_sidecar(&app, &format!("Consumet: {}", msg));
+            update_consumet_status(
+                &app,
+                "started",
+                &msg,
+                "",
+                PACKAGED_CONSUMET_PORT,
+                &binary_path,
+            );
+            return;
+        }
+
+        let exited =
+            if let Ok(mut child_slot) = app.state::<SidecarProcessState>().consumet_child.lock() {
+                if let Some(child) = child_slot.as_mut() {
+                    child.try_wait().ok().flatten()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        if let Some(status) = exited {
+            if let Ok(mut child_slot) = app.state::<SidecarProcessState>().consumet_child.lock() {
+                *child_slot = None;
+            }
+            let msg = format!(
+                "Bundled HiAnime gateway exited before startup completed (status: {}).",
+                status
+            );
+            log_sidecar(&app, &format!("Consumet: {}", msg));
+            update_consumet_status(
+                &app,
+                "failed",
+                &msg,
+                "consumet_exited_early",
+                PACKAGED_CONSUMET_PORT,
+                &binary_path,
+            );
+            return;
+        }
+
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    let msg = format!(
+        "Bundled HiAnime gateway is still warming up on port {}. Anime will attach as soon as it is ready.",
+        PACKAGED_CONSUMET_PORT
+    );
+    log_sidecar(&app, &format!("Consumet: {}", msg));
+    update_consumet_status(
+        &app,
+        "starting",
+        &msg,
+        "consumet_start_timeout",
+        PACKAGED_CONSUMET_PORT,
+        &binary_path,
+    );
+}
+
 fn start_consumet_sidecar(app: &AppHandle) -> ConsumetLaunchState {
     let node_binary = match find_consumet_node(app) {
         Some(path) => path,
@@ -799,72 +908,14 @@ fn start_consumet_sidecar(app: &AppHandle) -> ConsumetLaunchState {
         ),
     );
 
-    let deadline = Instant::now() + Duration::from_secs(25);
-    while Instant::now() < deadline {
-        if http_ok_once(PACKAGED_CONSUMET_PORT, "/") {
-            let msg = format!(
-                "Bundled HiAnime gateway is healthy on port {}.",
-                PACKAGED_CONSUMET_PORT
-            );
-            log_sidecar(app, &format!("Consumet: {}", msg));
-            update_consumet_status(
-                app,
-                "started",
-                &msg,
-                "",
-                PACKAGED_CONSUMET_PORT,
-                node_binary.to_string_lossy().as_ref(),
-            );
-            return ConsumetLaunchState::Ready;
-        }
+    let monitor_app = app.clone();
+    let binary_path = node_binary.to_string_lossy().into_owned();
+    let _ = thread::Builder::new()
+        .name(String::from("consumet-startup"))
+        .spawn(move || {
+            monitor_consumet_sidecar_startup(monitor_app, binary_path);
+        });
 
-        let exited =
-            if let Ok(mut child_slot) = app.state::<SidecarProcessState>().consumet_child.lock() {
-                if let Some(child) = child_slot.as_mut() {
-                    child.try_wait().ok().flatten()
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-        if let Some(status) = exited {
-            if let Ok(mut child_slot) = app.state::<SidecarProcessState>().consumet_child.lock() {
-                *child_slot = None;
-            }
-            let msg = format!(
-                "Bundled HiAnime gateway exited before startup completed (status: {}).",
-                status
-            );
-            log_sidecar(app, &format!("Consumet: {}", msg));
-            update_consumet_status(
-                app,
-                "failed",
-                &msg,
-                "consumet_exited_early",
-                PACKAGED_CONSUMET_PORT,
-                node_binary.to_string_lossy().as_ref(),
-            );
-            return ConsumetLaunchState::Failed;
-        }
-
-        thread::sleep(Duration::from_millis(350));
-    }
-
-    let msg = format!(
-        "Bundled HiAnime gateway is still warming up on port {}. The backend will keep waiting on demand.",
-        PACKAGED_CONSUMET_PORT
-    );
-    log_sidecar(app, &format!("Consumet: {}", msg));
-    update_consumet_status(
-        app,
-        "starting",
-        &msg,
-        "consumet_start_timeout",
-        PACKAGED_CONSUMET_PORT,
-        node_binary.to_string_lossy().as_ref(),
-    );
     ConsumetLaunchState::Starting
 }
 
@@ -961,9 +1012,6 @@ fn start_python_backend_async(app: AppHandle) {
 
             start_python_backend(app.clone(), python_home, backend_dir);
 
-            // Give Python a moment to spin up before polling.
-            thread::sleep(Duration::from_secs(2));
-
             let timeout_secs = 90;
             let started = Instant::now();
             log_sidecar(
@@ -1007,7 +1055,7 @@ fn start_python_backend_async(app: AppHandle) {
                     break;
                 }
 
-                thread::sleep(Duration::from_millis(450));
+                thread::sleep(Duration::from_millis(175));
             }
 
             let snapshot = app
@@ -1167,7 +1215,9 @@ pub fn run() {
             read_clipboard_text,
             get_startup_diagnostics,
             get_backend_request_context,
-            open_startup_log
+            open_startup_log,
+            restart_consumet_sidecar,
+            restart_grabix
         ]);
 
     let app = builder

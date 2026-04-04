@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.services.route_registry import get_route_handler
 
@@ -7,24 +7,24 @@ router = APIRouter()
 
 
 class DownloadRequest(BaseModel):
-    url: str
-    title: str = ""
-    thumbnail: str = ""
-    dl_type: str = "video"
-    quality: str = "best"
-    audio_format: str = "mp3"
-    audio_quality: str = "192"
-    subtitle_lang: str = "en"
-    thumbnail_format: str = "jpg"
+    url: str = Field(..., min_length=8, max_length=2000)
+    title: str = Field("", max_length=180)
+    thumbnail: str = Field("", max_length=2000)
+    dl_type: str = Field("video", max_length=40)
+    quality: str = Field("best", max_length=40)
+    audio_format: str = Field("mp3", max_length=20)
+    audio_quality: str = Field("192", max_length=20)
+    subtitle_lang: str = Field("en", max_length=12)
+    thumbnail_format: str = Field("jpg", max_length=12)
     trim_start: float = 0
     trim_end: float = 0
     trim_enabled: bool = False
     use_cpu: bool = True
-    headers_json: str = ""
+    headers_json: str = Field("", max_length=4000)
     force_hls: bool = False
-    category: str = ""
-    tags_csv: str = ""
-    download_engine: str = ""
+    category: str = Field("", max_length=80)
+    tags_csv: str = Field("", max_length=400)
+    download_engine: str = Field("", max_length=20)
 
 
 @router.get("/download")

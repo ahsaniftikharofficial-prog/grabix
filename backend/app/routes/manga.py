@@ -15,11 +15,14 @@ from app.services.manga_anilist import (
 from app.services.manga_jikan import (
     get_manga_by_mal_id,
     get_manga_by_query,
+    get_popular_manga,
     get_related_manga,
+    get_top_manga,
 )
 from app.services.manga_mangadex import (
     get_chapter_list,
     get_chapter_pages,
+    discover_manga as get_mangadex_discover,
     get_manga_details as get_mangadex_manga_details,
     search_manga as mangadex_search_manga,
 )
@@ -95,6 +98,18 @@ async def manga_search(query: str = Query(..., min_length=1), source: str = "ani
 @router.get("/frontpage")
 async def manga_frontpage(section: str = "trending", page: int = 1, limit: int = 12, days: int = 7):
     return {"source": "comick", "items": await get_comick_frontpage(section=section, page=page, limit=limit, days=days)}
+
+
+@router.get("/discover")
+async def manga_discover(section: str = "popular", page: int = 1, limit: int = 12):
+    safe_section = (section or "popular").strip().lower()
+    if safe_section not in {"popular", "recent", "top"}:
+        raise HTTPException(status_code=400, detail="Invalid manga discover section")
+    if safe_section == "recent":
+        return {"source": "mangadex", "items": await get_mangadex_discover(section=safe_section, page=page, limit=limit)}
+    if safe_section == "top":
+        return {"source": "jikan", "items": await get_top_manga(page=page)}
+    return {"source": "jikan", "items": await get_popular_manga(page=page)}
 
 
 @router.get("/seasonal")

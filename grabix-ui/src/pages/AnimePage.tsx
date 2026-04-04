@@ -7,6 +7,7 @@ import AppToast from "../components/AppToast";
 import { PageEmptyState, PageErrorState } from "../components/PageStates";
 import { useFavorites } from "../context/FavoritesContext";
 import { useContentFilter } from "../context/ContentFilterContext";
+import { BACKEND_API } from "../lib/api";
 import { queueSubtitleDownload, queueVideoDownload, resolveSourceDownloadOptions } from "../lib/downloads";
 import { filterAdultContent } from "../lib/contentFilter";
 import {
@@ -23,6 +24,8 @@ import {
 } from "../lib/consumetProviders";
 import { fetchTmdbSeasonMap as fetchTmdbSeasonMapFromBackend, searchTmdbMedia } from "../lib/tmdb";
 import { fetchMovieBoxSources, resolveAnimePlaybackSources, searchMovieBox, type StreamSource } from "../lib/streamProviders";
+import CachedImage from "../components/CachedImage";
+import { readLocalAppSettings } from "../lib/appSettings";
 
 const JIKAN = "https://api.jikan.moe/v4";
 
@@ -65,9 +68,26 @@ interface AnimeCardItem extends ConsumetMediaSummary {
   trailer_url?: string;
 }
 
+function normalizeAnimeImageUrl(value?: string | null): string {
+  const url = (value || "").trim();
+  if (!url) return "";
+  if (url.startsWith("/")) {
+    return `${BACKEND_API}${url}`;
+  }
+  const normalized = url.startsWith("//") ? `https:${url}` : url;
+  if (normalized.startsWith(BACKEND_API) || normalized.includes("/consumet/proxy?url=")) {
+    return normalized;
+  }
+  if (/^https?:\/\//i.test(normalized)) {
+    return `${BACKEND_API}/consumet/proxy?url=${encodeURIComponent(normalized)}`;
+  }
+  return normalized;
+}
+
 function toCardItem(item: ConsumetMediaSummary): AnimeCardItem {
   return {
     ...item,
+    image: normalizeAnimeImageUrl(item.image),
     episodes_count: item.episodes_count,
   };
 }
@@ -79,7 +99,7 @@ function mapLegacyAnime(item: LegacyAnime): AnimeCardItem {
     type: "anime",
     title: item.title_english ?? item.title,
     alt_title: item.title,
-    image: item.images.jpg.large_image_url ?? item.images.jpg.image_url,
+    image: normalizeAnimeImageUrl(item.images.jpg.large_image_url ?? item.images.jpg.image_url),
     description: item.synopsis,
     year: item.year,
     rating: item.score ?? null,
@@ -231,6 +251,7 @@ async function resolveTmdbEpisodeNumber(tmdbId: number | null, episodeNumber: nu
 }
 
 export default function AnimePage() {
+  const appSettings = readLocalAppSettings();
   const { adultContentBlocked } = useContentFilter();
   const [tab, setTab] = useState<Tab>("trending");
   const [trendingPeriod, setTrendingPeriod] = useState<TrendingPeriod>("daily");
@@ -377,6 +398,15 @@ export default function AnimePage() {
   }, [tab, query, trendingPeriod]);
 
   useEffect(() => {
+    if (query) return;
+    const warmTabs = (["trending", "popular", "toprated", "seasonal", "movie"] as const).filter((value) => value !== tab);
+    const timer = window.setTimeout(() => {
+      void Promise.allSettled(warmTabs.map((value) => fetchConsumetAnimeDiscover(value, 1, value === "trending" ? trendingPeriod : "daily")));
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [query, tab, trendingPeriod]);
+
+  useEffect(() => {
     const node = bottomRef.current;
     const root = scrollRef.current;
     if (!node || !root) return;
@@ -388,10 +418,10 @@ export default function AnimePage() {
   }, [items.length, loading, page, query, tab, trendingPeriod]);
 
   const helperText = health?.healthy
-    ? "Hianime-first anime with dub-first playback, anime-provider backups, and Hindi via Movie Box when available"
+    ? "Anime is ready with quick playback, favorites, and trailers."
     : health && !health.configured
-      ? "Anime browsing is ready with fallback servers, Favorites, and trailer playback"
-      : "Fallback-safe anime browsing with Hianime episodes when available";
+      ? "Anime is opening now while playback gets ready."
+      : "Anime is opening now and finishing a few last checks.";
 
   const handleScroll = () => {
     const node = scrollRef.current;
@@ -465,7 +495,7 @@ export default function AnimePage() {
         ) : (
           <>
             <div style={{ display: "grid", gridTemplateColumns: tab === "trending" ? "repeat(auto-fit, minmax(190px, 1fr))" : "repeat(auto-fill, minmax(150px, 1fr))", gap: tab === "trending" ? 16 : 14 }}>
-              {filteredItems.map((anime, index) => <AnimeCard key={`${anime.provider}-${anime.id}`} anime={anime} activeTab={tab} featured={tab === "trending"} rank={index + 1} onClick={() => setDetail(anime)} />)}
+              {filteredItems.map((anime, index) => <AnimeCard key={`${anime.provider}-${anime.id}`} anime={anime} activeTab={tab} featured={tab === "trending"} rank={index + 1} onClick={() => setDetail(anime)} compact={appSettings.compact_media_cards} showRatings={appSettings.show_ratings_badges} />)}
             </div>
             <div ref={bottomRef} style={{ height: 24 }} />
           </>
@@ -516,7 +546,7 @@ export default function AnimePage() {
   );
 }
 
-function AnimeCard({ anime, activeTab, featured, rank, onClick }: { anime: AnimeCardItem; activeTab: Tab; featured?: boolean; rank?: number; onClick: () => void }) {
+function AnimeCard({ anime, activeTab, featured, rank, onClick, compact, showRatings }: { anime: AnimeCardItem; activeTab: Tab; featured?: boolean; rank?: number; onClick: () => void; compact: boolean; showRatings: boolean }) {
   const { isFav, toggle } = useFavorites();
   const favoriteId = `anime-${anime.mal_id ?? `${anime.provider}-${anime.id}`}`;
   const favorite = isFav(favoriteId);
@@ -529,13 +559,14 @@ function AnimeCard({ anime, activeTab, featured, rank, onClick }: { anime: Anime
     : anime.episodes_count
       ? `${anime.episodes_count} eps`
       : anime.status || "-";
+  const posterHeight = featured ? (compact ? 232 : 265) : (compact ? 188 : 210);
 
   return (
     <div className="card" style={{ overflow: "hidden", cursor: "pointer", transition: "transform 0.15s", minHeight: featured ? 360 : undefined }} onClick={onClick} onMouseEnter={(e) => (e.currentTarget.style.transform = "translateY(-3px)")} onMouseLeave={(e) => (e.currentTarget.style.transform = "translateY(0)")}>
       <div style={{ position: "relative" }}>
-        <img src={anime.image || "https://via.placeholder.com/150x210?text=No+Image"} alt={anime.title} style={{ width: "100%", height: featured ? 265 : 210, objectFit: "cover" }} onError={(e) => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/150x210?text=No+Image"; }} />
+        <CachedImage src={anime.image || ""} fallbackSrc="https://via.placeholder.com/150x210?text=No+Image" alt={anime.title} referrerPolicy="no-referrer" style={{ width: "100%", height: posterHeight, objectFit: "cover" }} />
         {featured && rank ? <div style={{ position: "absolute", bottom: 8, left: 8, background: "rgba(0,0,0,0.78)", color: "white", fontSize: 12, padding: "4px 10px", borderRadius: 999, fontWeight: 700 }}>#{rank}</div> : null}
-        {anime.rating ? <div style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.75)", color: "#fdd663", fontSize: 11, padding: "2px 7px", borderRadius: 6, display: "flex", alignItems: "center", gap: 3, fontWeight: 600 }}><IconStar size={10} color="#fdd663" /> {anime.rating.toFixed(1)}</div> : null}
+        {showRatings && anime.rating ? <div style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.75)", color: "#fdd663", fontSize: 11, padding: "2px 7px", borderRadius: 6, display: "flex", alignItems: "center", gap: 3, fontWeight: 600 }}><IconStar size={10} color="#fdd663" /> {anime.rating.toFixed(1)}</div> : null}
         <button
           className="btn-icon"
           style={{ position: "absolute", top: 6, left: 6, width: 28, height: 28, borderRadius: 999, background: "rgba(0,0,0,0.62)", border: "1px solid rgba(255,255,255,0.12)" }}
@@ -589,6 +620,7 @@ function AnimeDetail({
   consumetHealthy: boolean;
   activeTab: Tab;
 }) {
+  const appSettings = readLocalAppSettings();
   const [finding, setFinding] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [tmdbId, setTmdbId] = useState<number | null>(null);
@@ -598,8 +630,8 @@ function AnimeDetail({
   const [episode, setEpisode] = useState(1);
   const [dubEpisodeCount, setDubEpisodeCount] = useState<number | null>(null);
   const hasDub = dubEpisodeCount === null ? false : (dubEpisodeCount === 0 ? false : episode <= dubEpisodeCount);
-  const [audio, setAudio] = useState<AudioPreference>("original");
-  const [server, setServer] = useState<AnimeServerOption>("auto");
+  const [audio, setAudio] = useState<AudioPreference>(normalizeAudioPreference(appSettings.anime_default_audio));
+  const [server, setServer] = useState<AnimeServerOption>(appSettings.anime_default_server);
   useEffect(() => {
     if (!hasDub && audio === "en") setAudio("original");
   }, [hasDub]);
@@ -611,7 +643,9 @@ function AnimeDetail({
   const [downloadDialogOpen, setDownloadDialogOpen] = useState(false);
   const [toast, setToast] = useState<{ message: string; variant: "success" | "error" | "info" } | null>(null);
   const [downloadLanguage, setDownloadLanguage] = useState<"sub" | "dub" | "hindi">("dub");
-  const [downloadServer, setDownloadServer] = useState<AnimeServerOption>("hd-1");
+  const [downloadServer, setDownloadServer] = useState<AnimeServerOption>(
+    appSettings.anime_default_server === "auto" ? "hd-1" : appSettings.anime_default_server
+  );
   const [downloadQuality, setDownloadQuality] = useState("source");
   const [downloadQualityOptions, setDownloadQualityOptions] = useState<Array<{ id: string; label: string; url: string; headers?: Record<string, string>; forceHls?: boolean }>>([]);
   const [downloadSubtitleTracks, setDownloadSubtitleTracks] = useState<Array<{ label: string; url: string; headers?: Record<string, string> }>>([]);
@@ -705,11 +739,11 @@ function AnimeDetail({
       setResolvedAnime(nextCandidates[0] ?? anime);
       setFinding(false);
       if (!consumetHealthy) {
-        setDetailHint("Consumet is in fallback mode. GRABIX will use Jikan, Movie Box, and embed backups.");
+        setDetailHint("Getting playback ready for this anime.");
       } else if (nextCandidates.length > 0) {
-        setDetailHint(`Ready to play. Using ${nextCandidates[0].provider.toUpperCase()} first.`);
+        setDetailHint("Ready to play.");
       } else {
-        setDetailHint("Ready to play with GRABIX fallback providers.");
+        setDetailHint("Playback is ready.");
       }
 
       void (async () => {
@@ -727,7 +761,7 @@ function AnimeDetail({
               setDubEpisodeCount(typeof detail.item.dub_episode_count === "number" ? detail.item.dub_episode_count : (detail.item.languages ?? []).some((l: string) => l === "en" || l === "dub") ? Infinity : 0);
               setEpisodes(nextEpisodes);
               setKnownEpisodeCount((current) => Math.max(current ?? 0, nextEpisodes.length));
-              setDetailHint(`Episode sources available via ${candidate.provider.toUpperCase()}`);
+              setDetailHint("Episodes are ready.");
               return;
             }
           } catch {
@@ -737,8 +771,8 @@ function AnimeDetail({
         if (!cancelled) {
           setDetailHint(
             consumetHealthy
-              ? "Episode metadata is limited right now. GRABIX will keep using fallback playback providers."
-              : "Episode metadata is limited, but GRABIX fallback playback is still available."
+              ? "Episode details are limited right now, but playback is still available."
+              : "Episode details are still loading, but playback is still available."
           );
         }
       })();
@@ -1325,7 +1359,7 @@ function AnimeDetail({
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
       <div style={{ background: "var(--bg-surface)", borderRadius: 16, width: "100%", maxWidth: 720, maxHeight: "90vh", overflow: "hidden", display: "flex", flexDirection: "column", boxShadow: "var(--shadow-lg)", border: "1px solid var(--border)" }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", gap: 16, padding: "20px 20px 0" }}>
-          <img src={anime.image || "https://via.placeholder.com/100x145"} alt={title} style={{ width: 100, height: 145, objectFit: "cover", borderRadius: 10, flexShrink: 0, border: "1px solid var(--border)" }} onError={(e) => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/100x145"; }} />
+          <img src={anime.image || "https://via.placeholder.com/100x145"} alt={title} referrerPolicy="no-referrer" style={{ width: 100, height: 145, objectFit: "cover", borderRadius: 10, flexShrink: 0, border: "1px solid var(--border)" }} onError={(e) => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/100x145"; }} />
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6, lineHeight: 1.3 }}>{title}</div>
             <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 8 }}>
@@ -1347,7 +1381,7 @@ function AnimeDetail({
         <div style={{ flex: 1, overflowY: "auto", padding: "14px 20px 24px" }}>
           {anime.description && <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7, marginBottom: 16 }}>{anime.description.length > 380 ? `${anime.description.slice(0, 380)}...` : anime.description}</div>}
           <div style={{ fontSize: 12, color: finding ? "var(--text-muted)" : resolvedAnime ? "var(--text-success)" : "var(--text-warning)", marginBottom: 14 }}>
-            {finding ? "Resolving anime providers..." : detailHint || "Fallback playback only"}
+            {finding ? "Getting playback ready..." : detailHint || "Playback is loading."}
           </div>
 
           {(!isMovie || totalEpisodes > 1) && (

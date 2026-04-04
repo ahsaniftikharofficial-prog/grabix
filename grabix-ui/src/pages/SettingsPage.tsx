@@ -12,6 +12,8 @@ import {
   type StartupDiagnosticsPayload,
 } from "../lib/api";
 import { IconFolder, IconSun, IconMoon, IconInfo, IconCheck } from "../components/Icons";
+import { DEFAULT_APP_SETTINGS, normalizeAppSettings, readLocalAppSettings, writeLocalAppSettings, type AppSettings } from "../lib/appSettings";
+import { clearMediaCache, getMediaCacheStats, pruneExpiredMediaCache } from "../lib/mediaCache";
 
 interface SettingRowProps {
   label: string;
@@ -42,12 +44,7 @@ function Toggle({ value, onChange }: { value: boolean; onChange: (value: boolean
 export default function SettingsPage() {
   const { theme, toggle } = useTheme();
   const { adultContentBlocked, adultPasswordConfigured, unlockAdultContent, configureAdultContent } = useContentFilter();
-  const [autoFetch, setAutoFetch] = useState(true);
-  const [notifications, setNotifications] = useState(true);
-  const [format, setFormat] = useState("mp4");
-  const [quality, setQuality] = useState("1080p");
-  const [downloadFolder, setDownloadFolder] = useState("~/Downloads/GRABIX");
-  const [downloadEngine, setDownloadEngine] = useState<"standard" | "aria2">("standard");
+  const [settings, setSettings] = useState<AppSettings>(() => readLocalAppSettings());
   const [aria2Available, setAria2Available] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState(false);
@@ -59,20 +56,13 @@ export default function SettingsPage() {
   const [selfTestRunning, setSelfTestRunning] = useState(false);
   const [startupDiagnostics, setStartupDiagnostics] = useState<StartupDiagnosticsPayload | null>(null);
   const [diagnosticsLogs, setDiagnosticsLogs] = useState<DiagnosticsLogsPayload | null>(null);
+  const [cacheStats, setCacheStats] = useState<{ items: number; bytes: number }>({ items: 0, bytes: 0 });
+  const [cacheClearing, setCacheClearing] = useState(false);
 
   useEffect(() => {
     backendJson<Record<string, unknown>>(`${BACKEND_API}/settings`)
       .then((data: Record<string, unknown>) => {
-        if (typeof data.auto_fetch === "boolean") setAutoFetch(data.auto_fetch);
-        if (typeof data.notifications === "boolean") setNotifications(data.notifications);
-        if (typeof data.default_format === "string") setFormat(data.default_format);
-        if (typeof data.default_quality === "string") setQuality(data.default_quality);
-        if (typeof data.download_folder === "string" && data.download_folder.trim()) {
-          setDownloadFolder(data.download_folder);
-        }
-        if (data.default_download_engine === "aria2" || data.default_download_engine === "standard") {
-          setDownloadEngine(data.default_download_engine);
-        }
+        setSettings(normalizeAppSettings({ ...DEFAULT_APP_SETTINGS, ...readLocalAppSettings(), ...data, theme }));
       })
       .catch(() => {
         // Keep defaults when backend settings are unavailable.
@@ -87,21 +77,18 @@ export default function SettingsPage() {
 
     void fetchStartupDiagnostics().then((payload) => setStartupDiagnostics(payload));
     void fetchDiagnosticsLogs(12).then((payload) => setDiagnosticsLogs(payload)).catch(() => setDiagnosticsLogs(null));
+    void pruneExpiredMediaCache().catch(() => undefined);
+    void getMediaCacheStats().then(setCacheStats).catch(() => setCacheStats({ items: 0, bytes: 0 }));
   }, []);
 
   const save = () => {
     setSaveError(false);
+    const payload = normalizeAppSettings({ ...settings, theme });
+    writeLocalAppSettings(payload);
     backendFetch(`${BACKEND_API}/settings`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        theme,
-        auto_fetch: autoFetch,
-        notifications,
-        default_format: format,
-        default_quality: quality,
-        default_download_engine: downloadEngine,
-      }),
+      body: JSON.stringify(payload),
     }, { sensitive: true })
       .then(async (response) => {
         if (!response.ok) {
@@ -114,6 +101,24 @@ export default function SettingsPage() {
         setSaveError(true);
         setTimeout(() => setSaveError(false), 3000);
       });
+  };
+
+  const updateSetting = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
+    setSettings((current) => {
+      const next = normalizeAppSettings({ ...current, [key]: value });
+      writeLocalAppSettings(next);
+      return next;
+    });
+  };
+
+  const handleClearCache = async () => {
+    setCacheClearing(true);
+    try {
+      await clearMediaCache();
+      setCacheStats({ items: 0, bytes: 0 });
+    } finally {
+      setCacheClearing(false);
+    }
   };
 
   const handleAdultUnlock = async () => {
@@ -185,6 +190,9 @@ export default function SettingsPage() {
   };
 
   const selfTestGate = (selfTest?.release_gate as { ready?: boolean; failed_checks?: Array<{ label?: string; details?: Record<string, unknown> }> } | undefined) || undefined;
+  const cacheSizeLabel = cacheStats.bytes >= 1024 * 1024
+    ? `${(cacheStats.bytes / (1024 * 1024)).toFixed(1)} MB`
+    : `${Math.max(0, Math.round(cacheStats.bytes / 1024))} KB`;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
@@ -214,18 +222,18 @@ export default function SettingsPage() {
           <SettingRow label="Download folder" sub="Where files are saved on your computer">
             <button className="btn btn-ghost" style={{ gap: 6, fontSize: 12 }}>
               <IconFolder size={14} />
-              {downloadFolder}
+              {settings.download_folder}
             </button>
           </SettingRow>
           <SettingRow label="Default format" sub="Format used when starting a video download">
-            <select value={format} onChange={(e) => setFormat(e.target.value)} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+            <select value={settings.default_format} onChange={(e) => updateSetting("default_format", e.target.value)} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
               <option value="mp4">MP4 (video)</option>
               <option value="mp3">MP3 (audio)</option>
               <option value="webm">WebM</option>
             </select>
           </SettingRow>
           <SettingRow label="Default quality" sub="Video quality preference">
-            <select value={quality} onChange={(e) => setQuality(e.target.value)} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+            <select value={settings.default_quality} onChange={(e) => updateSetting("default_quality", e.target.value)} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
               <option>1080p</option>
               <option>720p</option>
               <option>480p</option>
@@ -233,7 +241,7 @@ export default function SettingsPage() {
             </select>
           </SettingRow>
           <SettingRow label="Download engine" sub={aria2Available ? "Choose the stable standard engine or the faster aria2 engine for supported downloads." : "aria2 is not installed right now, so GRABIX will use the standard engine."}>
-            <select value={downloadEngine} onChange={(e) => setDownloadEngine((e.target.value === "aria2" ? "aria2" : "standard"))} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+            <select value={settings.default_download_engine} onChange={(e) => updateSetting("default_download_engine", e.target.value === "aria2" ? "aria2" : "standard")} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
               <option value="standard">Standard (stable)</option>
               <option value="aria2">aria2 (fast)</option>
             </select>
@@ -243,10 +251,121 @@ export default function SettingsPage() {
         <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>Behaviour</div>
         <div className="card card-padded" style={{ marginBottom: 20 }}>
           <SettingRow label="Auto-fetch on paste" sub="Automatically fetch video info when a URL is pasted">
-            <Toggle value={autoFetch} onChange={setAutoFetch} />
+            <Toggle value={settings.auto_fetch} onChange={(value) => updateSetting("auto_fetch", value)} />
           </SettingRow>
           <SettingRow label="Download notifications" sub="Show a notification when a download completes">
-            <Toggle value={notifications} onChange={setNotifications} />
+            <Toggle value={settings.notifications} onChange={(value) => updateSetting("notifications", value)} />
+          </SettingRow>
+          <SettingRow label="Compact media cards" sub="Fit more movies, anime, and manga on screen at once">
+            <Toggle value={settings.compact_media_cards} onChange={(value) => updateSetting("compact_media_cards", value)} />
+          </SettingRow>
+          <SettingRow label="Reduced motion" sub="Make loading and page motion calmer on slower devices">
+            <Toggle value={settings.reduced_motion} onChange={(value) => updateSetting("reduced_motion", value)} />
+          </SettingRow>
+          <SettingRow label="Show rating badges" sub="Show score chips on posters and media cards">
+            <Toggle value={settings.show_ratings_badges} onChange={(value) => updateSetting("show_ratings_badges", value)} />
+          </SettingRow>
+        </div>
+
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>Performance</div>
+        <div className="card card-padded" style={{ marginBottom: 20 }}>
+          <SettingRow label="Media image cache" sub="Keep posters, covers, and thumbnails locally so they open much faster next time">
+            <Toggle value={settings.enable_media_cache} onChange={(value) => updateSetting("enable_media_cache", value)} />
+          </SettingRow>
+          <SettingRow label="Image cache duration" sub="How long GRABIX keeps saved posters and thumbnails before refreshing them">
+            <select value={String(settings.media_cache_days)} onChange={(e) => updateSetting("media_cache_days", Number(e.target.value))} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+              <option value="3">3 days</option>
+              <option value="7">7 days</option>
+              <option value="14">14 days</option>
+              <option value="30">30 days</option>
+            </select>
+          </SettingRow>
+          <SettingRow label="Metadata cache" sub="Keep discover, search, and details data between launches for faster browsing">
+            <select value={settings.metadata_cache_mode} onChange={(e) => updateSetting("metadata_cache_mode", e.target.value === "session" ? "session" : "persistent")} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+              <option value="persistent">Persistent</option>
+              <option value="session">This session only</option>
+            </select>
+          </SettingRow>
+          <SettingRow label="Stored image cache" sub={`Saved items: ${cacheStats.items} • Approx size: ${cacheSizeLabel}`}>
+            <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => void handleClearCache()} disabled={cacheClearing}>
+              {cacheClearing ? "Clearing..." : "Clear cache"}
+            </button>
+          </SettingRow>
+        </div>
+
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>Anime</div>
+        <div className="card card-padded" style={{ marginBottom: 20 }}>
+          <SettingRow label="Preferred anime audio" sub="Choose what GRABIX should prefer first when anime has multiple audio tracks">
+            <select value={settings.anime_default_audio} onChange={(e) => updateSetting("anime_default_audio", (e.target.value === "hi" || e.target.value === "original") ? e.target.value : "en")} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+              <option value="en">Dub first</option>
+              <option value="original">Sub first</option>
+              <option value="hi">Hindi first</option>
+            </select>
+          </SettingRow>
+          <SettingRow label="Preferred anime server" sub="Pick the default Anime server for playback">
+            <select value={settings.anime_default_server} onChange={(e) => updateSetting("anime_default_server", (e.target.value === "hd-1" || e.target.value === "hd-2") ? e.target.value : "auto")} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+              <option value="auto">Auto</option>
+              <option value="hd-1">HD-1</option>
+              <option value="hd-2">HD-2</option>
+            </select>
+          </SettingRow>
+          <SettingRow label="Auto-play next episode" sub="Move to the next episode when the current one finishes">
+            <Toggle value={settings.anime_auto_play_next} onChange={(value) => updateSetting("anime_auto_play_next", value)} />
+          </SettingRow>
+          <SettingRow label="Preload next episode" sub="Warm the next episode in the background for smoother anime playback">
+            <Toggle value={settings.anime_preload_next_episode} onChange={(value) => updateSetting("anime_preload_next_episode", value)} />
+          </SettingRow>
+          <SettingRow label="Show anime trailers" sub="Keep trailer playback and trailer buttons available on anime details">
+            <Toggle value={settings.anime_show_trailers} onChange={(value) => updateSetting("anime_show_trailers", value)} />
+          </SettingRow>
+          <SettingRow label="Prefer fallback playback" sub="Use GRABIX fallback playback sooner when the main Anime engine is slow">
+            <Toggle value={settings.anime_prefer_fallback} onChange={(value) => updateSetting("anime_prefer_fallback", value)} />
+          </SettingRow>
+        </div>
+
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>Manga</div>
+        <div className="card card-padded" style={{ marginBottom: 20 }}>
+          <SettingRow label="Default manga language" sub="Open manga chapters in this language first when available">
+            <select value={settings.manga_default_language} onChange={(e) => updateSetting("manga_default_language", e.target.value)} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+              <option value="en">English</option>
+              <option value="ar">Arabic</option>
+              <option value="hi">Hindi</option>
+              <option value="ur">Urdu</option>
+              <option value="es">Spanish</option>
+              <option value="fr">French</option>
+            </select>
+          </SettingRow>
+          <SettingRow label="Manga reader mode" sub="Choose the normal reader, faster reader, backup reader, or let GRABIX decide">
+            <select value={settings.manga_reader_mode} onChange={(e) => updateSetting("manga_reader_mode", (["fast", "backup", "auto"].includes(e.target.value) ? e.target.value : "standard") as AppSettings["manga_reader_mode"])} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+              <option value="standard">Standard</option>
+              <option value="fast">Fast</option>
+              <option value="backup">Backup</option>
+              <option value="auto">Auto</option>
+            </select>
+          </SettingRow>
+          <SettingRow label="Auto-open first chapter" sub="Jump straight into reading when you open manga details">
+            <Toggle value={settings.manga_auto_open_first_chapter} onChange={(value) => updateSetting("manga_auto_open_first_chapter", value)} />
+          </SettingRow>
+        </div>
+
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>Movies & TV</div>
+        <div className="card card-padded" style={{ marginBottom: 20 }}>
+          <SettingRow label="Movie quality target" sub="Preferred stream quality for movies when multiple choices exist">
+            <select value={settings.movies_prefer_quality} onChange={(e) => updateSetting("movies_prefer_quality", (e.target.value === "720p" || e.target.value === "480p") ? e.target.value : "1080p")} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+              <option value="1080p">1080p</option>
+              <option value="720p">720p</option>
+              <option value="480p">480p</option>
+            </select>
+          </SettingRow>
+          <SettingRow label="TV quality target" sub="Preferred stream quality for TV series when multiple choices exist">
+            <select value={settings.tv_prefer_quality} onChange={(e) => updateSetting("tv_prefer_quality", (e.target.value === "720p" || e.target.value === "480p") ? e.target.value : "1080p")} style={{ background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 10px", fontSize: 12, fontFamily: "var(--font)", outline: "none" }}>
+              <option value="1080p">1080p</option>
+              <option value="720p">720p</option>
+              <option value="480p">480p</option>
+            </select>
+          </SettingRow>
+          <SettingRow label="Prefer Hindi in Movie Box" sub="Try Hindi-first choices when browsing or opening Movie Box content">
+            <Toggle value={settings.moviebox_prefer_hindi} onChange={(value) => updateSetting("moviebox_prefer_hindi", value)} />
           </SettingRow>
         </div>
 

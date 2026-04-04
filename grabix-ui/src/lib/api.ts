@@ -1,4 +1,4 @@
-import { getCachedJson } from "./cache";
+import { clearCachedValue, getCachedJson } from "./cache";
 import { invoke } from "@tauri-apps/api/core";
 export const BACKEND_OFFLINE_MESSAGE = "GRABIX backend is offline. Start the backend and try again.";
 
@@ -102,6 +102,11 @@ export interface BackendRequestContext {
   desktop_auth_token: string;
   desktop_auth_required: boolean;
   app_mode: string;
+}
+
+export interface CircuitBreakerResetPayload {
+  reset: string[];
+  message: string;
 }
 
 let backendRequestContextPromise: Promise<BackendRequestContext> | null = null;
@@ -318,4 +323,29 @@ export async function fetchDiagnosticsLogs(limit = 20): Promise<DiagnosticsLogsP
     scope: "memory",
     mapError: async () => BACKEND_OFFLINE_MESSAGE,
   });
+}
+
+export function invalidateRuntimeRecoveryCaches() {
+  clearCachedValue("runtime:health", "memory");
+  clearCachedValue("runtime:ping", "memory");
+  clearCachedValue("consumet:health", "memory");
+  clearCachedValue("consumet:health", "local");
+  clearCachedValue("diagnostics:logs:20", "memory");
+}
+
+export async function resetServiceCircuitBreaker(service?: string): Promise<CircuitBreakerResetPayload> {
+  const query = service ? `?service=${encodeURIComponent(service)}` : "";
+  invalidateRuntimeRecoveryCaches();
+  return await backendJson<CircuitBreakerResetPayload>(`/health/circuit-breaker/reset${query}`, {
+    method: "POST",
+  });
+}
+
+export async function restartConsumetSidecar(): Promise<string> {
+  invalidateRuntimeRecoveryCaches();
+  return await invoke<string>("restart_consumet_sidecar");
+}
+
+export async function restartGrabix(): Promise<void> {
+  await invoke("restart_grabix");
 }
