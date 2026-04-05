@@ -387,17 +387,7 @@ def _correlation_id_from_request(request: Request | None) -> str:
 async def correlation_middleware(request: Request, call_next):
     correlation_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
     request.state.correlation_id = correlation_id
-    try:
-        enforce_rate_limit(request)
-    except HTTPException as exc:
-        response = json_error_response(
-            status_code=exc.status_code,
-            detail=exc.detail,
-            request=request,
-            service="security",
-        )
-        response.headers["X-Request-ID"] = correlation_id
-        return response
+    # Rate limiting removed — local desktop app, no need to throttle own requests.
     auth_failure = validate_desktop_auth_request(request)
     if auth_failure is not None:
         payload = dict(auth_failure["payload"])

@@ -502,15 +502,20 @@ export default function VidSrcPlayer({
     if (!activeSource) return;
 
     if (activeSource.kind === "embed") {
-      // Give embedded anime servers time to initialize before we fail over.
-      const failoverTimeout = window.setTimeout(() => {
+      // After 45s, warn the user but keep the embed alive.
+      // Do NOT failover: embed onLoad may never fire in Tauri for cross-origin
+      // iframes, and auto-failover exhausts all sources → "Playback failed".
+      // The user can switch sources manually via the server picker if needed.
+      const noticeTimeout = window.setTimeout(() => {
         if (!embedLoadedRef.current) {
-          goToNextSource("timeout");
+          embedLoadedRef.current = true; // prevent further timeouts on re-render
+          setFallbackNotice("Stream is taking a while — still connecting. Use the server picker to switch if needed.");
+          setIsLoading(false);
         }
-      }, 8_000);
+      }, 45_000);
 
       return () => {
-        window.clearTimeout(failoverTimeout);
+        window.clearTimeout(noticeTimeout);
       };
     }
 
@@ -610,7 +615,7 @@ export default function VidSrcPlayer({
       if (!sourceReady) {
         goToNextSource("timeout");
       }
-    }, 20000);
+    }, 60000);
 
     const handleCanPlay = () => {
       sourceReady = true;

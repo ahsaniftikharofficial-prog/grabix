@@ -665,7 +665,7 @@ class AnimeResolvedProviderAdapter(BaseProviderAdapter):
         super().__init__(
             name="anime-resolved",
             family="anime-resolved",
-            policy=ProviderPolicy(timeout_seconds=20.0, retries=1, cooldown_seconds=18.0, circuit_breaker_threshold=3),
+            policy=ProviderPolicy(timeout_seconds=50.0, retries=1, cooldown_seconds=18.0, circuit_breaker_threshold=3),
         )
 
     async def health(self, **kwargs) -> Any:
@@ -739,7 +739,7 @@ class ConsumetAnimeProviderAdapter(BaseProviderAdapter):
         super().__init__(
             name="consumet-watch",
             family="consumet-watch",
-            policy=ProviderPolicy(timeout_seconds=18.0, retries=1, cooldown_seconds=16.0, circuit_breaker_threshold=3),
+            policy=ProviderPolicy(timeout_seconds=50.0, retries=1, cooldown_seconds=16.0, circuit_breaker_threshold=3),
         )
 
     async def health(self, **kwargs) -> Any:
@@ -1278,21 +1278,6 @@ async def resolve_anime_playback(
                 if not any(group.get("id") == group_id for group in groups):
                     groups.append({"id": group_id, "label": f"{provider_name} watch fallback", "sources": watch_sources})
                 if purpose == "play":
-                    if tmdb_id and not any(g.get("id") == "embed" for g in groups):
-                        try:
-                            _eb = await registry.execute(
-                                "embed", "sources",
-                                correlation_id=correlation_id,
-                                fallback_used=True,
-                                media_type="anime",
-                                tmdb_id=tmdb_id,
-                                season=max(1, fallback_season),
-                                episode=max(1, fallback_episode or episode_number),
-                            )
-                            if _eb:
-                                groups.append({"id": "embed", "label": "Embed fallback", "sources": _eb})
-                        except ProviderServiceError:
-                            pass
                     return _resolution_payload(
                         correlation_id=correlation_id,
                         groups=groups,
@@ -1352,21 +1337,6 @@ async def resolve_anime_playback(
                 if not any(group.get("id") == group_id for group in groups):
                     groups.append({"id": group_id, "label": f"Backend resolved fallback ({provider_name})", "sources": resolved_sources})
                 if purpose == "play":
-                    if tmdb_id and not any(g.get("id") == "embed" for g in groups):
-                        try:
-                            _eb = await registry.execute(
-                                "embed", "sources",
-                                correlation_id=correlation_id,
-                                fallback_used=True,
-                                media_type="anime",
-                                tmdb_id=tmdb_id,
-                                season=max(1, fallback_season),
-                                episode=max(1, fallback_episode or episode_number),
-                            )
-                            if _eb:
-                                groups.append({"id": "embed", "label": "Embed fallback", "sources": _eb})
-                        except ProviderServiceError:
-                            pass
                     return _resolution_payload(
                         correlation_id=correlation_id,
                         groups=groups,
@@ -1409,40 +1379,9 @@ async def resolve_anime_playback(
                     primary_provider="moviebox",
                 )
 
-    if tmdb_id and not any(group.get("id") == "embed" for group in groups):
-        try:
-            embed_sources = await registry.execute(
-                "embed",
-                "sources",
-                correlation_id=correlation_id,
-                fallback_used=bool(groups),
-                media_type="anime",
-                tmdb_id=tmdb_id,
-                season=max(1, fallback_season),
-                episode=max(1, fallback_episode or episode_number),
-            )
-            if embed_sources:
-                attempts.append(
-                    _attempt_payload(
-                        provider="embed",
-                        operation="sources",
-                        success=True,
-                        message=f"Prepared {len(embed_sources)} anime embed fallback sources.",
-                        fallback_used=bool(groups),
-                    )
-                )
-                groups.append({"id": "embed", "label": "Embed fallback", "sources": embed_sources})
-        except ProviderServiceError as error:
-            attempts.append(
-                _attempt_payload(
-                    provider="embed",
-                    operation="sources",
-                    success=False,
-                    message=error.message,
-                    fallback_used=bool(groups),
-                    retryable=error.retryable,
-                )
-            )
+    # Embed (VidSrc) fallback intentionally removed for anime — VidSrc does not
+    # reliably host anime content and always shows "We're Sorry / file not found".
+    # If HiAnime and MovieBox both fail, return whatever groups were collected.
 
     payload = _resolution_payload(
         correlation_id=correlation_id,
