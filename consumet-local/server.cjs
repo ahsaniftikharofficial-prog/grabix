@@ -472,6 +472,27 @@ async function fetchWatch(episodeId, server, category) {
 }
 
 async function route(pathname, searchParams) {
+  if (pathname === "/anime/hianime/home") {
+    const home = await scraper.getHomePage();
+    const normalizeList = (arr) => Array.isArray(arr) ? arr.map(normalizeSearchResult) : [];
+    return {
+      status: 200,
+      body: {
+        spotlightAnimes: normalizeList(home?.spotlightAnimes),
+        trendingAnimes: normalizeList(home?.trendingAnimes),
+        latestEpisodeAnimes: normalizeList(home?.latestEpisodeAnimes),
+        topUpcomingAnimes: normalizeList(home?.topUpcomingAnimes),
+        topAiringAnimes: normalizeList(home?.topAiringAnimes),
+        top10Animes: {
+          today: normalizeList(home?.top10Animes?.today),
+          week: normalizeList(home?.top10Animes?.week),
+          month: normalizeList(home?.top10Animes?.month),
+        },
+        genres: Array.isArray(home?.genres) ? home.genres : [],
+      },
+    };
+  }
+
   if (pathname === "/") {
     return {
       status: 200,

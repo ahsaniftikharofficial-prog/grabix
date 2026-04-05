@@ -12,6 +12,7 @@ from difflib import SequenceMatcher
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse, urlencode
 from urllib.request import Request as URLRequest, urlopen
 from pydantic import BaseModel
+from app.routes.aniwatch import router as aniwatch_router
 from app.routes.consumet import router as consumet_router
 from app.routes.downloads import router as downloads_router
 from app.routes.manga import router as manga_router
@@ -223,6 +224,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "Range", "X-Request-ID", DESKTOP_AUTH_HEADER],
 )
+app.include_router(aniwatch_router, prefix="/aniwatch")
 app.include_router(consumet_router, prefix="/consumet")
 app.include_router(downloads_router)
 app.include_router(manga_router, prefix="/manga")

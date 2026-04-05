@@ -10,7 +10,6 @@ import { useContentFilter } from "../context/ContentFilterContext";
 import { queueSubtitleDownload, queueVideoDownload, resolveSourceDownloadOptions } from "../lib/downloads";
 import { filterAdultContent } from "../lib/contentFilter";
 import {
-  fetchConsumetAnimeDiscover,
   fetchConsumetAnimeEpisodes,
   fetchConsumetDomainInfo,
   fetchConsumetHealth,
@@ -21,6 +20,17 @@ import {
   type ConsumetHealth,
   type ConsumetMediaSummary,
 } from "../lib/consumetProviders";
+import {
+  fetchAniwatchDiscover,
+  fetchAniwatchGenreAnime,
+  fetchAniwatchGenres,
+  fetchAniwatchSchedule,
+  searchAniwatch,
+  warmAniwatchSections,
+  type AniwatchGenre,
+  type AniwatchScheduledAnime,
+  type AniwatchSection,
+} from "../lib/aniwatchProviders";
 import { BACKEND_API } from "../lib/api";
 import { fetchTmdbSeasonMap as fetchTmdbSeasonMapFromBackend, searchTmdbMedia } from "../lib/tmdb";
 import { fetchMovieBoxSources, resolveAnimePlaybackSources, searchMovieBox, type StreamSource } from "../lib/streamProviders";
@@ -28,7 +38,7 @@ import CachedImage from "../components/CachedImage";
 
 const JIKAN = "https://api.jikan.moe/v4";
 
-type Tab = "trending" | "popular" | "toprated" | "seasonal" | "movie";
+type Tab = "trending" | "popular" | "toprated" | "seasonal" | "movie" | "schedule" | "genre";
 type TmdbEpisodeRef = { season: number; episode: number };
 type AnimeAudioOption = "en" | "original" | "hi";
 type AnimeServerOption = "auto" | "hd-1" | "hd-2";
@@ -284,6 +294,14 @@ export default function AnimePage() {
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [health, setHealth] = useState<ConsumetHealth | null>(null);
+  // Genre tab state
+  const [genres, setGenres] = useState<AniwatchGenre[]>([]);
+  const [selectedGenre, setSelectedGenre] = useState<string>("");
+  // Schedule tab state
+  const [scheduleDate, setScheduleDate] = useState<string>(new Date().toISOString().slice(0, 10));
+  const [scheduleItems, setScheduleItems] = useState<AniwatchScheduledAnime[]>([]);
+  const [scheduleLoading, setScheduleLoading] = useState(false);
+  const [scheduleError, setScheduleError] = useState("");
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -293,17 +311,23 @@ export default function AnimePage() {
     { id: "toprated", label: "Most Favorite" },
     { id: "seasonal", label: "Top Airing" },
     { id: "movie", label: "Movies" },
+    { id: "genre", label: "🎭 Genre" },
+    { id: "schedule", label: "📅 Schedule" },
   ];
   const filteredItems = useMemo(() => filterAdultContent(items, adultContentBlocked), [items, adultContentBlocked]);
 
   const loadDiscover = async (nextTab: Tab, nextPage = 1, nextPeriod: TrendingPeriod = trendingPeriod) => {
+    if (nextTab === "schedule" || nextTab === "genre") return;
     setLoading(true);
     setBrowseError("");
     try {
-      const nextItems = (await fetchConsumetAnimeDiscover(nextTab, nextPage, nextPeriod)).map(toCardItem);
-      setHasMore(nextItems.length > 0);
+      // AniWatch is PRIMARY — fast 8s timeout, aniwatchtv.to mirror
+      const result = await fetchAniwatchDiscover(nextTab as AniwatchSection, nextPage, nextPeriod);
+      const nextItems = (result.items ?? []).map(toCardItem);
+      setHasMore(result.has_next || nextItems.length > 0);
       setItems((prev) => (nextPage === 1 ? nextItems : dedupeItems([...prev, ...nextItems])));
     } catch {
+      // Fallback to Jikan if AniWatch is down
       try {
         const fallbackItems = await fetchJikanDiscover(nextTab, nextPage);
         setHasMore(fallbackItems.length > 0);
@@ -322,38 +346,81 @@ export default function AnimePage() {
     setLoading(true);
     setBrowseError("");
     try {
-      const nextItems = (await searchConsumetAnime(nextQuery, nextPage)).map(toCardItem);
-      setHasMore(nextItems.length > 0);
+      // AniWatch PRIMARY search
+      const result = await searchAniwatch(nextQuery, nextPage);
+      const nextItems = (result.items ?? []).map(toCardItem);
+      setHasMore(result.has_next || nextItems.length > 0);
       setItems((prev) => (nextPage === 1 ? nextItems : dedupeItems([...prev, ...nextItems])));
     } catch {
+      // Consumet fallback
       try {
-        const legacy = await searchJikanAnime(nextQuery, nextPage);
-        setHasMore(legacy.length > 0);
-        setItems((prev) => (nextPage === 1 ? legacy : dedupeItems([...prev, ...legacy])));
+        const nextItems = (await searchConsumetAnime(nextQuery, nextPage)).map(toCardItem);
+        setHasMore(nextItems.length > 0);
+        setItems((prev) => (nextPage === 1 ? nextItems : dedupeItems([...prev, ...nextItems])));
       } catch {
-        setItems([]);
-        setHasMore(false);
-        setBrowseError("Anime search could not be completed right now.");
+        // Jikan last resort
+        try {
+          const legacy = await searchJikanAnime(nextQuery, nextPage);
+          setHasMore(legacy.length > 0);
+          setItems((prev) => (nextPage === 1 ? legacy : dedupeItems([...prev, ...legacy])));
+        } catch {
+          setItems([]);
+          setHasMore(false);
+          setBrowseError("Anime search could not be completed right now.");
+        }
       }
     } finally {
       setLoading(false);
     }
   };
 
+  const loadGenreAnime = async (genre: string, nextPage = 1) => {
+    if (!genre) return;
+    setLoading(true);
+    setBrowseError("");
+    try {
+      const result = await fetchAniwatchGenreAnime(genre, nextPage);
+      const nextItems = (result.items ?? []).map(toCardItem);
+      setHasMore(result.has_next || nextItems.length > 0);
+      setItems((prev) => (nextPage === 1 ? nextItems : dedupeItems([...prev, ...nextItems])));
+    } catch {
+      setItems([]);
+      setHasMore(false);
+      setBrowseError(`Could not load ${genre} anime right now.`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadSchedule = async (date: string) => {
+    setScheduleLoading(true);
+    setScheduleError("");
+    try {
+      const result = await fetchAniwatchSchedule(date);
+      setScheduleItems(result.scheduled ?? []);
+    } catch {
+      setScheduleError("Could not load today's schedule. Try again shortly.");
+      setScheduleItems([]);
+    } finally {
+      setScheduleLoading(false);
+    }
+  };
+
   const retryCurrentView = () => {
     setPage(1);
-    if (query) {
-      void loadSearch(query, 1);
-      return;
-    }
+    if (query) { void loadSearch(query, 1); return; }
+    if (tab === "genre") { void loadGenreAnime(selectedGenre, 1); return; }
+    if (tab === "schedule") { void loadSchedule(scheduleDate); return; }
     void loadDiscover(tab, 1, trendingPeriod);
   };
 
   const loadMore = () => {
     if (loading || !hasMore) return;
+    if (tab === "schedule" || tab === "genre" && !selectedGenre) return;
     const nextPage = page + 1;
     setPage(nextPage);
     if (query) void loadSearch(query, nextPage);
+    else if (tab === "genre") void loadGenreAnime(selectedGenre, nextPage);
     else void loadDiscover(tab, nextPage, trendingPeriod);
   };
 
@@ -383,23 +450,44 @@ export default function AnimePage() {
     };
   }, []);
 
+  // Load genre list once
   useEffect(() => {
+    fetchAniwatchGenres().then(setGenres).catch(() => setGenres([]));
+  }, []);
+
+  // Load schedule when schedule tab active or date changes
+  useEffect(() => {
+    if (tab === "schedule") {
+      void loadSchedule(scheduleDate);
+    }
+  }, [tab, scheduleDate]);
+
+  // Load genre anime when genre selected
+  useEffect(() => {
+    if (tab === "genre" && selectedGenre) {
+      setPage(1);
+      setItems([]);
+      void loadGenreAnime(selectedGenre, 1);
+    }
+  }, [tab, selectedGenre]);
+
+  useEffect(() => {
+    if (tab === "schedule" || tab === "genre") return;
     setPage(1);
     setItems([]);
     setHasMore(true);
     scrollRef.current?.scrollTo({ top: 0 });
-    if (query) {
-      void loadSearch(query, 1);
-      return;
-    }
+    if (query) { void loadSearch(query, 1); return; }
     void loadDiscover(tab, 1, trendingPeriod);
   }, [tab, query, trendingPeriod]);
 
   useEffect(() => {
     if (query) return;
-    const warmTabs = (["trending", "popular", "toprated", "seasonal", "movie"] as const).filter((value) => value !== tab);
+    if (query) return;
+    if (tab === "schedule" || tab === "genre") return;
+    const warmSections = (["trending", "popular", "toprated", "seasonal", "movie"] as const).filter((v) => v !== tab);
     const timer = window.setTimeout(() => {
-      void Promise.allSettled(warmTabs.map((value) => fetchConsumetAnimeDiscover(value, 1, value === "trending" ? trendingPeriod : "daily")));
+      warmAniwatchSections([...warmSections], trendingPeriod);
     }, 900);
     return () => window.clearTimeout(timer);
   }, [query, tab, trendingPeriod]);
@@ -415,10 +503,10 @@ export default function AnimePage() {
   }, [items.length, loading, page, query, tab, trendingPeriod]);
 
   const helperText = health?.healthy
-    ? "Hianime-first anime with dub-first playback, anime-provider backups, and Hindi via Movie Box when available"
+    ? "AniWatch-first anime with dub/sub/Hindi playback and Consumet/Jikan backups"
     : health && !health.configured
-      ? "Anime browsing is ready with fallback servers, Favorites, and trailer playback"
-      : "Fallback-safe anime browsing with Hianime episodes when available";
+      ? "Anime browsing ready with AniWatch as primary source"
+      : "AniWatch primary with Jikan fallback — fastest anime data available";
 
   const handleScroll = () => {
     const node = scrollRef.current;
@@ -477,8 +565,62 @@ export default function AnimePage() {
         </div>
       )}
 
+      {!query && tab === "genre" && (
+        <div style={{ padding: "12px 24px", background: "var(--bg-surface)", borderBottom: "1px solid var(--border)" }}>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>Pick a genre</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {genres.length === 0 && <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Loading genres...</span>}
+            {genres.map((g) => (
+              <button
+                key={g.id}
+                className={`quality-chip${selectedGenre === g.name ? " active" : ""}`}
+                onClick={() => { setSelectedGenre(g.name); setPage(1); }}
+              >
+                {g.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!query && tab === "schedule" && (
+        <div style={{ padding: "12px 24px", background: "var(--bg-surface)", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Date:</span>
+          <input
+            type="date"
+            className="input-base"
+            style={{ fontSize: 13, padding: "5px 10px" }}
+            value={scheduleDate}
+            onChange={(e) => setScheduleDate(e.target.value)}
+          />
+          {scheduleLoading && <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Loading...</span>}
+        </div>
+      )}
+
       <div ref={scrollRef} onScroll={handleScroll} style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
-        {loading && filteredItems.length === 0 ? <LoadingGrid /> : browseError ? (
+        {/* Schedule tab — special render */}
+        {!query && tab === "schedule" ? (
+          scheduleError ? (
+            <PageErrorState title="Schedule unavailable" subtitle={scheduleError} onRetry={() => loadSchedule(scheduleDate)} />
+          ) : scheduleLoading ? (
+            <LoadingGrid count={6} />
+          ) : scheduleItems.length === 0 ? (
+            <PageEmptyState title="No anime scheduled" subtitle="Try a different date." />
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {scheduleItems.map((item) => (
+                <div key={item.id} className="card" style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px" }}>
+                  <div style={{ minWidth: 64, fontSize: 15, fontWeight: 700, color: "var(--accent)" }}>{item.time || "—"}</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>{item.title}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )
+        ) : !query && tab === "genre" && !selectedGenre ? (
+          <PageEmptyState title="Choose a genre" subtitle="Select a genre above to browse anime." />
+        ) : loading && filteredItems.length === 0 ? <LoadingGrid /> : browseError ? (
           <PageErrorState
             title="Anime is unavailable right now"
             subtitle={browseError}
@@ -1049,7 +1191,8 @@ function AnimeDetail({
 
   const isHiAnimePrimarySource = (source: StreamSource): boolean => {
     const provider = `${source.provider || ""} ${source.description || ""}`.toLowerCase();
-    return provider.includes("consumet") || provider.includes("hianime") || provider.includes("zoro");
+    // hianime/aniwatch IS our primary source — MovieBox is the supplement
+    return provider.includes("moviebox") || provider.includes("movie box");
   };
 
   const mergeAnimeFallbackSources = async (
