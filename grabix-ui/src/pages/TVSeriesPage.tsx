@@ -10,14 +10,7 @@ import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
 import { filterAdultContent } from "../lib/contentFilter";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
 import { TMDB_BACKDROP_BASE as IMG_LG, TMDB_IMAGE_BASE as IMG_BASE, discoverTmdbMedia, fetchTmdbDetails, fetchTmdbTvSeason, searchTmdbMedia } from "../lib/tmdb";
-<<<<<<< HEAD
-import { fetchMovieBoxSources, getTvSources, prewarmPlaybackSources, resolveTvPlaybackSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
-import CachedImage from "../components/CachedImage";
-import { readLocalAppSettings } from "../lib/appSettings";
-import { warmMediaCache } from "../lib/mediaCache";
-=======
 import { fetchMovieBoxSources, getTvSources, resolveTvPlaybackSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
->>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
 
 interface Show {
   id: number;

@@ -27,12 +27,6 @@ import {
   IconStar,
   IconX,
 } from "../components/Icons";
-<<<<<<< HEAD
-import { readLocalAppSettings } from "../lib/appSettings";
-import CachedImage from "../components/CachedImage";
-import { warmMediaCache } from "../lib/mediaCache";
-=======
->>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
 
 type Filter = "all" | "movie" | "series" | "anime" | "hindi";
 

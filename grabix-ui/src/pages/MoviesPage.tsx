@@ -11,12 +11,6 @@ import { useContentFilter } from "../context/ContentFilterContext";
 import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
 import { filterAdultContent } from "../lib/contentFilter";
 import { getCachedJson } from "../lib/cache";
-<<<<<<< HEAD
-import CachedImage from "../components/CachedImage";
-import { readLocalAppSettings } from "../lib/appSettings";
-import { warmMediaCache } from "../lib/mediaCache";
-=======
->>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
 import { TMDB_BACKDROP_BASE as IMG_LG, TMDB_IMAGE_BASE as IMG_BASE, discoverTmdbMedia, fetchTmdbDetails, searchTmdbMedia } from "../lib/tmdb";
 import VidSrcPlayer from "../components/VidSrcPlayer";

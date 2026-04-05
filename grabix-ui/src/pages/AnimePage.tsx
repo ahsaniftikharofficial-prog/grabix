@@ -22,15 +22,7 @@ import {
   type ConsumetMediaSummary,
 } from "../lib/consumetProviders";
 import { fetchTmdbSeasonMap as fetchTmdbSeasonMapFromBackend, searchTmdbMedia } from "../lib/tmdb";
-<<<<<<< HEAD
-import { fetchMovieBoxSources, prewarmPlaybackSources, resolveAnimePlaybackSources, searchMovieBox, type StreamSource } from "../lib/streamProviders";
-import CachedImage from "../components/CachedImage";
-import { readLocalAppSettings } from "../lib/appSettings";
-import { warmMediaCache } from "../lib/mediaCache";
-import { getCachedJson } from "../lib/cache";
-=======
 import { fetchMovieBoxSources, resolveAnimePlaybackSources, searchMovieBox, type StreamSource } from "../lib/streamProviders";
->>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
 
 const JIKAN = "https://api.jikan.moe/v4";
 
@@ -74,43 +66,9 @@ interface AnimeCardItem extends ConsumetMediaSummary {
   image_proxy?: string;
 }
 
-<<<<<<< HEAD
-function normalizeAnimeImageUrl(value?: string | null): string {
-  const url = (value || "").trim();
-  if (!url) return "";
-  if (url.startsWith("/")) {
-    return `${BACKEND_API}${url}`;
-  }
-  const normalized = url.startsWith("//") ? `https:${url}` : url;
-  return normalized;
-}
-
-function buildAnimeImageProxyUrl(value?: string | null): string {
-  const url = (value || "").trim();
-  if (!url) return "";
-  if (url.startsWith("/")) {
-    return `${BACKEND_API}${url}`;
-  }
-  const normalized = url.startsWith("//") ? `https:${url}` : url;
-  if (!/^https?:\/\//i.test(normalized)) {
-    return normalized;
-  }
-  if (normalized.startsWith(BACKEND_API) || normalized.includes("/consumet/proxy?url=")) {
-    return normalized;
-  }
-  return `${BACKEND_API}/consumet/proxy?url=${encodeURIComponent(normalized)}`;
-}
-
 function toCardItem(item: ConsumetMediaSummary): AnimeCardItem {
   return {
     ...item,
-    image: normalizeAnimeImageUrl(item.image),
-    image_proxy: buildAnimeImageProxyUrl(item.image),
-=======
-function toCardItem(item: ConsumetMediaSummary): AnimeCardItem {
-  return {
-    ...item,
->>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
     episodes_count: item.episodes_count,
   };
 }
@@ -122,12 +80,7 @@ function mapLegacyAnime(item: LegacyAnime): AnimeCardItem {
     type: "anime",
     title: item.title_english ?? item.title,
     alt_title: item.title,
-<<<<<<< HEAD
-    image: normalizeAnimeImageUrl(item.images.jpg.large_image_url ?? item.images.jpg.image_url),
-    image_proxy: buildAnimeImageProxyUrl(item.images.jpg.large_image_url ?? item.images.jpg.image_url),
-=======
     image: item.images.jpg.large_image_url ?? item.images.jpg.image_url,
->>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
     description: item.synopsis,
     year: item.year,
     rating: item.score ?? null,
@@ -458,30 +411,6 @@ export default function AnimePage() {
   }, [tab, query, trendingPeriod]);
 
   useEffect(() => {
-<<<<<<< HEAD
-    if (query) return;
-    const warmTabs = (["trending", "popular", "toprated", "seasonal", "movie"] as const).filter((value) => value !== tab);
-    const timer = window.setTimeout(() => {
-      void Promise.allSettled(warmTabs.map((value) => fetchConsumetAnimeDiscover(value, 1, value === "trending" ? trendingPeriod : "daily")));
-    }, 900);
-    return () => window.clearTimeout(timer);
-  }, [query, tab, trendingPeriod]);
-
-  useEffect(() => {
-    const visiblePosterUrls = filteredItems
-      .slice(0, tab === "trending" ? 18 : 24)
-      .map((item) => item.image || "")
-      .filter(Boolean);
-    if (visiblePosterUrls.length === 0) return;
-    const timer = window.setTimeout(() => {
-      void warmMediaCache(visiblePosterUrls, 8);
-    }, 80);
-    return () => window.clearTimeout(timer);
-  }, [filteredItems, tab]);
-
-  useEffect(() => {
-=======
->>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
     const node = bottomRef.current;
     const root = scrollRef.current;
     if (!node || !root) return;
@@ -638,11 +567,7 @@ function AnimeCard({ anime, activeTab, featured, rank, onClick }: { anime: Anime
   return (
     <div className="card" style={{ overflow: "hidden", cursor: "pointer", transition: "transform 0.15s", minHeight: featured ? 360 : undefined }} onClick={onClick} onMouseEnter={(e) => (e.currentTarget.style.transform = "translateY(-3px)")} onMouseLeave={(e) => (e.currentTarget.style.transform = "translateY(0)")}>
       <div style={{ position: "relative" }}>
-<<<<<<< HEAD
-        <CachedImage src={anime.image || ""} fallbackSrc={anime.image_proxy || "https://via.placeholder.com/150x210?text=No+Image"} alt={anime.title} referrerPolicy="no-referrer" fetchPriority={featured ? "high" : "auto"} style={{ width: "100%", height: posterHeight, objectFit: "cover" }} />
-=======
         <img src={anime.image || "https://via.placeholder.com/150x210?text=No+Image"} alt={anime.title} style={{ width: "100%", height: featured ? 265 : 210, objectFit: "cover" }} onError={(e) => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/150x210?text=No+Image"; }} />
->>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
         {featured && rank ? <div style={{ position: "absolute", bottom: 8, left: 8, background: "rgba(0,0,0,0.78)", color: "white", fontSize: 12, padding: "4px 10px", borderRadius: 999, fontWeight: 700 }}>#{rank}</div> : null}
         {anime.rating ? <div style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.75)", color: "#fdd663", fontSize: 11, padding: "2px 7px", borderRadius: 6, display: "flex", alignItems: "center", gap: 3, fontWeight: 600 }}><IconStar size={10} color="#fdd663" /> {anime.rating.toFixed(1)}</div> : null}
         <button
@@ -707,15 +632,8 @@ function AnimeDetail({
   const [episode, setEpisode] = useState(1);
   const [dubEpisodeCount, setDubEpisodeCount] = useState<number | null>(null);
   const hasDub = dubEpisodeCount === null ? false : (dubEpisodeCount === 0 ? false : episode <= dubEpisodeCount);
-<<<<<<< HEAD
-  const episodeSupportsDub = (targetEpisode: number) =>
-    dubEpisodeCount === null ? true : dubEpisodeCount > 0 && targetEpisode <= dubEpisodeCount;
-  const [audio, setAudio] = useState<AudioPreference>(normalizeAudioPreference(appSettings.anime_default_audio));
-  const [server, setServer] = useState<AnimeServerOption>(appSettings.anime_default_server);
-=======
   const [audio, setAudio] = useState<AudioPreference>("original");
   const [server, setServer] = useState<AnimeServerOption>("auto");
->>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
   useEffect(() => {
     if (!hasDub && audio === "en") setAudio("original");
   }, [hasDub]);
@@ -1465,11 +1383,7 @@ function AnimeDetail({
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
       <div style={{ background: "var(--bg-surface)", borderRadius: 16, width: "100%", maxWidth: 720, maxHeight: "90vh", overflow: "hidden", display: "flex", flexDirection: "column", boxShadow: "var(--shadow-lg)", border: "1px solid var(--border)" }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", gap: 16, padding: "20px 20px 0" }}>
-<<<<<<< HEAD
-          <CachedImage src={anime.image || ""} fallbackSrc={anime.image_proxy || "https://via.placeholder.com/100x145"} alt={title} referrerPolicy="no-referrer" fetchPriority="high" style={{ width: 100, height: 145, objectFit: "cover", borderRadius: 10, flexShrink: 0, border: "1px solid var(--border)" }} />
-=======
           <img src={anime.image || "https://via.placeholder.com/100x145"} alt={title} style={{ width: 100, height: 145, objectFit: "cover", borderRadius: 10, flexShrink: 0, border: "1px solid var(--border)" }} onError={(e) => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/100x145"; }} />
->>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6, lineHeight: 1.3 }}>{title}</div>
             <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 8 }}>

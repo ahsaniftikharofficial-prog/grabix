@@ -43,17 +43,12 @@ function Toggle({ value, onChange }: { value: boolean; onChange: (value: boolean
 export default function SettingsPage() {
   const { theme, toggle } = useTheme();
   const { adultContentBlocked, adultPasswordConfigured, unlockAdultContent, configureAdultContent } = useContentFilter();
-<<<<<<< HEAD
-  const { configured: authConfigured, loading: authLoading, user, profile, backendReady, error: authError, signIn, signUp, signOut, refreshProfile } = useAuth();
-  const [settings, setSettings] = useState<AppSettings>(() => readLocalAppSettings());
-=======
   const [autoFetch, setAutoFetch] = useState(true);
   const [notifications, setNotifications] = useState(true);
   const [format, setFormat] = useState("mp4");
   const [quality, setQuality] = useState("1080p");
   const [downloadFolder, setDownloadFolder] = useState("~/Downloads/GRABIX");
   const [downloadEngine, setDownloadEngine] = useState<"standard" | "aria2">("standard");
->>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
   const [aria2Available, setAria2Available] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState(false);
@@ -65,15 +60,6 @@ export default function SettingsPage() {
   const [selfTestRunning, setSelfTestRunning] = useState(false);
   const [startupDiagnostics, setStartupDiagnostics] = useState<StartupDiagnosticsPayload | null>(null);
   const [diagnosticsLogs, setDiagnosticsLogs] = useState<DiagnosticsLogsPayload | null>(null);
-<<<<<<< HEAD
-  const [cacheStats, setCacheStats] = useState<{ items: number; bytes: number }>({ items: 0, bytes: 0 });
-  const [cacheClearing, setCacheClearing] = useState(false);
-  const [authEmail, setAuthEmail] = useState("");
-  const [authPassword, setAuthPassword] = useState("");
-  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
-  const [authSubmitting, setAuthSubmitting] = useState(false);
-=======
->>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
 
   useEffect(() => {
     backendJson<Record<string, unknown>>(`${BACKEND_API}/settings`)

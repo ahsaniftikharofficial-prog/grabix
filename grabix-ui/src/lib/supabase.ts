@@ -1,9 +1,6 @@
-import { createClient, type Session, type SupabaseClient, type User } from "@supabase/supabase-js";
-
-const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL || "").trim();
-const SUPABASE_ANON_KEY = (import.meta.env.VITE_SUPABASE_ANON_KEY || "").trim();
-
-let client: SupabaseClient | null = null;
+// supabase.ts — Supabase is optional. When VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY
+// are not set, all auth features are disabled and this module returns safe no-ops.
+// The @supabase/supabase-js package is NOT required unless you configure those env vars.
 
 export interface CloudProfile {
   id: string;
@@ -15,6 +12,28 @@ export interface CloudProfile {
   user_metadata?: Record<string, unknown>;
 }
 
+// Minimal type stubs so AuthContext compiles without the supabase package installed.
+export interface User {
+  id: string;
+  email?: string;
+  app_metadata?: Record<string, unknown>;
+  user_metadata?: Record<string, unknown>;
+}
+
+export interface Session {
+  access_token: string;
+  refresh_token?: string;
+  user: User;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type SupabaseClient = any;
+
+const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL || "").trim();
+const SUPABASE_ANON_KEY = (import.meta.env.VITE_SUPABASE_ANON_KEY || "").trim();
+
+let client: SupabaseClient | null = null;
+
 export function isSupabaseConfigured(): boolean {
   return Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
 }
@@ -22,15 +41,17 @@ export function isSupabaseConfigured(): boolean {
 export function getSupabaseClient(): SupabaseClient | null {
   if (!isSupabaseConfigured()) return null;
   if (!client) {
-    client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth: {
-        persistSession: true,
-        autoRefreshToken: true,
-        detectSessionInUrl: false,
-      },
-    });
+    // Dynamic require so the package is only needed when actually configured.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { createClient } = require("@supabase/supabase-js");
+      client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+        auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
+      });
+    } catch {
+      console.warn("[grabix] @supabase/supabase-js is not installed. Cloud auth is disabled.");
+      return null;
+    }
   }
   return client;
 }
-
-export type { Session, User };

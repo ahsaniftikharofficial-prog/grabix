@@ -386,10 +386,6 @@ def _correlation_id_from_request(request: Request | None) -> str:
 async def correlation_middleware(request: Request, call_next):
     correlation_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
     request.state.correlation_id = correlation_id
-<<<<<<< HEAD
-    # Rate limiting removed — local desktop app, no need to throttle own requests.
-=======
->>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
     auth_failure = validate_desktop_auth_request(request)
     if auth_failure is not None:
         payload = dict(auth_failure["payload"])
