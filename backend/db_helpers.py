@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app.services.logging_utils import get_logger, log_event
-from app.services.runtime_config import db_path, default_download_dir, runtime_tools_dir, settings_path
+from app.services.runtime_config import db_path, default_download_dir, settings_path
 
 # ── Path constants (single source of truth) ──────────────────────────────────
 DOWNLOAD_DIR = str(default_download_dir())
@@ -330,42 +330,13 @@ def _guess_dl_type_from_path(file_path: str) -> str:
 
 # ── Tool detection ─────────────────────────────────────────────────────────────
 
-def _resolve_tool_binary(tool_id: str, names: list[str]) -> str | None:
-    for name in names:
-        found = shutil.which(name)
-        if found:
-            return found
-
-    managed_dir = runtime_tools_dir() / tool_id
-    if managed_dir.exists():
-        for name in names:
-            candidates = list(managed_dir.rglob(name))
-            if candidates:
-                return str(candidates[0])
-
-    bundled_root_raw = str(os.getenv("GRABIX_BUNDLED_RUNTIME_TOOLS_DIR", "")).strip()
-    if bundled_root_raw:
-        bundled_dir = Path(bundled_root_raw).expanduser() / tool_id
-        if bundled_dir.exists():
-            for name in names:
-                candidates = list(bundled_dir.rglob(name))
-                if candidates:
-                    return str(candidates[0])
-
-    return None
-
-
-FFMPEG_PATH = _resolve_tool_binary("ffmpeg", ["ffmpeg.exe", "ffmpeg"])
-ARIA2_PATH  = _resolve_tool_binary("aria2", ["aria2c.exe", "aria2c"])
+FFMPEG_PATH = shutil.which("ffmpeg")
+ARIA2_PATH  = shutil.which("aria2c")
 
 
 def has_ffmpeg() -> bool:
-    global FFMPEG_PATH
-    FFMPEG_PATH = _resolve_tool_binary("ffmpeg", ["ffmpeg.exe", "ffmpeg"])
     return FFMPEG_PATH is not None
 
 
 def has_aria2() -> bool:
-    global ARIA2_PATH
-    ARIA2_PATH = _resolve_tool_binary("aria2", ["aria2c.exe", "aria2c"])
     return ARIA2_PATH is not None

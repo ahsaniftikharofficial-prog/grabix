@@ -3,7 +3,6 @@ import {
   fetchMovieBoxDetails,
   fetchMovieBoxDiscover,
   fetchMovieBoxSources,
-  prewarmPlaybackSources,
   searchMovieBox,
   type MovieBoxItem,
   type MovieBoxSection,
@@ -27,6 +26,11 @@ import {
   IconStar,
   IconX,
 } from "../components/Icons";
+<<<<<<< HEAD
+=======
+import { readLocalAppSettings } from "../lib/appSettings";
+import CachedImage from "../components/CachedImage";
+>>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
 
 type Filter = "all" | "movie" | "series" | "anime" | "hindi";
 
@@ -158,21 +162,6 @@ export default function MovieBoxPage() {
       }))
     .map((section) => ({ ...section, items: filterAdultContent(section.items, adultContentBlocked) }))
     .filter((section) => section.items.length > 0);
-
-  useEffect(() => {
-    const sourceItems = isSearchMode
-      ? filteredResults
-      : sectionsToRender.flatMap((section) => section.items.slice(0, 8));
-    const urls = sourceItems
-      .map((item) => item.poster || item.poster_proxy || "")
-      .filter(Boolean)
-      .slice(0, 24);
-    if (urls.length === 0) return;
-    const timer = window.setTimeout(() => {
-      void warmMediaCache(urls, 8);
-    }, 80);
-    return () => window.clearTimeout(timer);
-  }, [filteredResults, isSearchMode, sectionsToRender]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
@@ -574,14 +563,6 @@ function MovieBoxDetail({
       cancelled = true;
     };
   }, [details.id, details.media_type, season, episode]);
-
-  useEffect(() => {
-    if (resolvedSources.length === 0) return;
-    const timer = window.setTimeout(() => {
-      void prewarmPlaybackSources(resolvedSources, 3);
-    }, 40);
-    return () => window.clearTimeout(timer);
-  }, [resolvedSources]);
 
   useEffect(() => {
     if (!downloadDialogOpen) return;

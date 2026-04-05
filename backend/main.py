@@ -17,7 +17,6 @@ from app.routes.downloads import router as downloads_router
 from app.routes.manga import router as manga_router
 from app.routes.metadata import router as metadata_router
 from app.routes.providers import router as providers_router
-from app.routes.auth import router as auth_router
 from app.routes.settings import router as settings_router
 from app.routes.streaming import router as streaming_router
 from app.routes.subtitles import router as subtitles_router
@@ -230,7 +229,6 @@ app.include_router(manga_router, prefix="/manga")
 app.include_router(metadata_router)
 app.include_router(providers_router)
 app.include_router(settings_router)
-app.include_router(auth_router)
 app.include_router(streaming_router)
 app.include_router(subtitles_router, prefix="/subtitles")
 backend_logger = get_logger("backend")
@@ -341,15 +339,6 @@ def _resolve_runtime_binary(tool_id: str, names: list[str]) -> str | None:
             candidates = list(managed_dir.rglob(name))
             if candidates:
                 return str(candidates[0])
-
-    bundled_root_raw = str(os.getenv("GRABIX_BUNDLED_RUNTIME_TOOLS_DIR", "")).strip()
-    if bundled_root_raw:
-        bundled_dir = Path(bundled_root_raw).expanduser() / tool_id
-        if bundled_dir.exists():
-            for name in names:
-                candidates = list(bundled_dir.rglob(name))
-                if candidates:
-                    return str(candidates[0])
     return None
 
 

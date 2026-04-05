@@ -1,7 +1,7 @@
 // grabix-ui/src/pages/MoviesPage.tsx
 // Updated: Play (VidSrc), Download, Favorite buttons
 
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { IconSearch, IconStar, IconPlay, IconDownload, IconX } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
@@ -11,10 +11,15 @@ import { useContentFilter } from "../context/ContentFilterContext";
 import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
 import { filterAdultContent } from "../lib/contentFilter";
 import { getCachedJson } from "../lib/cache";
+<<<<<<< HEAD
+=======
+import CachedImage from "../components/CachedImage";
+import { readLocalAppSettings } from "../lib/appSettings";
+>>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
 import { TMDB_BACKDROP_BASE as IMG_LG, TMDB_IMAGE_BASE as IMG_BASE, discoverTmdbMedia, fetchTmdbDetails, searchTmdbMedia } from "../lib/tmdb";
 import VidSrcPlayer from "../components/VidSrcPlayer";
-import { fetchMovieBoxSources, getArchiveMovieSources, getMovieSources, prewarmPlaybackSources, resolveMoviePlaybackSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
+import { fetchMovieBoxSources, getArchiveMovieSources, getMovieSources, resolveMoviePlaybackSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
 
 interface Movie {
   id: number; title: string; overview: string;
@@ -139,19 +144,6 @@ export default function MoviesPage() {
   ];
   const filteredMovies = filterAdultContent(movies, adultContentBlocked);
   const filteredFree = filterAdultContent(free, adultContentBlocked);
-
-  useEffect(() => {
-    const urls = (tab === "free"
-      ? filteredFree.map((item) => item.thumb || "")
-      : filteredMovies.map((item) => item.poster_path ? `${IMG_BASE}${item.poster_path}` : ""))
-      .filter(Boolean)
-      .slice(0, 24);
-    if (urls.length === 0) return;
-    const timer = window.setTimeout(() => {
-      void warmMediaCache(urls, 8);
-    }, 80);
-    return () => window.clearTimeout(timer);
-  }, [filteredFree, filteredMovies, tab]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
@@ -308,10 +300,7 @@ function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: ()
   const d = full ?? movie;
   const movieYear = d.release_date ? Number(d.release_date.slice(0, 4)) : undefined;
   const poster = d.poster_path ? `${IMG_BASE}${d.poster_path}` : "";
-  const fallbackSources = useMemo(
-    () => getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id }),
-    [d.imdb_id, movie.id]
-  );
+  const fallbackSources = getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id });
 
   useEffect(() => {
     let cancelled = false;
@@ -336,15 +325,6 @@ function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: ()
       cancelled = true;
     };
   }, [altTitles, d.imdb_id, d.title, movie.id, movieYear]);
-
-  useEffect(() => {
-    const sourcesToWarm = prefetchedPlaybackSources.length > 0 ? prefetchedPlaybackSources : fallbackSources;
-    if (sourcesToWarm.length === 0) return;
-    const timer = window.setTimeout(() => {
-      void prewarmPlaybackSources(sourcesToWarm, 3);
-    }, 60);
-    return () => window.clearTimeout(timer);
-  }, [fallbackSources, prefetchedPlaybackSources]);
 
   const loadMovieBoxSources = async () => {
     const titles = [d.title, ...altTitles];

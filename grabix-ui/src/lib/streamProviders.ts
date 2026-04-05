@@ -1,6 +1,6 @@
 import { BACKEND_API, extractBackendErrorMessage } from "./api";
 export { BACKEND_API } from "./api";
-import { getCachedJson, getCachedValue, setCachedValue } from "./cache";
+import { getCachedJson } from "./cache";
 
 export type StreamKind = "embed" | "direct" | "hls" | "local";
 
@@ -132,24 +132,11 @@ export interface StreamVariant {
 }
 
 const MOVIEBOX_CACHE_VERSION = "v2";
-const PROVIDER_RESOLVE_CACHE_TTL_MS = 90_000;
-const providerResolutionPending = new Map<string, Promise<StreamSource[]>>();
-const playbackWarmPending = new Map<string, Promise<void>>();
-const warmedOrigins = new Set<string>();
-const PLAYBACK_CACHE_PREFIX = "grabix:playback:";
-const EMBED_CACHE_TTL_MS = 1000 * 60 * 30;
-const EXTRACT_CACHE_TTL_MS = 1000 * 60 * 20;
-const VARIANT_CACHE_TTL_MS = 1000 * 60 * 10;
 
 export interface ProviderSourceGroup {
   id: string;
   label: string;
   sources: StreamSource[];
-}
-
-interface PlaybackCacheRecord<T> {
-  expiresAt: number;
-  value: T;
 }
 
 interface ProviderResolutionAttempt {
@@ -258,281 +245,6 @@ function sourceDedupKey(source: StreamSource): string {
   ].join("|");
 }
 
-export function readPlaybackCache<T>(key: string): T | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.sessionStorage.getItem(`${PLAYBACK_CACHE_PREFIX}${key}`);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as PlaybackCacheRecord<T>;
-    if (!parsed?.expiresAt || Date.now() >= parsed.expiresAt) {
-      window.sessionStorage.removeItem(`${PLAYBACK_CACHE_PREFIX}${key}`);
-      return null;
-    }
-    return parsed.value ?? null;
-  } catch {
-    return null;
-  }
-}
-
-export function writePlaybackCache<T>(key: string, value: T, ttlMs: number) {
-  if (typeof window === "undefined") return;
-  try {
-    const payload: PlaybackCacheRecord<T> = {
-      expiresAt: Date.now() + ttlMs,
-      value,
-    };
-    window.sessionStorage.setItem(`${PLAYBACK_CACHE_PREFIX}${key}`, JSON.stringify(payload));
-  } catch {
-    // Ignore cache write failures.
-  }
-}
-
-export function buildStreamProxyUrl(
-  url: string,
-  headers?: Record<string, string>,
-  api = BACKEND_API
-): string {
-  if (!url) return url;
-  if (url.startsWith(`${api}/stream/proxy?`)) return url;
-  if (url.startsWith("/stream/proxy?")) return `${api}${url}`;
-
-  const params = new URLSearchParams({ url });
-  if (headers && Object.keys(headers).length > 0) {
-    params.set("headers_json", JSON.stringify(headers));
-  }
-  return `${api}/stream/proxy?${params.toString()}`;
-}
-
-export function shouldKeepHlsProxied(source: StreamSource): boolean {
-  return (
-    Boolean(source.requestHeaders && Object.keys(source.requestHeaders).length > 0) ||
-    source.url.includes("/stream/proxy?")
-  );
-}
-
-function qualityScore(label: string): number {
-  const normalized = String(label || "").trim().toLowerCase();
-  const numeric = normalized.match(/(\d{3,4})p/);
-  if (numeric) return Number(numeric[1]);
-  if (normalized === "4k") return 2160;
-  if (normalized === "2k") return 1440;
-  return 0;
-}
-
-function pickBestVariant(
-  variants: Array<{ label: string; url: string; bandwidth?: string }>
-): { label: string; url: string; bandwidth?: string } | null {
-  if (!variants.length) return null;
-  return [...variants].sort((left, right) => {
-    const qualityDiff = qualityScore(right.label) - qualityScore(left.label);
-    if (qualityDiff !== 0) return qualityDiff;
-    return Number(right.bandwidth || 0) - Number(left.bandwidth || 0);
-  })[0];
-}
-
-export function preconnectPlaybackOrigin(url: string) {
-  if (typeof document === "undefined" || !url) return;
-  try {
-    const origin = new URL(url, window.location.href).origin;
-    if (!/^https?:/i.test(origin) || warmedOrigins.has(origin)) return;
-    warmedOrigins.add(origin);
-
-    const dnsPrefetch = document.createElement("link");
-    dnsPrefetch.rel = "dns-prefetch";
-    dnsPrefetch.href = origin;
-    document.head.appendChild(dnsPrefetch);
-
-    const preconnect = document.createElement("link");
-    preconnect.rel = "preconnect";
-    preconnect.href = origin;
-    preconnect.crossOrigin = "anonymous";
-    document.head.appendChild(preconnect);
-  } catch {
-    // Ignore invalid URLs and hosts that reject preconnect.
-  }
-}
-
-export async function resolveEmbedUrl(url: string, api = BACKEND_API): Promise<string> {
-  if (!url) return url;
-  const cacheKey = `embed:${url}`;
-  const cached = readPlaybackCache<string>(cacheKey);
-  if (cached) {
-    preconnectPlaybackOrigin(cached);
-    return cached;
-  }
-  try {
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 12000);
-    const response = await fetch(`${api}/resolve-embed?url=${encodeURIComponent(url)}`, {
-      signal: controller.signal,
-    });
-    window.clearTimeout(timeoutId);
-    if (!response.ok) return url;
-    const payload = (await response.json()) as { url?: string };
-    const resolved = payload.url || url;
-    writePlaybackCache(cacheKey, resolved, EMBED_CACHE_TTL_MS);
-    preconnectPlaybackOrigin(resolved);
-    return resolved;
-  } catch {
-    return url;
-  }
-}
-
-export async function extractDirectStreamUrl(
-  targetUrl: string,
-  api = BACKEND_API
-): Promise<{ url: string; quality?: string; format?: string }> {
-  const directCacheKey = `extract:${targetUrl}`;
-  const directCached = readPlaybackCache<{ url: string; quality?: string; format?: string }>(directCacheKey);
-  if (directCached?.url) {
-    preconnectPlaybackOrigin(directCached.url);
-    return directCached;
-  }
-
-  const resolvedUrl = await resolveEmbedUrl(targetUrl, api);
-  const resolvedCacheKey = `extract:${resolvedUrl}`;
-  const cached =
-    readPlaybackCache<{ url: string; quality?: string; format?: string }>(resolvedCacheKey) ??
-    readPlaybackCache<{ url: string; quality?: string; format?: string }>(directCacheKey);
-  if (cached?.url) {
-    preconnectPlaybackOrigin(cached.url);
-    if (resolvedCacheKey !== directCacheKey) {
-      writePlaybackCache(directCacheKey, cached, EXTRACT_CACHE_TTL_MS);
-    }
-    return cached;
-  }
-
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), 25000);
-  const response = await fetch(`${api}/extract-stream?url=${encodeURIComponent(resolvedUrl)}`, {
-    signal: controller.signal,
-  });
-  window.clearTimeout(timeoutId);
-  if (!response.ok) {
-    throw new Error(`Server returned ${response.status}`);
-  }
-
-  const data = (await response.json()) as {
-    url?: string;
-    quality?: string;
-    format?: string;
-  };
-
-  if (!data.url) {
-    throw new Error("No URL in response");
-  }
-
-  const payload = {
-    url: data.url,
-    quality: data.quality,
-    format: data.format,
-  };
-  writePlaybackCache(directCacheKey, payload, EXTRACT_CACHE_TTL_MS);
-  writePlaybackCache(resolvedCacheKey, payload, EXTRACT_CACHE_TTL_MS);
-  preconnectPlaybackOrigin(payload.url);
-  return payload;
-}
-
-export function canPrepareInternalSource(source: StreamSource): boolean {
-  return source.kind === "embed" && (source.provider.toLowerCase().includes("moviebox") || Boolean(source.canExtract));
-}
-
-export function getPreparedStreamSource(
-  source: StreamSource,
-  options?: {
-    labelPrefix?: string;
-    notice?: string;
-  }
-): StreamSource | null {
-  const sourceKey = source.externalUrl || source.url;
-  const cached = readPlaybackCache<{ url: string; quality?: string; format?: string }>(`extract:${sourceKey}`);
-  if (!cached?.url) return null;
-
-  return makeSource({
-    id: `prepared-cache-${source.id}`,
-    label: options?.labelPrefix ? `${options.labelPrefix} Direct` : `${source.label} Direct`,
-    provider: source.provider,
-    kind: inferStreamKind(cached.url, cached.format),
-    url: cached.url,
-    quality: cached.quality ?? source.quality ?? "Auto",
-    description:
-      options?.notice || "Prepared internal stream for faster playback, subtitles, and downloads.",
-    externalUrl: sourceKey,
-    canExtract: false,
-    subtitles: source.subtitles,
-    language: source.language,
-  });
-}
-
-function getPreferredHlsPlaybackUrl(source: StreamSource): string {
-  const sourceKey = source.externalUrl || source.url;
-  const cachedUrl = readPlaybackCache<string>(`variant:${sourceKey}`);
-  if (cachedUrl) {
-    preconnectPlaybackOrigin(cachedUrl);
-    return cachedUrl;
-  }
-  const fallbackUrl = shouldKeepHlsProxied(source)
-    ? buildStreamProxyUrl(source.url, source.requestHeaders)
-    : source.url;
-  preconnectPlaybackOrigin(fallbackUrl);
-  return fallbackUrl;
-}
-
-export async function prewarmPlaybackSource(source: StreamSource): Promise<void> {
-  const sourceKey = source.externalUrl || source.url;
-  const warmKey = `${source.kind}:${sourceKey}`;
-  const pending = playbackWarmPending.get(warmKey);
-  if (pending) {
-    await pending;
-    return;
-  }
-
-  const request = (async () => {
-    if (source.kind === "direct" || source.kind === "local") {
-      preconnectPlaybackOrigin(source.url);
-      return;
-    }
-
-    if (source.kind === "hls") {
-      const fallbackUrl = getPreferredHlsPlaybackUrl(source);
-      preconnectPlaybackOrigin(fallbackUrl);
-      const cachedUrl = readPlaybackCache<string>(`variant:${sourceKey}`);
-      if (cachedUrl) return;
-
-      const variants = await fetchStreamVariants(sourceKey, source.requestHeaders);
-      const best = pickBestVariant(variants);
-      if (!best?.url || best.url === source.url) return;
-      const nextUrl = shouldKeepHlsProxied(source)
-        ? buildStreamProxyUrl(best.url, source.requestHeaders)
-        : best.url;
-      writePlaybackCache(`variant:${sourceKey}`, nextUrl, VARIANT_CACHE_TTL_MS);
-      preconnectPlaybackOrigin(nextUrl);
-      return;
-    }
-
-    const resolvedUrl = await resolveEmbedUrl(source.url);
-    preconnectPlaybackOrigin(resolvedUrl);
-    if (canPrepareInternalSource(source)) {
-      const extracted = await extractDirectStreamUrl(sourceKey);
-      preconnectPlaybackOrigin(extracted.url);
-    }
-  })().finally(() => {
-    playbackWarmPending.delete(warmKey);
-  });
-
-  playbackWarmPending.set(warmKey, request);
-  await request;
-}
-
-export async function prewarmPlaybackSources(
-  sources: StreamSource[],
-  limit = 2
-): Promise<void> {
-  const candidates = sources.filter((source) => Boolean(source?.url)).slice(0, Math.max(limit, 0));
-  if (candidates.length === 0) return;
-  await Promise.allSettled(candidates.map((source) => prewarmPlaybackSource(source)));
-}
-
 export function mergeProviderSourceGroups(groups: ProviderSourceGroup[]): StreamSource[] {
   const merged: StreamSource[] = [];
   const seen = new Set<string>();
@@ -566,56 +278,22 @@ async function readProviderResolutionError(response: Response): Promise<string> 
   }
 }
 
-function stableSerialize(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((entry) => stableSerialize(entry)).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right));
-    return `{${entries.map(([key, entryValue]) => `${JSON.stringify(key)}:${stableSerialize(entryValue)}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
 async function resolveProviderPlayback(
   path: string,
   payload: Record<string, unknown>
 ): Promise<StreamSource[]> {
-  const cacheKey = `provider:resolve:${path}:${stableSerialize(payload)}`;
-  const cached =
-    getCachedValue<StreamSource[]>(cacheKey, "memory") ??
-    getCachedValue<StreamSource[]>(cacheKey, "session");
-  if (cached) {
-    return cached;
-  }
-
-  const pending = providerResolutionPending.get(cacheKey);
-  if (pending) {
-    return await pending;
-  }
-
-  const request = fetch(`${BACKEND_API}${path}`, {
+  const response = await fetch(`${BACKEND_API}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-  })
-    .then(async (response) => {
-      if (!response.ok) {
-        throw new Error(await readProviderResolutionError(response));
-      }
+  });
 
-      const data = (await response.json()) as ProviderResolutionResponse;
-      const sources = data.sources ?? [];
-      setCachedValue(cacheKey, sources, PROVIDER_RESOLVE_CACHE_TTL_MS, "memory");
-      setCachedValue(cacheKey, sources, PROVIDER_RESOLVE_CACHE_TTL_MS, "session");
-      return sources;
-    })
-    .finally(() => {
-      providerResolutionPending.delete(cacheKey);
-    });
+  if (!response.ok) {
+    throw new Error(await readProviderResolutionError(response));
+  }
 
-  providerResolutionPending.set(cacheKey, request);
-  return await request;
+  const data = (await response.json()) as ProviderResolutionResponse;
+  return data.sources ?? [];
 }
 
 function mapMovieBoxSource(

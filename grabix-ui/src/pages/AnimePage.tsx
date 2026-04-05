@@ -23,6 +23,11 @@ import {
 } from "../lib/consumetProviders";
 import { fetchTmdbSeasonMap as fetchTmdbSeasonMapFromBackend, searchTmdbMedia } from "../lib/tmdb";
 import { fetchMovieBoxSources, resolveAnimePlaybackSources, searchMovieBox, type StreamSource } from "../lib/streamProviders";
+<<<<<<< HEAD
+=======
+import CachedImage from "../components/CachedImage";
+import { readLocalAppSettings } from "../lib/appSettings";
+>>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
 
 const JIKAN = "https://api.jikan.moe/v4";
 
@@ -63,12 +68,34 @@ interface AnimeCardItem extends ConsumetMediaSummary {
   mal_id?: number;
   episodes_count?: number;
   trailer_url?: string;
-  image_proxy?: string;
+}
+
+<<<<<<< HEAD
+function toCardItem(item: ConsumetMediaSummary): AnimeCardItem {
+  return {
+    ...item,
+=======
+function normalizeAnimeImageUrl(value?: string | null): string {
+  const url = (value || "").trim();
+  if (!url) return "";
+  if (url.startsWith("/")) {
+    return `${BACKEND_API}${url}`;
+  }
+  const normalized = url.startsWith("//") ? `https:${url}` : url;
+  if (normalized.startsWith(BACKEND_API) || normalized.includes("/consumet/proxy?url=")) {
+    return normalized;
+  }
+  if (/^https?:\/\//i.test(normalized)) {
+    return `${BACKEND_API}/consumet/proxy?url=${encodeURIComponent(normalized)}`;
+  }
+  return normalized;
 }
 
 function toCardItem(item: ConsumetMediaSummary): AnimeCardItem {
   return {
     ...item,
+    image: normalizeAnimeImageUrl(item.image),
+>>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
     episodes_count: item.episodes_count,
   };
 }
@@ -80,7 +107,11 @@ function mapLegacyAnime(item: LegacyAnime): AnimeCardItem {
     type: "anime",
     title: item.title_english ?? item.title,
     alt_title: item.title,
+<<<<<<< HEAD
     image: item.images.jpg.large_image_url ?? item.images.jpg.image_url,
+=======
+    image: normalizeAnimeImageUrl(item.images.jpg.large_image_url ?? item.images.jpg.image_url),
+>>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
     description: item.synopsis,
     year: item.year,
     rating: item.score ?? null,
@@ -106,34 +137,9 @@ function dedupeItems(items: AnimeCardItem[]): AnimeCardItem[] {
   return result;
 }
 
-function inferDubEpisodeCountFromCandidates(items: AnimeCardItem[]): number | null {
-  let bestKnownCount: number | null = null;
-  let sawDubLanguage = false;
-
-  for (const item of items) {
-    if (typeof item.dub_episode_count === "number") {
-      bestKnownCount = Math.max(bestKnownCount ?? 0, item.dub_episode_count);
-    }
-
-    if ((item.languages ?? []).some((language) => {
-      const normalized = String(language || "").trim().toLowerCase();
-      return normalized === "en" || normalized === "dub" || normalized === "english";
-    })) {
-      sawDubLanguage = true;
-    }
-  }
-
-  if (bestKnownCount !== null) return bestKnownCount;
-  return sawDubLanguage ? Infinity : null;
-}
-
 async function searchJikanAnime(query: string, page = 1): Promise<AnimeCardItem[]> {
-  const data = await getCachedJson<{ data?: LegacyAnime[] }>({
-    key: `anime:jikan:search:${page}:${query.trim().toLowerCase()}`,
-    url: `${JIKAN}/anime?q=${encodeURIComponent(query)}&page=${page}&limit=20&sfw=true`,
-    ttlMs: 180_000,
-    scope: "session",
-  });
+  const response = await fetch(`${JIKAN}/anime?q=${encodeURIComponent(query)}&page=${page}&limit=20&sfw=true`);
+  const data = (await response.json()) as { data?: LegacyAnime[] };
   return (data.data ?? []).map(mapLegacyAnime);
 }
 
@@ -148,24 +154,16 @@ async function fetchJikanDiscover(tab: Tab, page = 1): Promise<AnimeCardItem[]> 
           : tab === "movie"
             ? `/top/anime?type=movie&page=${page}&limit=20`
             : `/top/anime?page=${page}&limit=20`;
-  const data = await getCachedJson<{ data?: LegacyAnime[] }>({
-    key: `anime:jikan:discover:${tab}:${page}`,
-    url: `${JIKAN}${path}`,
-    ttlMs: 300_000,
-    scope: "session",
-  });
+  const response = await fetch(`${JIKAN}${path}`);
+  const data = (await response.json()) as { data?: LegacyAnime[] };
   return (data.data ?? []).map(mapLegacyAnime);
 }
 
 async function fetchJikanEpisodeCount(malId?: number): Promise<number | null> {
   if (!malId) return null;
   try {
-    const data = await getCachedJson<{ data?: { episodes?: number | null } }>({
-      key: `anime:jikan:full:${malId}`,
-      url: `${JIKAN}/anime/${malId}/full`,
-      ttlMs: 600_000,
-      scope: "session",
-    });
+    const response = await fetch(`${JIKAN}/anime/${malId}/full`);
+    const data = (await response.json()) as { data?: { episodes?: number | null } };
     return data.data?.episodes ?? null;
   } catch {
     return null;
@@ -411,6 +409,18 @@ export default function AnimePage() {
   }, [tab, query, trendingPeriod]);
 
   useEffect(() => {
+<<<<<<< HEAD
+=======
+    if (query) return;
+    const warmTabs = (["trending", "popular", "toprated", "seasonal", "movie"] as const).filter((value) => value !== tab);
+    const timer = window.setTimeout(() => {
+      void Promise.allSettled(warmTabs.map((value) => fetchConsumetAnimeDiscover(value, 1, value === "trending" ? trendingPeriod : "daily")));
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [query, tab, trendingPeriod]);
+
+  useEffect(() => {
+>>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
     const node = bottomRef.current;
     const root = scrollRef.current;
     if (!node || !root) return;
@@ -567,7 +577,11 @@ function AnimeCard({ anime, activeTab, featured, rank, onClick }: { anime: Anime
   return (
     <div className="card" style={{ overflow: "hidden", cursor: "pointer", transition: "transform 0.15s", minHeight: featured ? 360 : undefined }} onClick={onClick} onMouseEnter={(e) => (e.currentTarget.style.transform = "translateY(-3px)")} onMouseLeave={(e) => (e.currentTarget.style.transform = "translateY(0)")}>
       <div style={{ position: "relative" }}>
+<<<<<<< HEAD
         <img src={anime.image || "https://via.placeholder.com/150x210?text=No+Image"} alt={anime.title} style={{ width: "100%", height: featured ? 265 : 210, objectFit: "cover" }} onError={(e) => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/150x210?text=No+Image"; }} />
+=======
+        <CachedImage src={anime.image || ""} fallbackSrc="https://via.placeholder.com/150x210?text=No+Image" alt={anime.title} referrerPolicy="no-referrer" style={{ width: "100%", height: posterHeight, objectFit: "cover" }} />
+>>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
         {featured && rank ? <div style={{ position: "absolute", bottom: 8, left: 8, background: "rgba(0,0,0,0.78)", color: "white", fontSize: 12, padding: "4px 10px", borderRadius: 999, fontWeight: 700 }}>#{rank}</div> : null}
         {anime.rating ? <div style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.75)", color: "#fdd663", fontSize: 11, padding: "2px 7px", borderRadius: 6, display: "flex", alignItems: "center", gap: 3, fontWeight: 600 }}><IconStar size={10} color="#fdd663" /> {anime.rating.toFixed(1)}</div> : null}
         <button
@@ -632,8 +646,13 @@ function AnimeDetail({
   const [episode, setEpisode] = useState(1);
   const [dubEpisodeCount, setDubEpisodeCount] = useState<number | null>(null);
   const hasDub = dubEpisodeCount === null ? false : (dubEpisodeCount === 0 ? false : episode <= dubEpisodeCount);
+<<<<<<< HEAD
   const [audio, setAudio] = useState<AudioPreference>("original");
   const [server, setServer] = useState<AnimeServerOption>("auto");
+=======
+  const [audio, setAudio] = useState<AudioPreference>(normalizeAudioPreference(appSettings.anime_default_audio));
+  const [server, setServer] = useState<AnimeServerOption>(appSettings.anime_default_server);
+>>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
   useEffect(() => {
     if (!hasDub && audio === "en") setAudio("original");
   }, [hasDub]);
@@ -652,10 +671,10 @@ function AnimeDetail({
   const [downloadIncludeSubtitle, setDownloadIncludeSubtitle] = useState(false);
   const [downloadDialogLoading, setDownloadDialogLoading] = useState(false);
   const [downloadDialogError, setDownloadDialogError] = useState("");
-  const resolvedSourceCacheRef = useRef<Record<string, StreamSource[]>>({});
+  const resolvedSourceCacheRef = useRef<Record<string, StreamSource>>({});
   const episodeCacheRef = useRef<Record<string, ConsumetEpisode[]>>({});
   const episodeRequestCacheRef = useRef<Record<string, Promise<ConsumetEpisode[]>>>({});
-  const resolvedSourcePromiseCacheRef = useRef<Record<string, Promise<StreamSource[]>>>({});
+  const resolvedSourcePromiseCacheRef = useRef<Record<string, Promise<StreamSource | null>>>({});
   const { isFav, toggle } = useFavorites();
   const title = anime.title;
   const fav = isFav(`anime-${anime.mal_id ?? `${anime.provider}-${anime.id}`}`);
@@ -712,10 +731,6 @@ function AnimeDetail({
         ? dedupeItems([anime, ...(searchResult.status === "fulfilled" ? searchResult.value.map(toCardItem) : [])])
         : dedupeItems([anime]);
       setCandidateAnimes(nextCandidates);
-      const optimisticDubEpisodeCount = inferDubEpisodeCountFromCandidates(nextCandidates);
-      if (optimisticDubEpisodeCount !== null) {
-        setDubEpisodeCount(optimisticDubEpisodeCount);
-      }
 
       const titleCandidates = expandAnimeTitles(anime.title, anime.alt_title).slice(0, 4);
       void Promise.allSettled(
@@ -842,29 +857,28 @@ function AnimeDetail({
         }
 
         const requestedAudio = requestedLanguage === "dub" ? "en" : "original";
-        let sources = await resolveAnimeSourcesViaBackend(episode, "download", {
+        let source = await resolveAnimeSourceViaBackend(episode, "download", {
           audio: requestedAudio,
           server: requestedServer,
         });
-        if (sources.length === 0 && requestedServer !== "auto") {
-          sources = await resolveAnimeSourcesViaBackend(episode, "download", {
+        if (!source && requestedServer !== "auto") {
+          source = await resolveAnimeSourceViaBackend(episode, "download", {
             audio: requestedAudio,
             server: "auto",
           });
         }
-        if (sources.length === 0) {
-          sources = await resolveAnimeSourcesViaBackend(episode, "play", {
+        if (!source) {
+          source = await resolveAnimeSourceViaBackend(episode, "play", {
             audio: requestedAudio,
             server: requestedServer,
           });
         }
-        if (sources.length === 0 && requestedServer !== "auto") {
-          sources = await resolveAnimeSourcesViaBackend(episode, "play", {
+        if (!source && requestedServer !== "auto") {
+          source = await resolveAnimeSourceViaBackend(episode, "play", {
             audio: requestedAudio,
             server: "auto",
           });
         }
-        let source = sources[0] ?? null;
         if (!source) {
           const movieBoxSources = await resolveMovieBoxAnimeSources(episode);
           source = movieBoxSources[0] ?? null;
@@ -919,28 +933,13 @@ function AnimeDetail({
       : candidateAnimes
   );
 
-  const getEpisodeIdForCandidate = (candidate: AnimeCardItem, targetEpisode: number) => {
-    if (!["hianime", "zoro", "gogoanime"].includes(candidate.provider)) {
-      return "";
-    }
-    const cacheKey = `${candidate.provider}-${candidate.id}`;
-    const fallbackEpisodes =
-      resolvedAnime && candidate.provider === resolvedAnime.provider && candidate.id === resolvedAnime.id
-        ? episodes
-        : [];
-    const cachedEpisodes = episodeCacheRef.current[cacheKey] ?? fallbackEpisodes;
-    return cachedEpisodes.find((item) => item.number === targetEpisode)?.id || "";
-  };
-
-  const resolveAnimeSourcesViaBackend = async (
+  const resolveAnimeSourceViaBackend = async (
     targetEpisode = episode,
     purpose: "play" | "download" = "play",
     overrides?: { audio?: AudioPreference; server?: AnimeServerOption }
-  ): Promise<StreamSource[]> => {
-    const requestedAudio = normalizeAudioPreference(overrides?.audio ?? audio);
-    if (requestedAudio === "hi") return [];
-    const normalizedAudio =
-      requestedAudio === "en" && !episodeSupportsDub(targetEpisode) ? "original" : requestedAudio;
+  ): Promise<StreamSource | null> => {
+    const normalizedAudio = normalizeAudioPreference(overrides?.audio ?? audio);
+    if (normalizedAudio === "hi") return null;
     const requestedServer = overrides?.server ?? server;
     const cacheKey = `${purpose}:${normalizedAudio}:${requestedServer}:${targetEpisode}`;
     const cached = resolvedSourceCacheRef.current[cacheKey];
@@ -951,14 +950,13 @@ function AnimeDetail({
     const request = (async () => {
       let lastMessage = "";
       try {
-        const tmdbEpisode = await resolveTmdbEpisodeNumber(tmdbId, targetEpisode);
         const sources = await resolveAnimePlaybackSources({
           title: anime.title,
           altTitle: anime.alt_title || "",
           altTitles: expandAnimeTitles(anime.title, anime.alt_title).slice(1),
           tmdbId,
-          fallbackSeason: tmdbEpisode?.season ?? 1,
-          fallbackEpisode: tmdbEpisode?.episode ?? targetEpisode,
+          fallbackSeason: 1,
+          fallbackEpisode: targetEpisode,
           episodeNumber: targetEpisode,
           audio: normalizedAudio,
           server: requestedServer,
@@ -967,15 +965,15 @@ function AnimeDetail({
           candidates: getWatchCandidates().map((candidate) => ({
             provider: candidate.provider,
             animeId: candidate.id,
-            episodeId: getEpisodeIdForCandidate(candidate, targetEpisode) || undefined,
             title: candidate.title,
             altTitle: candidate.alt_title || "",
           })),
         });
-        if (sources.length > 0) {
-          resolvedSourceCacheRef.current[cacheKey] = sources;
+        const resolvedSource = sources[0] ?? null;
+        if (resolvedSource) {
+          resolvedSourceCacheRef.current[cacheKey] = resolvedSource;
         }
-        return sources;
+        return resolvedSource;
       } catch (error) {
         lastMessage = error instanceof Error ? error.message : "";
       }
@@ -983,7 +981,7 @@ function AnimeDetail({
       if (lastMessage) {
         throw new Error(lastMessage);
       }
-      return [];
+      return null;
     })();
 
     resolvedSourcePromiseCacheRef.current[cacheKey] = request;
@@ -1076,20 +1074,31 @@ function AnimeDetail({
     resolveMovieBoxAnimeSources(targetEpisode, { preferHindi: true });
 
   const resolvePlayableSources = async (targetEpisode = episode): Promise<StreamSource[]> => {
-    let sources = await resolveAnimeSourcesViaBackend(targetEpisode, "play");
-    if (sources.length === 0 && server !== "auto") {
-      sources = await resolveAnimeSourcesViaBackend(targetEpisode, "play", {
-        audio,
-        server: "auto",
-      });
-    }
-    return sources;
+    const normalizedAudio = normalizeAudioPreference(audio);
+    const tmdbEpisode = await resolveTmdbEpisodeNumber(tmdbId, targetEpisode);
+    return await resolveAnimePlaybackSources({
+      title: anime.title,
+      altTitle: anime.alt_title || "",
+      altTitles: expandAnimeTitles(anime.title, anime.alt_title).slice(1),
+      tmdbId,
+      fallbackSeason: tmdbEpisode?.season ?? 1,
+      fallbackEpisode: tmdbEpisode?.episode ?? targetEpisode,
+      episodeNumber: targetEpisode,
+      audio: normalizedAudio,
+      server,
+      isMovie,
+      purpose: "play",
+      candidates: getWatchCandidates().map((candidate) => ({
+        provider: candidate.provider,
+        animeId: candidate.id,
+        title: candidate.title,
+        altTitle: candidate.alt_title || "",
+      })),
+    });
   };
 
   const buildSubtitleText = (targetEpisode = episode) => {
-    const requestedAudio = normalizeAudioPreference(audio);
-    const normalizedAudio =
-      requestedAudio === "en" && !episodeSupportsDub(targetEpisode) ? "original" : requestedAudio;
+    const normalizedAudio = normalizeAudioPreference(audio);
     return normalizedAudio === "hi"
       ? `Hindi playback from Movie Box - ${selectionLabel} ${targetEpisode}`
       : `Anime playback with ${normalizedAudio === "en" ? "English dub" : "sub"} preference - ${selectionLabel} ${targetEpisode}`;
@@ -1112,15 +1121,15 @@ function AnimeDetail({
 
   const resolvePlayerServerOption = async (optionId: string, targetEpisode = episode) => {
     const [requestedServer, requestedAudio] = optionId.split(":") as [AnimeServerOption, AudioPreference];
-    const sources = await resolveAnimeSourcesViaBackend(targetEpisode, "play", {
+    const source = await resolveAnimeSourceViaBackend(targetEpisode, "play", {
       audio: requestedAudio,
       server: requestedServer,
     });
-    if (sources.length === 0) {
+    if (!source) {
       throw new Error(`No playable source was found for ${optionId.replace(":", " ").toUpperCase()}.`);
     }
     return {
-      sources,
+      sources: [source],
       subtitle: requestedAudio === "en"
         ? `Anime playback with English dub - ${selectionLabel} ${targetEpisode}`
         : `Anime playback with subtitles - ${selectionLabel} ${targetEpisode}`,
@@ -1129,50 +1138,36 @@ function AnimeDetail({
   };
 
   const buildInstantPlayableSources = (targetEpisode = episode): StreamSource[] => {
-    const requestedAudio = normalizeAudioPreference(audio);
-    const normalizedAudio =
-      requestedAudio === "en" && !episodeSupportsDub(targetEpisode) ? "original" : requestedAudio;
+    const normalizedAudio = normalizeAudioPreference(audio);
     const cachedResolved = resolvedSourceCacheRef.current[`play:${normalizedAudio}:${server}:${targetEpisode}`];
-    if (cachedResolved?.length) {
-      return cachedResolved;
+    if (cachedResolved) {
+      return [cachedResolved];
     }
     return [];
   };
 
   useEffect(() => {
-    const requestedAudio = normalizeAudioPreference(audio);
-    if (requestedAudio === "hi") return;
-    const normalizedAudio =
-      requestedAudio === "en" && !episodeSupportsDub(episode) ? "original" : requestedAudio;
+    const normalizedAudio = normalizeAudioPreference(audio);
+    if (normalizedAudio === "hi") return;
     let cancelled = false;
 
     const warm = async () => {
       try {
         const preferredServers: AnimeServerOption[] = server === "auto" ? ["hd-1", "hd-2"] : [server];
         await Promise.allSettled([
-          resolveAnimeSourcesViaBackend(episode, "play"),
+          resolveAnimeSourceViaBackend(episode, "play"),
           ...preferredServers.map((preferredServer) =>
-            resolveAnimeSourcesViaBackend(episode, "play", {
+            resolveAnimeSourceViaBackend(episode, "play", {
               audio: normalizedAudio,
               server: preferredServer,
             })
           ),
         ]);
-        const currentSources = resolvedSourceCacheRef.current[`play:${normalizedAudio}:${server}:${episode}`];
-        if (!cancelled && currentSources?.length) {
-          await prewarmPlaybackSources(currentSources, 2);
-        }
         if (!cancelled && totalEpisodes > episode) {
-          await resolveAnimeSourcesViaBackend(episode + 1, "play", {
-            audio: requestedAudio,
+          await resolveAnimeSourceViaBackend(episode + 1, "play", {
+            audio: normalizedAudio,
             server,
           });
-          const nextRequestedAudio =
-            requestedAudio === "en" && !episodeSupportsDub(episode + 1) ? "original" : requestedAudio;
-          const nextEpisodeSources = resolvedSourceCacheRef.current[`play:${nextRequestedAudio}:${server}:${episode + 1}`];
-          if (nextEpisodeSources?.length) {
-            void prewarmPlaybackSources(nextEpisodeSources, 2);
-          }
         }
       } catch {
         // Warm the cache quietly; handle real errors on user action.
@@ -1183,7 +1178,7 @@ function AnimeDetail({
     return () => {
       cancelled = true;
     };
-  }, [audio, server, episode, totalEpisodes, resolvedAnime, candidateAnimes, dubEpisodeCount]);
+  }, [audio, server, episode, totalEpisodes, resolvedAnime, candidateAnimes]);
 
   const buildPlayerPayload = async (targetEpisode = episode) => {
     const sources = await resolvePlayableSources(targetEpisode);
@@ -1383,7 +1378,11 @@ function AnimeDetail({
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
       <div style={{ background: "var(--bg-surface)", borderRadius: 16, width: "100%", maxWidth: 720, maxHeight: "90vh", overflow: "hidden", display: "flex", flexDirection: "column", boxShadow: "var(--shadow-lg)", border: "1px solid var(--border)" }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", gap: 16, padding: "20px 20px 0" }}>
+<<<<<<< HEAD
           <img src={anime.image || "https://via.placeholder.com/100x145"} alt={title} style={{ width: 100, height: 145, objectFit: "cover", borderRadius: 10, flexShrink: 0, border: "1px solid var(--border)" }} onError={(e) => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/100x145"; }} />
+=======
+          <img src={anime.image || "https://via.placeholder.com/100x145"} alt={title} referrerPolicy="no-referrer" style={{ width: 100, height: 145, objectFit: "cover", borderRadius: 10, flexShrink: 0, border: "1px solid var(--border)" }} onError={(e) => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/100x145"; }} />
+>>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6, lineHeight: 1.3 }}>{title}</div>
             <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 8 }}>

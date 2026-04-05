@@ -6,10 +6,14 @@
 import type { OfflineState } from "../lib/useOfflineDetection";
 
 export function OfflineBanner({ offlineState }: { offlineState: OfflineState }) {
-  if (!offlineState.isOffline || offlineState.reason !== "network") return null;
+  if (!offlineState.isOffline) return null;
 
-  const label = "You're offline — showing saved content";
-  const icon = "📶";
+  const isNetwork = offlineState.reason === "network";
+  const label = isNetwork
+    ? "You're offline — showing saved content"
+    : "Backend unreachable — showing cached content";
+
+  const icon = isNetwork ? "📶" : "🔌";
 
   return (
     <div
@@ -26,7 +30,9 @@ export function OfflineBanner({ offlineState }: { offlineState: OfflineState }) 
         alignItems: "center",
         justifyContent: "center",
         gap: 8,
-        background: "rgba(220, 100, 40, 0.92)",
+        background: isNetwork
+          ? "rgba(220, 100, 40, 0.92)"
+          : "rgba(160, 60, 200, 0.92)",
         color: "#fff",
         fontSize: "0.78rem",
         fontWeight: 500,

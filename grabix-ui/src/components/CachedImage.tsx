@@ -9,7 +9,6 @@ interface CachedImageProps {
   className?: string;
   loading?: "eager" | "lazy";
   decoding?: "sync" | "async" | "auto";
-  fetchPriority?: "high" | "low" | "auto";
   referrerPolicy?: ImgHTMLAttributes<HTMLImageElement>["referrerPolicy"];
   onError?: ReactEventHandler<HTMLImageElement>;
   onLoad?: ReactEventHandler<HTMLImageElement>;
@@ -23,7 +22,6 @@ export default function CachedImage({
   className,
   loading = "lazy",
   decoding = "async",
-  fetchPriority = "auto",
   referrerPolicy,
   onError,
   onLoad,
@@ -32,6 +30,7 @@ export default function CachedImage({
 
   useEffect(() => {
     let cancelled = false;
+    let objectUrlToRevoke = "";
     setResolvedSrc(src);
 
     const resolve = async () => {
@@ -39,16 +38,20 @@ export default function CachedImage({
       try {
         const cachedUrl = await getCachedMediaObjectUrl(src);
         if (cancelled) {
+          if (cachedUrl?.startsWith("blob:")) URL.revokeObjectURL(cachedUrl);
           return;
         }
         if (cachedUrl) {
+          objectUrlToRevoke = cachedUrl.startsWith("blob:") ? cachedUrl : "";
           setResolvedSrc(cachedUrl);
           return;
         }
         const storedUrl = await cacheMediaFromUrl(src);
         if (cancelled) {
+          if (storedUrl.startsWith("blob:")) URL.revokeObjectURL(storedUrl);
           return;
         }
+        objectUrlToRevoke = storedUrl.startsWith("blob:") ? storedUrl : "";
         setResolvedSrc(storedUrl);
       } catch {
         if (!cancelled) {
@@ -61,6 +64,9 @@ export default function CachedImage({
 
     return () => {
       cancelled = true;
+      if (objectUrlToRevoke) {
+        URL.revokeObjectURL(objectUrlToRevoke);
+      }
     };
   }, [src]);
 
@@ -72,7 +78,6 @@ export default function CachedImage({
       className={className}
       loading={loading}
       decoding={decoding}
-      fetchPriority={fetchPriority}
       referrerPolicy={referrerPolicy}
       onLoad={onLoad}
       onError={(event) => {

@@ -11,6 +11,11 @@ import { filterAdultContent } from "../lib/contentFilter";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
 import { TMDB_BACKDROP_BASE as IMG_LG, TMDB_IMAGE_BASE as IMG_BASE, discoverTmdbMedia, fetchTmdbDetails, fetchTmdbTvSeason, searchTmdbMedia } from "../lib/tmdb";
 import { fetchMovieBoxSources, getTvSources, resolveTvPlaybackSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
+<<<<<<< HEAD
+=======
+import CachedImage from "../components/CachedImage";
+import { readLocalAppSettings } from "../lib/appSettings";
+>>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
 
 interface Show {
   id: number;
@@ -136,18 +141,6 @@ export default function TVSeriesPage() {
   ];
   const filteredShows = useMemo(() => filterAdultContent(shows, adultContentBlocked), [shows, adultContentBlocked]);
 
-  useEffect(() => {
-    const urls = filteredShows
-      .map((item) => item.poster_path ? `${IMG_BASE}${item.poster_path}` : "")
-      .filter(Boolean)
-      .slice(0, 24);
-    if (urls.length === 0) return;
-    const timer = window.setTimeout(() => {
-      void warmMediaCache(urls, 8);
-    }, 80);
-    return () => window.clearTimeout(timer);
-  }, [filteredShows]);
-
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
       <div style={{ padding: "14px 24px", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -250,7 +243,6 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (kind: "d
   const [downloadOptions, setDownloadOptions] = useState<DownloadQualityOption[]>([]);
   const [downloadLoading, setDownloadLoading] = useState(false);
   const [downloadError, setDownloadError] = useState("");
-  const [prefetchedPlaybackSources, setPrefetchedPlaybackSources] = useState<StreamSource[]>([]);
 
   useEffect(() => {
     tf("details", show.id).then(setFull).catch(() => {});
@@ -298,10 +290,7 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (kind: "d
 
   const data = full ?? show;
   const poster = data.poster_path ? `${IMG_BASE}${data.poster_path}` : "";
-  const fallbackSources = useMemo(
-    () => getTvSources({ tmdbId: show.id, imdbId: data.external_ids?.imdb_id }, { season, episode }),
-    [data.external_ids?.imdb_id, episode, season, show.id]
-  );
+  const fallbackSources = getTvSources({ tmdbId: show.id, imdbId: data.external_ids?.imdb_id }, { season, episode });
   const seriesYear = data.first_air_date ? Number(data.first_air_date.slice(0, 4)) : undefined;
   const availableSeasons = (data.seasons ?? [])
     .map((item) => item.season_number)
@@ -434,43 +423,8 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (kind: "d
     void loadDownloadOptions(downloadLanguage);
   }, [downloadDialogOpen, downloadLanguage, data.name, season, episode, seriesYear]);
 
-  useEffect(() => {
-    let cancelled = false;
-    resolveTvPlaybackSources({
-      tmdbId: show.id,
-      imdbId: data.external_ids?.imdb_id,
-      title: data.name,
-      altTitles,
-      year: Number.isFinite(seriesYear) ? seriesYear : undefined,
-      season,
-      episode,
-    })
-      .then((sources) => {
-        if (!cancelled) {
-          setPrefetchedPlaybackSources(sources);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setPrefetchedPlaybackSources([]);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [altTitles, data.external_ids?.imdb_id, data.name, episode, season, seriesYear, show.id]);
-
-  useEffect(() => {
-    const sourcesToWarm = prefetchedPlaybackSources.length > 0 ? prefetchedPlaybackSources : fallbackSources;
-    if (sourcesToWarm.length === 0) return;
-    const timer = window.setTimeout(() => {
-      void prewarmPlaybackSources(sourcesToWarm, 3);
-    }, 60);
-    return () => window.clearTimeout(timer);
-  }, [fallbackSources, prefetchedPlaybackSources]);
-
   const handlePlay = async () => {
-    const sources = prefetchedPlaybackSources.length > 0 ? prefetchedPlaybackSources : await resolveTvPlaybackSources({
+    const sources = await resolveTvPlaybackSources({
       tmdbId: show.id,
       imdbId: data.external_ids?.imdb_id,
       title: data.name,

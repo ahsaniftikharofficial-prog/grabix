@@ -1,8 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { discoverTmdbMedia, TMDB_IMAGE_BASE as IMG_BASE } from "../lib/tmdb";
-import { getCachedJson } from "../lib/cache";
-import CachedImage from "../components/CachedImage";
-import { warmMediaCache } from "../lib/mediaCache";
 
 const API        = "https://api.imdbapi.dev";
 const JIKAN      = "https://api.jikan.moe/v4";
@@ -123,41 +120,21 @@ export default function RatingsPage() {
     } catch { /* silent */ }
     // Anime — 2 pages from Jikan
     try {
-      const pages = await Promise.allSettled([1, 2].map((page) =>
-        getCachedJson<{ data?: AnimeEntry[] }>({
-          key: `ratings:jikan:top-anime:${page}`,
-          url: `${JIKAN}/top/anime?limit=25&page=${page}`,
-          ttlMs: 300_000,
-          scope: "session",
-        })
-      ));
-      const animeEntries = pages
-        .filter((result): result is PromiseFulfilledResult<{ data?: AnimeEntry[] }> => result.status === "fulfilled")
-        .flatMap((result) => result.value.data ?? []);
-      const seen = new Set<number>();
-      setTopAnime(animeEntries.filter((entry) => {
-        if (seen.has(entry.mal_id)) return false;
-        seen.add(entry.mal_id);
-        return true;
-      }));
+      const r1 = await fetch(`${JIKAN}/top/anime?limit=25&page=1`);
+      const j1 = await r1.json();
+      setTopAnime(j1.data ?? []);
+      await new Promise(res => setTimeout(res, 450));
+      const r2 = await fetch(`${JIKAN}/top/anime?limit=25&page=2`);
+      const j2 = await r2.json();
+      setTopAnime(prev => {
+        const ids = new Set(prev.map((a: AnimeEntry) => a.mal_id));
+        return [...prev, ...(j2.data ?? []).filter((a: AnimeEntry) => !ids.has(a.mal_id))];
+      });
     } catch { /* silent */ }
     setTopLoading(false);
   }, []);
 
   useEffect(() => { loadTopLists(); }, [loadTopLists]);
-
-  useEffect(() => {
-    const urls = [
-      ...topMovies.map((item) => item.poster_path ? `${IMG_BASE}${item.poster_path}` : ""),
-      ...topTv.map((item) => item.poster_path ? `${IMG_BASE}${item.poster_path}` : ""),
-      ...topAnime.map((item) => item.images?.jpg?.large_image_url || ""),
-    ].filter(Boolean).slice(0, 30);
-    if (urls.length === 0) return;
-    const timer = window.setTimeout(() => {
-      void warmMediaCache(urls, 8);
-    }, 80);
-    return () => window.clearTimeout(timer);
-  }, [topAnime, topMovies, topTv]);
 
   // Suggestions
   useEffect(() => {
@@ -595,7 +572,7 @@ export default function RatingsPage() {
                       onClick={() => openByTitle(m.title)}>
                       <div style={{ position:"relative" }}>
                         {m.poster_path
-                          ? <CachedImage src={`${IMG_BASE}${m.poster_path}`} alt={m.title} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
+                          ? <img src={`${IMG_BASE}${m.poster_path}`} alt={m.title} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
                           : <div style={{ width:"100%", aspectRatio:"2/3", background:"var(--bg-surface2)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:32 }}>🎬</div>}
                         <div style={{ position:"absolute", top:6, left:6, background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:10, fontWeight:700, borderRadius:4, padding:"2px 6px" }}>#{i+1}</div>
                         {m.vote_average>0 && <RatingBadge r={m.vote_average} />}
@@ -621,7 +598,7 @@ export default function RatingsPage() {
                       onClick={() => openByTitle(s.name)}>
                       <div style={{ position:"relative" }}>
                         {s.poster_path
-                          ? <CachedImage src={`${IMG_BASE}${s.poster_path}`} alt={s.name} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
+                          ? <img src={`${IMG_BASE}${s.poster_path}`} alt={s.name} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
                           : <div style={{ width:"100%", aspectRatio:"2/3", background:"var(--bg-surface2)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:32 }}>📺</div>}
                         <div style={{ position:"absolute", top:6, left:6, background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:10, fontWeight:700, borderRadius:4, padding:"2px 6px" }}>#{i+1}</div>
                         {s.vote_average>0 && <RatingBadge r={s.vote_average} />}
@@ -646,7 +623,7 @@ export default function RatingsPage() {
                       style={{ animationDelay:`${(i%25)*0.02}s`, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", overflow:"hidden" }}
                       onClick={() => openByTitle(a.title)}>
                       <div style={{ position:"relative" }}>
-                        <CachedImage src={a.images.jpg.large_image_url} alt={a.title} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
+                        <img src={a.images.jpg.large_image_url} alt={a.title} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
                         <div style={{ position:"absolute", top:6, left:6, background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:10, fontWeight:700, borderRadius:4, padding:"2px 6px" }}>#{i+1}</div>
                         {a.score>0 && <RatingBadge r={a.score} />}
                       </div>

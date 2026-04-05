@@ -38,6 +38,11 @@ import {
   type OfflineMangaRecord,
 } from "../lib/mangaOffline";
 import { createCbzBlob, triggerFileDownload } from "../lib/mangaZip";
+<<<<<<< HEAD
+=======
+import CachedImage from "../components/CachedImage";
+import { readLocalAppSettings } from "../lib/appSettings";
+>>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
 
 type ReaderState = { chapterIndex: number; chapter: MangaChapter };
 type ChapterSource = "auto" | "mangadex" | "consumet" | "comick";
@@ -666,6 +671,20 @@ export default function MangaPage() {
   }, []);
 
   useEffect(() => {
+<<<<<<< HEAD
+=======
+    contentScrollRef.current?.scrollTo({ top: 0 });
+  }, [homeTab, query, selectedItem, reader, discoverSection]);
+
+  useEffect(() => {
+    if (homeTab !== "discover" || activeDiscoverItems.length > 0 || activeHomeLoading || homeSectionLoaded[activeHomeSectionKey]) {
+      return;
+    }
+    void loadDiscoverFeed(discoverSection, 1);
+  }, [activeDiscoverItems.length, activeHomeLoading, activeHomeSectionKey, discoverSection, homeSectionLoaded, homeTab]);
+
+  useEffect(() => {
+>>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
     if (!query.trim()) {
       setSearchResults([]);
       setSearchError(null);

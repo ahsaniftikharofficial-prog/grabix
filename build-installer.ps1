@@ -20,8 +20,6 @@ $tauriBackend = Join-Path $tauriBackendRoot "backend"
 $tauriConsumetRoot = Join-Path $tauriDir "consumet-staging"
 $tauriConsumetApp = Join-Path $tauriConsumetRoot "consumet-local"
 $tauriConsumetRuntime = Join-Path $tauriConsumetRoot "node-runtime"
-$tauriRuntimeToolsRoot = Join-Path $tauriDir "runtime-tools"
-$tauriAria2Root = Join-Path $tauriRuntimeToolsRoot "aria2"
 $tauriGeneratedRoot = Join-Path $tauriDir "generated"
 $tauriRuntimeConfig = Join-Path $tauriGeneratedRoot "runtime-config.json"
 $releaseDir = Join-Path $frontend "src-tauri\target\release"
@@ -274,92 +272,6 @@ function Sync-ConsumetNodeRuntime([string]$DestinationRoot) {
     return $destination
 }
 
-function Find-Aria2Executable() {
-    $candidateDirs = New-Object System.Collections.Generic.List[string]
-
-    $explicitDir = [string]$env:GRABIX_ARIA2_SOURCE_DIR
-    if (-not [string]::IsNullOrWhiteSpace($explicitDir)) {
-        $candidateDirs.Add($explicitDir) | Out-Null
-    }
-
-    foreach ($candidate in @(
-        (Join-Path $root "runtime-tools\aria2"),
-        (Join-Path $tauriDir "runtime-tools\aria2"),
-        (Join-Path (Join-Path $env:LOCALAPPDATA "com.grabix.app\backend-state\runtime-tools") "aria2")
-    )) {
-        if (-not [string]::IsNullOrWhiteSpace($candidate)) {
-            $candidateDirs.Add($candidate) | Out-Null
-        }
-    }
-
-    $aria2Command = Get-Command "aria2c" -ErrorAction SilentlyContinue
-    if ($aria2Command -and $aria2Command.Source) {
-        $candidateDirs.Add((Split-Path -Parent $aria2Command.Source)) | Out-Null
-    }
-
-    foreach ($dir in $candidateDirs) {
-        $exe = Join-Path $dir "aria2c.exe"
-        if (Test-Path -LiteralPath $exe) {
-            return $exe
-        }
-    }
-
-    return $null
-}
-
-function Stage-Aria2Bundle([string]$DestinationRoot) {
-    Remove-PathIfPresent $DestinationRoot
-    New-Item -ItemType Directory -Path $DestinationRoot -Force | Out-Null
-
-    $aria2Exe = Find-Aria2Executable
-    if (-not [string]::IsNullOrWhiteSpace($aria2Exe)) {
-        $sourceDir = Split-Path -Parent $aria2Exe
-        Copy-Item -LiteralPath (Join-Path $sourceDir "*") -Destination $DestinationRoot -Recurse -Force
-        return $aria2Exe
-    }
-
-    $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("grabix-aria2-" + [System.Guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-    try {
-        $headers = @{
-            "User-Agent" = "GRABIX-Build"
-            "Accept" = "application/vnd.github+json"
-        }
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/aria2/aria2/releases/latest" -Headers $headers -TimeoutSec 60
-        $asset = $release.assets |
-            Where-Object { $_.name -match "win-64bit" -and $_.name -match "\.zip$" } |
-            Select-Object -First 1
-
-        if ($null -eq $asset -or [string]::IsNullOrWhiteSpace([string]$asset.browser_download_url)) {
-            Throw-BuildFailure `
-                -Code "aria2_bundle_failed" `
-                -Step "Bundled aria2 staging" `
-                -Message "The latest aria2 release did not expose a Windows 64-bit zip asset." `
-                -Hint "Set GRABIX_ARIA2_SOURCE_DIR to a folder that already contains aria2c.exe and rerun the installer build."
-        }
-
-        $archivePath = Join-Path $tempDir ([string]$asset.name)
-        Invoke-WebRequest -Uri ([string]$asset.browser_download_url) -Headers @{ "User-Agent" = "GRABIX-Build" } -OutFile $archivePath -TimeoutSec 120
-        $extractDir = Join-Path $tempDir "extract"
-        Expand-Archive -LiteralPath $archivePath -DestinationPath $extractDir -Force
-
-        $downloadedExe = Get-ChildItem -LiteralPath $extractDir -Recurse -File -Filter "aria2c.exe" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($null -eq $downloadedExe) {
-            Throw-BuildFailure `
-                -Code "aria2_bundle_failed" `
-                -Step "Bundled aria2 staging" `
-                -Message "The downloaded aria2 archive did not contain aria2c.exe." `
-                -Hint "Try again or set GRABIX_ARIA2_SOURCE_DIR to a working aria2 folder."
-        }
-
-        Copy-Item -LiteralPath (Join-Path $downloadedExe.Directory.FullName "*") -Destination $DestinationRoot -Recurse -Force
-        return $downloadedExe.FullName
-    } finally {
-        Remove-PathIfPresent $tempDir
-    }
-}
-
 function Get-BackendManifestHash([string]$RootPath) {
     if (-not (Test-Path -LiteralPath $RootPath)) {
         throw "Backend path not found: $RootPath"
@@ -420,11 +332,9 @@ function Remove-StaleBackendArtifacts([string]$ReleaseRoot) {
         (Join-Path $ReleaseRoot "backend"),
         (Join-Path $ReleaseRoot "backend-staging"),
         (Join-Path $ReleaseRoot "consumet-staging"),
-        (Join-Path $ReleaseRoot "runtime-tools"),
         (Join-Path $ReleaseRoot "resources\backend"),
         (Join-Path $ReleaseRoot "resources\backend-staging"),
-        (Join-Path $ReleaseRoot "resources\consumet-staging"),
-        (Join-Path $ReleaseRoot "resources\runtime-tools")
+        (Join-Path $ReleaseRoot "resources\consumet-staging")
     )
     foreach ($target in $targets) {
         Remove-PathIfPresent $target
@@ -589,39 +499,6 @@ function Assert-DiagnosticsRuntimeConfig(
             -DiagnosticsPath $DiagnosticsPath `
             -LogPath $LogPath `
             -Hint "Make sure build-installer staged runtime-config.json from GRABIX_TMDB_BEARER_TOKEN or GRABIX_RUNTIME_CONFIG_SOURCE."
-    }
-}
-
-function Assert-BundledAria2(
-    [string]$DesktopAuthToken,
-    [string]$DiagnosticsPath,
-    [string]$LogPath
-) {
-    try {
-        $payload = Invoke-RestMethod `
-            -Uri "http://127.0.0.1:8000/runtime/dependencies" `
-            -Method Get `
-            -Headers @{ "X-Grabix-Desktop-Auth" = $DesktopAuthToken } `
-            -TimeoutSec 8
-    } catch {
-        Throw-BuildFailure `
-            -Code "aria2_bundle_failed" `
-            -Step "Packaged smoke test" `
-            -Message "The packaged backend did not respond to /runtime/dependencies while verifying bundled aria2." `
-            -DiagnosticsPath $DiagnosticsPath `
-            -LogPath $LogPath `
-            -Hint "Inspect startup diagnostics and confirm the bundled backend finished booting before dependency checks."
-    }
-
-    $aria2 = $payload.dependencies.aria2
-    if ($null -eq $aria2 -or -not [bool]$aria2.available) {
-        Throw-BuildFailure `
-            -Code "aria2_bundle_failed" `
-            -Step "Packaged smoke test" `
-            -Message "Bundled aria2 was not available in the packaged app." `
-            -DiagnosticsPath $DiagnosticsPath `
-            -LogPath $LogPath `
-            -Hint "Confirm build-installer staged src-tauri/runtime-tools/aria2 and that the desktop shell exported GRABIX_BUNDLED_RUNTIME_TOOLS_DIR."
     }
 }
 
@@ -832,10 +709,6 @@ function Invoke-PackagedSmokeTest(
         Assert-DiagnosticsRuntimeConfig `
             -DiagnosticsPath $DiagnosticsPath `
             -LogPath $LogPath
-        Assert-BundledAria2 `
-            -DesktopAuthToken $desktopAuthToken `
-            -DiagnosticsPath $DiagnosticsPath `
-            -LogPath $LogPath
     } finally {
         if ($process -and -not $process.HasExited) {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
@@ -923,13 +796,11 @@ if ($SkipNpmInstall -or $SkipFrontendInstall) {
 
 Write-Host "[3/6] Staging backend and HiAnime gateway resources..." -ForegroundColor Yellow
 Remove-PathIfPresent $tauriBackendRoot
-Remove-PathIfPresent $tauriRuntimeToolsRoot
 Remove-PathIfPresent $tauriGeneratedRoot
 New-Item -ItemType Directory -Path $tauriBackendRoot -Force | Out-Null
 Copy-IncludedBackendFiles -SourceRoot $backend -DestinationRoot $tauriBackend
 Copy-ConsumetBundle -SourceRoot $consumetSource -DestinationRoot $tauriConsumetApp
 $stagedNodeExe = Sync-ConsumetNodeRuntime -DestinationRoot $tauriConsumetRuntime
-$stagedAria2Exe = Stage-Aria2Bundle -DestinationRoot $tauriAria2Root
 Write-PackagedRuntimeConfig -DestinationPath $tauriRuntimeConfig
 
 $backendSourceHash = Get-BackendManifestHash $backend
@@ -947,7 +818,6 @@ Write-Host "[3/6] Resource staging complete." -ForegroundColor Green
 Write-Host "      build_id = $buildId"
 Write-Host "      backend_resource_hash = $backendSourceHash"
 Write-Host "      consumet_node_runtime = $stagedNodeExe"
-Write-Host "      bundled_aria2 = $stagedAria2Exe"
 Write-Host "      runtime_config = $tauriRuntimeConfig"
 
 Write-Host "[4/6] Building GRABIX with Tauri + PyO3..." -ForegroundColor Yellow

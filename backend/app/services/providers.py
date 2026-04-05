@@ -776,6 +776,7 @@ class ConsumetAnimeProviderAdapter(BaseProviderAdapter):
         episode_number = int(kwargs.get("episode_number", 1) or 1)
         audio = str(kwargs.get("audio") or "original").strip().lower() or "original"
         server = str(kwargs.get("server") or "auto").strip().lower() or "auto"
+
         if not episode_id:
             details = await self.details(provider=provider, media_id=media_id)
             items = details.get("items") or []
@@ -1262,7 +1263,6 @@ async def resolve_anime_playback(
                 episode_id=episode_id,
                 audio=normalized_audio,
                 server=server,
-                purpose=purpose,
             )
             if watch_sources:
                 attempts.append(
@@ -1274,16 +1274,8 @@ async def resolve_anime_playback(
                         fallback_used=not bool(groups),
                     )
                 )
-                group_id = f"consumet-{provider_name}"
-                if not any(group.get("id") == group_id for group in groups):
-                    groups.append({"id": group_id, "label": f"{provider_name} watch fallback", "sources": watch_sources})
-                if purpose == "play":
-                    return _resolution_payload(
-                        correlation_id=correlation_id,
-                        groups=groups,
-                        attempts=attempts,
-                        primary_provider=group_id,
-                    )
+                groups.append({"id": f"consumet-{provider_name}", "label": f"{provider_name} watch fallback", "sources": watch_sources})
+                break
         except ProviderServiceError as error:
             attempts.append(
                 _attempt_payload(
@@ -1333,16 +1325,8 @@ async def resolve_anime_playback(
                         fallback_used=not bool(groups),
                     )
                 )
-                group_id = f"anime-resolved-{provider_name}"
-                if not any(group.get("id") == group_id for group in groups):
-                    groups.append({"id": group_id, "label": f"Backend resolved fallback ({provider_name})", "sources": resolved_sources})
-                if purpose == "play":
-                    return _resolution_payload(
-                        correlation_id=correlation_id,
-                        groups=groups,
-                        attempts=attempts,
-                        primary_provider=group_id,
-                    )
+                groups.append({"id": "anime-resolved", "label": "Backend resolved fallback", "sources": resolved_sources})
+                break
         except ProviderServiceError as error:
             attempts.append(
                 _attempt_payload(
@@ -1355,7 +1339,7 @@ async def resolve_anime_playback(
                 )
             )
 
-    # ── Only fall back to MovieBox if HiAnime completely failed ───────────────
+    # ── Only fall back to MovieBox / embed if HiAnime completely failed ───────
     if not groups:
         moviebox_sources = await _resolve_moviebox_sources_by_title(
             registry=registry,
@@ -1371,17 +1355,47 @@ async def resolve_anime_playback(
         )
         if moviebox_sources:
             groups.append({"id": "moviebox", "label": "Movie Box last-resort fallback", "sources": moviebox_sources})
-            if purpose == "play":
-                return _resolution_payload(
-                    correlation_id=correlation_id,
-                    groups=groups,
-                    attempts=attempts,
-                    primary_provider="moviebox",
-                )
 
+<<<<<<< HEAD
     # Embed (VidSrc) fallback intentionally removed for anime — VidSrc does not
     # reliably host anime content and always shows "We're Sorry / file not found".
     # If HiAnime and MovieBox both fail, return whatever groups were collected.
+=======
+        if not groups and tmdb_id:
+            try:
+                embed_sources = await registry.execute(
+                    "embed",
+                    "sources",
+                    correlation_id=correlation_id,
+                    fallback_used=True,
+                    media_type="anime",
+                    tmdb_id=tmdb_id,
+                    season=max(1, fallback_season),
+                    episode=max(1, fallback_episode or episode_number),
+                )
+                if embed_sources:
+                    attempts.append(
+                        _attempt_payload(
+                            provider="embed",
+                            operation="sources",
+                            success=True,
+                            message=f"Prepared {len(embed_sources)} anime embed fallback sources.",
+                            fallback_used=True,
+                        )
+                    )
+                    groups.append({"id": "embed", "label": "Embed last-resort fallback", "sources": embed_sources})
+            except ProviderServiceError as error:
+                attempts.append(
+                    _attempt_payload(
+                        provider="embed",
+                        operation="sources",
+                        success=False,
+                        message=error.message,
+                        fallback_used=True,
+                        retryable=error.retryable,
+                    )
+                )
+>>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
 
     payload = _resolution_payload(
         correlation_id=correlation_id,
