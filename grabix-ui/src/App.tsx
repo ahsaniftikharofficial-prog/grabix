@@ -3,7 +3,7 @@ import { HashLoader } from "react-spinners";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { WatchdogBanner } from "./components/WatchdogBanner";
-import { IconAlert, IconRefresh, IconServers, IconWifi } from "./components/Icons";
+import { IconRefresh, IconServers, IconWifi } from "./components/Icons";
 import { useOfflineDetection } from "./lib/useOfflineDetection";
 import { useWatchdog } from "./lib/useWatchdog";
 import { ThemeProvider } from "./context/ThemeContext";
@@ -16,7 +16,6 @@ import {
   deriveRuntimeState,
   fetchBackendPing,
   invalidateRuntimeRecoveryCaches,
-  openStartupLog,
   fetchRuntimeHealth,
   fetchStartupDiagnostics,
   resetServiceCircuitBreaker,
@@ -28,9 +27,11 @@ import {
   waitForBackendCoreReady,
 } from "./lib/api";
 import { fetchConsumetHealth } from "./lib/consumetProviders";
+import { fetchConsumetAnimeDiscover } from "./lib/consumetProviders";
 import { fetchTrendingManga } from "./lib/mangaProviders";
 import { markPerf, measurePerf } from "./lib/performance";
 import { fetchMovieBoxDiscover } from "./lib/streamProviders";
+import { discoverTmdbMedia } from "./lib/tmdb";
 import "./index.css";
 
 const DownloaderPage = lazy(() => import("./pages/DownloaderPage"));
@@ -732,6 +733,9 @@ function Inner() {
     const timeoutId = window.setTimeout(() => {
       void Promise.allSettled([
         fetch(`${BACKEND_API}/providers/status`).catch(() => null),
+        fetchConsumetAnimeDiscover("trending", 1, "daily").catch(() => null),
+        discoverTmdbMedia("movie", "trending", 1).catch(() => null),
+        discoverTmdbMedia("tv", "trending", 1).catch(() => null),
         fetchMovieBoxDiscover().catch(() => null),
         fetchConsumetHealth().catch(() => null),
         fetchTrendingManga(1).catch(() => null),
@@ -826,6 +830,7 @@ function Inner() {
     runtimeHealth?.summary.startup_ready
   );
   const startupOverlayVisible = runtimeState !== "offline" && !startupGateSatisfied;
+  const networkBannerVisible = offlineState.isOffline && offlineState.reason === "network";
   const rawNetworkRecoveryVisible =
     !startupOverlayVisible &&
     offlineState.isOffline &&
@@ -1106,17 +1111,6 @@ function Inner() {
     });
   };
 
-  const openLogFolder = () => {
-    void runRecoveryAction(
-      "open-startup-log",
-      async () => {
-        const opened = await openStartupLog();
-        return opened ? "Opened GRABIX diagnostics in Explorer." : "Could not open the startup log.";
-      },
-      { refreshAfter: false }
-    );
-  };
-
   const restartAppNow = () => {
     setRecoveryFeedback("");
     setRecoveryError("");
@@ -1135,27 +1129,6 @@ function Inner() {
       label: "Restart GRABIX",
       variant: "secondary",
       onClick: restartAppNow,
-    },
-  ];
-  const backendActions: RecoveryAction[] = [
-    {
-      id: "retry-backend",
-      label: "Retry Now",
-      onClick: retryNow,
-      loading: recoveryActionId === "retry-runtime",
-    },
-    {
-      id: "restart-app-backend",
-      label: "Restart GRABIX",
-      variant: "secondary",
-      onClick: restartAppNow,
-    },
-    {
-      id: "open-log-backend",
-      label: "Open Startup Log",
-      variant: "secondary",
-      onClick: openLogFolder,
-      loading: recoveryActionId === "open-startup-log",
     },
   ];
   const serviceActions: RecoveryAction[] = [
@@ -1214,7 +1187,7 @@ function Inner() {
           display: "flex",
           flexDirection: "column",
           background: "var(--bg-app)",
-          paddingTop: (offlineState.isOffline ? 32 : 0) + (watchdog.isBannerVisible && watchdog.status !== "idle" ? 32 : 0),
+          paddingTop: (networkBannerVisible ? 32 : 0) + (watchdog.isBannerVisible && watchdog.status !== "idle" ? 32 : 0),
           transition: "padding-top 0.2s ease",
         }}
       >
@@ -1229,15 +1202,6 @@ function Inner() {
               icon={<IconWifi size={30} />}
               tone="warning"
               actions={networkActions}
-            />
-          ) : backendRecoveryVisible ? (
-            <RecoveryStage
-              title="GRABIX needs a moment"
-              subtitle="The app is still trying to get everything ready."
-              detail={recoveryError || recoveryFeedback || "Try again in a moment, or restart GRABIX if it stays stuck."}
-              icon={<IconAlert size={30} />}
-              tone="danger"
-              actions={backendActions}
             />
           ) : serviceBlockingVisible && pageServiceIssue ? (
             <ContentSkeletonStage

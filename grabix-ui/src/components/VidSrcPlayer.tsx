@@ -16,7 +16,20 @@ import {
 } from "./Icons";
 import SubtitlePanel from "./SubtitlePanel";
 import { BACKEND_API } from "../lib/api";
-import { fetchStreamVariants, inferStreamKind } from "../lib/streamProviders";
+import {
+  buildStreamProxyUrl,
+  canPrepareInternalSource,
+  extractDirectStreamUrl,
+  fetchStreamVariants,
+  getPreparedStreamSource,
+  inferStreamKind,
+  prewarmPlaybackSource,
+  prewarmPlaybackSources,
+  readPlaybackCache,
+  resolveEmbedUrl,
+  shouldKeepHlsProxied,
+  writePlaybackCache,
+} from "../lib/streamProviders";
 import type { StreamSource } from "../lib/streamProviders";
 import { queueVideoDownload } from "../lib/downloads";
 
@@ -63,16 +76,6 @@ interface SubtitleCue {
   end: number;
   text: string;
 }
-
-interface PlaybackCacheRecord<T> {
-  expiresAt: number;
-  value: T;
-}
-
-const PLAYBACK_CACHE_PREFIX = "grabix:playback:";
-const EMBED_CACHE_TTL_MS = 1000 * 60 * 30;
-const EXTRACT_CACHE_TTL_MS = 1000 * 60 * 20;
-const VARIANT_CACHE_TTL_MS = 1000 * 60 * 10;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -181,79 +184,7 @@ function pickBestVariant(
   })[0];
 }
 
-function readPlaybackCache<T>(key: string): T | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.sessionStorage.getItem(`${PLAYBACK_CACHE_PREFIX}${key}`);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as PlaybackCacheRecord<T>;
-    if (!parsed?.expiresAt || Date.now() >= parsed.expiresAt) {
-      window.sessionStorage.removeItem(`${PLAYBACK_CACHE_PREFIX}${key}`);
-      return null;
-    }
-    return parsed.value ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function writePlaybackCache<T>(key: string, value: T, ttlMs: number) {
-  if (typeof window === "undefined") return;
-  try {
-    const payload: PlaybackCacheRecord<T> = {
-      expiresAt: Date.now() + ttlMs,
-      value,
-    };
-    window.sessionStorage.setItem(`${PLAYBACK_CACHE_PREFIX}${key}`, JSON.stringify(payload));
-  } catch {
-    // Ignore cache write failures.
-  }
-}
-
-function buildStreamProxyUrl(api: string, url: string, headers?: Record<string, string>): string {
-  if (!url) return url;
-  if (url.startsWith(`${api}/stream/proxy?`)) return url;
-  if (url.startsWith("/stream/proxy?")) return `${api}${url}`;
-
-  const params = new URLSearchParams({ url });
-  if (headers && Object.keys(headers).length > 0) {
-    params.set("headers_json", JSON.stringify(headers));
-  }
-  return `${api}/stream/proxy?${params.toString()}`;
-}
-
-function shouldKeepHlsProxied(source: StreamSource): boolean {
-  return (
-    Boolean(source.requestHeaders && Object.keys(source.requestHeaders).length > 0) ||
-    source.url.includes("/stream/proxy?")
-  );
-}
-
-async function resolveEmbedUrl(api: string, url: string): Promise<string> {
-  if (!url) return url;
-  const cacheKey = `embed:${url}`;
-  const cached = readPlaybackCache<string>(cacheKey);
-  if (cached) return cached;
-  try {
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 12000);
-    const response = await fetch(`${api}/resolve-embed?url=${encodeURIComponent(url)}`, {
-      signal: controller.signal,
-    });
-    window.clearTimeout(timeoutId);
-    if (!response.ok) return url;
-    const payload = (await response.json()) as { url?: string };
-    const resolved = payload.url || url;
-    writePlaybackCache(cacheKey, resolved, EMBED_CACHE_TTL_MS);
-    return resolved;
-  } catch {
-    return url;
-  }
-}
-
-function canPrepareInternalSource(source: StreamSource): boolean {
-  return source.kind === "embed" && (source.provider.toLowerCase().includes("moviebox") || Boolean(source.canExtract));
-}
+const VARIANT_CACHE_TTL_MS = 1000 * 60 * 10;
 
 // ---------------------------------------------------------------------------
 // Component
@@ -400,6 +331,30 @@ export default function VidSrcPlayer({
     setActiveSourceOptionId(sourceOptions?.[0]?.id ?? "");
   }, [sourceOptions]);
 
+  useEffect(() => {
+    const cachedPreparedSources: StreamSource[] = [];
+    const seenPreparedKeys = new Set<string>();
+
+    for (const source of baseSources) {
+      if (source.kind !== "embed") continue;
+      const preparedSource = getPreparedStreamSource(source);
+      const preparedKey = preparedSource?.externalUrl || preparedSource?.url;
+      if (!preparedSource || !preparedKey || seenPreparedKeys.has(preparedKey)) continue;
+      seenPreparedKeys.add(preparedKey);
+      cachedPreparedSources.push(preparedSource);
+    }
+
+    extractedSourcesRef.current = cachedPreparedSources;
+    setExtractedSources(cachedPreparedSources);
+
+    if (baseSources.length === 0) {
+      setActiveIndex(0);
+      return;
+    }
+
+    setActiveIndex(0);
+  }, [baseSources]);
+
   // ---------------------------------------------------------------------------
   // Chrome visibility
   // ---------------------------------------------------------------------------
@@ -414,10 +369,6 @@ export default function VidSrcPlayer({
       2600
     );
   };
-
-  useEffect(() => {
-    setActiveIndex(0);
-  }, [baseSources]);
 
   useEffect(() => {
     showControls();
@@ -496,8 +447,12 @@ export default function VidSrcPlayer({
     const message = failureLabel(reason);
 
     if (hasFallback) {
+      const currentPreparedSiblingIndex = findPreparedSiblingIndex(activeIndex);
       const immediateNextIndex = activeIndex + 1;
-      const preparedSiblingIndex = findPreparedSiblingIndex(immediateNextIndex);
+      const preparedSiblingIndex =
+        currentPreparedSiblingIndex >= 0
+          ? currentPreparedSiblingIndex
+          : findPreparedSiblingIndex(immediateNextIndex);
       const nextIndex = preparedSiblingIndex >= 0 ? preparedSiblingIndex : immediateNextIndex;
       const nextSource = allSources[nextIndex];
       setFallbackNotice(
@@ -513,6 +468,19 @@ export default function VidSrcPlayer({
     setStatusText("Failed");
   };
 
+  useEffect(() => {
+    if (!activeSource) return;
+
+    void prewarmPlaybackSource(activeSource);
+  }, [activeSource]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void prewarmPlaybackSources(baseSources, 3);
+    }, 40);
+    return () => window.clearTimeout(timer);
+  }, [baseSources]);
+
   // ---------------------------------------------------------------------------
   // Source setup effect — resets UI on source / reload change
   // ---------------------------------------------------------------------------
@@ -521,7 +489,7 @@ export default function VidSrcPlayer({
     setIsLoading(true);
     setErrorText("");
     setFallbackNotice("");
-    setStatusText(activeSource ? `Loading ${activeSource.provider}` : "No source");
+    setStatusText(activeSource ? "Loading video" : "No source");
     setResolvedEmbedUrl("");
     setEpisodeMenuOpen(false);
     setServerMenuOpen(false);
@@ -534,12 +502,12 @@ export default function VidSrcPlayer({
     if (!activeSource) return;
 
     if (activeSource.kind === "embed") {
-      // Auto-failover after 25 s if the iframe never fired onLoad
+      // Give embedded anime servers time to initialize before we fail over.
       const failoverTimeout = window.setTimeout(() => {
         if (!embedLoadedRef.current) {
           goToNextSource("timeout");
         }
-      }, 8_000);
+      }, 20_000);
 
       return () => {
         window.clearTimeout(failoverTimeout);
@@ -558,7 +526,7 @@ export default function VidSrcPlayer({
 
     let canceled = false;
 
-    resolveEmbedUrl(API, activeSource.url)
+    resolveEmbedUrl(activeSource.url, API)
       .then((nextUrl) => {
         if (canceled) return;
         setResolvedEmbedUrl(nextUrl || activeSource.url);
@@ -597,7 +565,7 @@ export default function VidSrcPlayer({
         const best = pickBestVariant(variants);
         if (!best?.url || best.url === activeSource.url) return;
         const nextUrl = shouldKeepHlsProxied(activeSource)
-          ? buildStreamProxyUrl(API, best.url, activeSource.requestHeaders)
+          ? buildStreamProxyUrl(best.url, activeSource.requestHeaders, API)
           : best.url;
         writePlaybackCache(`variant:${sourceKey}`, nextUrl, VARIANT_CACHE_TTL_MS);
         setResolvedPlaybackUrl(nextUrl);
@@ -650,6 +618,17 @@ export default function VidSrcPlayer({
       setStatusText("Ready");
       setErrorText("");
     };
+    const handleLoadedMetadata = () => {
+      if (!sourceReady) {
+        setStatusText("Starting");
+      }
+    };
+    const handleLoadedData = () => {
+      if (!sourceReady) {
+        setIsLoading(false);
+        setStatusText("Starting");
+      }
+    };
     const handleError = () => {
       sourceReady = true;
       goToNextSource(
@@ -671,6 +650,8 @@ export default function VidSrcPlayer({
     const handleDurationChange = () => setDuration(video.duration || 0);
 
     video.addEventListener("canplay", handleCanPlay);
+    video.addEventListener("loadedmetadata", handleLoadedMetadata);
+    video.addEventListener("loadeddata", handleLoadedData);
     video.addEventListener("error", handleError);
     video.addEventListener("waiting", handleWaiting);
     video.addEventListener("playing", handlePlaying);
@@ -680,7 +661,7 @@ export default function VidSrcPlayer({
 
     if (activeSource.kind === "hls") {
       const defaultUrl = shouldKeepHlsProxied(activeSource)
-        ? buildStreamProxyUrl(API, activeSource.url, activeSource.requestHeaders)
+        ? buildStreamProxyUrl(activeSource.url, activeSource.requestHeaders, API)
         : activeSource.url;
       const playbackUrl = resolvedPlaybackUrl || defaultUrl;
       if (Hls.isSupported()) {
@@ -716,6 +697,8 @@ export default function VidSrcPlayer({
     return () => {
       window.clearTimeout(startupTimeout);
       video.removeEventListener("canplay", handleCanPlay);
+      video.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      video.removeEventListener("loadeddata", handleLoadedData);
       video.removeEventListener("error", handleError);
       video.removeEventListener("waiting", handleWaiting);
       video.removeEventListener("playing", handlePlaying);
@@ -877,6 +860,10 @@ export default function VidSrcPlayer({
   // ---------------------------------------------------------------------------
 
   const handleSourceSwitch = (index: number) => {
+    const nextSource = allSources[index];
+    if (nextSource) {
+      void prewarmPlaybackSource(nextSource);
+    }
     setActiveIndex(index);
     setErrorText("");
     setFallbackNotice("");
@@ -905,6 +892,7 @@ export default function VidSrcPlayer({
         (source) =>
           source.provider === preferredProvider && source.label === preferredLabel
       );
+      void prewarmPlaybackSources(next.sources, 3);
       extractedSourcesRef.current = [];
       setExtractedSources([]);
       setRuntimeSources(next.sources);
@@ -928,6 +916,7 @@ export default function VidSrcPlayer({
     setFallbackNotice("");
     try {
       const next = await onSelectSourceOption(optionId, activeEpisode ?? currentEpisode ?? undefined);
+      void prewarmPlaybackSources(next.sources, 3);
       extractedSourcesRef.current = [];
       setExtractedSources([]);
       setRuntimeSources(next.sources);
@@ -1077,44 +1066,6 @@ export default function VidSrcPlayer({
     setFallbackNotice(`Loaded subtitles: ${label}`);
   };
 
-  const extractDirectStreamUrl = async (
-    targetUrl: string
-  ): Promise<{ url: string; quality?: string; format?: string }> => {
-    const resolvedUrl = await resolveEmbedUrl(API, targetUrl);
-    const cacheKey = `extract:${resolvedUrl}`;
-    const cached = readPlaybackCache<{ url: string; quality?: string; format?: string }>(cacheKey);
-    if (cached?.url) {
-      return cached;
-    }
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 25000);
-    const res = await fetch(`${API}/extract-stream?url=${encodeURIComponent(resolvedUrl)}`, {
-      signal: controller.signal,
-    });
-    window.clearTimeout(timeoutId);
-    if (!res.ok) {
-      throw new Error(`Server returned ${res.status}`);
-    }
-
-    const data = (await res.json()) as {
-      url?: string;
-      quality?: string;
-      format?: string;
-    };
-
-    if (!data.url) {
-      throw new Error("No URL in response");
-    }
-
-    const payload = {
-      url: data.url,
-      quality: data.quality,
-      format: data.format,
-    };
-    writePlaybackCache(cacheKey, payload, EXTRACT_CACHE_TTL_MS);
-    return payload;
-  };
-
   /**
    * Ask the backend to extract a direct stream URL from the current embed.
    * On success: adds a Direct source to the list and switches to it.
@@ -1137,7 +1088,7 @@ export default function VidSrcPlayer({
         url: data.url,
         quality: data.quality ?? "Auto",
         description: "Extracted direct stream — playable and downloadable",
-        externalUrl: data.url,
+        externalUrl: activeSource.externalUrl || activeSource.url,
         canExtract: false,
       };
 
@@ -1177,6 +1128,13 @@ export default function VidSrcPlayer({
     );
     if (existingPreparedIndex >= 0) {
       return baseSources.length + existingPreparedIndex;
+    }
+
+    const cachedPrepared = getPreparedStreamSource(source, options);
+    if (cachedPrepared) {
+      extractedSourcesRef.current = [...extractedSourcesRef.current, cachedPrepared];
+      setExtractedSources([...extractedSourcesRef.current]);
+      return baseSources.length + extractedSourcesRef.current.length - 1;
     }
 
     const data = await extractDirectStreamUrl(sourceKey);
@@ -1298,12 +1256,6 @@ export default function VidSrcPlayer({
     if (!shouldPrepareDirect) return;
 
     const sourceKey = activeSource.externalUrl || activeSource.url;
-    const existingPreparedIndex = extractedSourcesRef.current.findIndex((source) => source.externalUrl === sourceKey);
-    if (existingPreparedIndex >= 0) {
-      setActiveIndex(baseSources.length + existingPreparedIndex);
-      return;
-    }
-
     const alreadyPrepared = extractedSourcesRef.current.some((source) => source.externalUrl === sourceKey);
     if (alreadyPrepared) return;
 
@@ -1331,13 +1283,6 @@ export default function VidSrcPlayer({
 
         extractedSourcesRef.current = [...extractedSourcesRef.current, extracted];
         setExtractedSources([...extractedSourcesRef.current]);
-        const nextIndex = baseSources.length + extractedSourcesRef.current.length - 1;
-        setActiveIndex(nextIndex);
-        setFallbackNotice(
-          providerName.includes("moviebox")
-            ? "Prepared an internal MovieBox stream so playback, subtitles, and downloads work more reliably."
-            : `Prepared an internal ${activeSource.provider} stream so iframe restrictions do not block playback.`
-        );
       } catch {
         // Silent background preparation.
       }
@@ -1493,16 +1438,12 @@ export default function VidSrcPlayer({
             <div className="player-overlay">
               <div className="player-loader" />
               <div className="player-overlay-title">
-                Loading {activeSource.provider}
+                Loading video
               </div>
               <div className="player-overlay-subtitle">
-                {activeSource.kind === "embed"
-                  ? "Preparing the stream."
-                  : activeSource.kind === "hls"
-                    ? "Preparing the HLS stream."
-                    : activeSource.kind === "local"
-                      ? "Opening your local file."
-                      : "Preparing direct playback."}
+                {activeSource.kind === "local"
+                  ? "Opening your file."
+                  : "Getting playback ready."}
               </div>
             </div>
           )}

@@ -38,6 +38,7 @@ import {
 import { createCbzBlob, triggerFileDownload } from "../lib/mangaZip";
 import CachedImage from "../components/CachedImage";
 import { readLocalAppSettings } from "../lib/appSettings";
+import { warmMediaCache } from "../lib/mediaCache";
 
 type ReaderState = { chapterIndex: number; chapter: MangaChapter };
 type ChapterSource = "auto" | "mangadex" | "consumet" | "comick";
@@ -900,6 +901,23 @@ export default function MangaPage() {
     }
     void loadDiscoverFeed(discoverSection, 1);
   }, [activeDiscoverItems.length, activeHomeLoading, activeHomeSectionKey, discoverSection, homeSectionLoaded, homeTab]);
+
+  useEffect(() => {
+    const activeList = !selectedItem && !reader && query.trim()
+      ? filteredSearchResults
+      : !selectedItem && !reader
+        ? activeHomeItems
+        : filteredRecommendations;
+    const urls = activeList
+      .map((item) => item.cover_image || "")
+      .filter(Boolean)
+      .slice(0, 24);
+    if (urls.length === 0) return;
+    const timer = window.setTimeout(() => {
+      void warmMediaCache(urls, 8);
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [activeHomeItems, filteredRecommendations, filteredSearchResults, query, reader, selectedItem]);
 
   useEffect(() => {
     if (!query.trim()) {

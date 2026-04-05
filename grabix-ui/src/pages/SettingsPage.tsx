@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useTheme } from "../context/ThemeContext";
 import { useContentFilter } from "../context/ContentFilterContext";
+import { useAuth } from "../context/AuthContext";
 import {
   BACKEND_API,
   backendFetch,
@@ -44,6 +45,7 @@ function Toggle({ value, onChange }: { value: boolean; onChange: (value: boolean
 export default function SettingsPage() {
   const { theme, toggle } = useTheme();
   const { adultContentBlocked, adultPasswordConfigured, unlockAdultContent, configureAdultContent } = useContentFilter();
+  const { configured: authConfigured, loading: authLoading, user, profile, backendReady, error: authError, signIn, signUp, signOut, refreshProfile } = useAuth();
   const [settings, setSettings] = useState<AppSettings>(() => readLocalAppSettings());
   const [aria2Available, setAria2Available] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -58,6 +60,10 @@ export default function SettingsPage() {
   const [diagnosticsLogs, setDiagnosticsLogs] = useState<DiagnosticsLogsPayload | null>(null);
   const [cacheStats, setCacheStats] = useState<{ items: number; bytes: number }>({ items: 0, bytes: 0 });
   const [cacheClearing, setCacheClearing] = useState(false);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
+  const [authSubmitting, setAuthSubmitting] = useState(false);
 
   useEffect(() => {
     backendJson<Record<string, unknown>>(`${BACKEND_API}/settings`)
@@ -147,6 +153,24 @@ export default function SettingsPage() {
       setAdultError(error instanceof Error ? error.message : "Could not unlock adult content.");
     } finally {
       setAdultSubmitting(false);
+    }
+  };
+
+  const handleCloudAuth = async () => {
+    if (!authEmail.trim() || !authPassword.trim()) {
+      return;
+    }
+    setAuthSubmitting(true);
+    try {
+      if (authMode === "signup") {
+        await signUp(authEmail.trim(), authPassword);
+      } else {
+        await signIn(authEmail.trim(), authPassword);
+      }
+      await refreshProfile();
+      setAuthPassword("");
+    } finally {
+      setAuthSubmitting(false);
     }
   };
 
@@ -387,6 +411,74 @@ export default function SettingsPage() {
             <div style={{ fontSize: 12, color: "var(--text-danger)", paddingTop: 10 }}>
               {adultError}
             </div>
+          )}
+        </div>
+
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>Cloud Account</div>
+        <div className="card card-padded" style={{ marginBottom: 20 }}>
+          {!authConfigured ? (
+            <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
+              Supabase sign-in is not configured yet. Add `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `GRABIX_SUPABASE_URL`, and `GRABIX_SUPABASE_ANON_KEY` to enable cloud accounts.
+            </div>
+          ) : user ? (
+            <>
+              <SettingRow label="Signed in" sub={backendReady ? "Cloud session is active in the app and verified by the backend." : "Cloud session is active in the app. Backend verification is still pending."}>
+                <span style={{ fontSize: 12, color: backendReady ? "var(--text-success)" : "var(--text-muted)", fontWeight: 600 }}>
+                  {profile?.email || user.email || "Connected"}
+                </span>
+              </SettingRow>
+              <SettingRow label="Account status" sub="Use this for future sync, history, and remote API features">
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => void refreshProfile()} disabled={authLoading}>
+                    {authLoading ? "Checking..." : "Refresh"}
+                  </button>
+                  <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => void signOut()}>
+                    Sign out
+                  </button>
+                </div>
+              </SettingRow>
+            </>
+          ) : (
+            <>
+              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                <button className="btn btn-ghost" style={{ fontSize: 12, borderColor: authMode === "signin" ? "var(--accent)" : undefined }} onClick={() => setAuthMode("signin")}>
+                  Sign in
+                </button>
+                <button className="btn btn-ghost" style={{ fontSize: 12, borderColor: authMode === "signup" ? "var(--accent)" : undefined }} onClick={() => setAuthMode("signup")}>
+                  Create account
+                </button>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <input
+                  className="input-base"
+                  placeholder="Email address"
+                  type="email"
+                  value={authEmail}
+                  onChange={(event) => setAuthEmail(event.target.value)}
+                />
+                <input
+                  className="input-base"
+                  placeholder="Password"
+                  type="password"
+                  value={authPassword}
+                  onChange={(event) => setAuthPassword(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !authSubmitting) {
+                      void handleCloudAuth();
+                    }
+                  }}
+                />
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                    {authMode === "signup" ? "Create a cloud account for future sync and protected features." : "Sign in to connect your GRABIX cloud account."}
+                  </div>
+                  <button className="btn btn-primary" style={{ fontSize: 12, height: 34 }} onClick={() => void handleCloudAuth()} disabled={authSubmitting || !authEmail.trim() || !authPassword.trim()}>
+                    {authSubmitting ? "Please wait..." : authMode === "signup" ? "Create account" : "Sign in"}
+                  </button>
+                </div>
+                {authError ? <div style={{ fontSize: 12, color: "var(--text-danger)" }}>{authError}</div> : null}
+              </div>
+            </>
           )}
         </div>
 

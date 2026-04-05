@@ -14,6 +14,10 @@ export interface OfflineState {
   since: string | null;
 }
 
+const BACKEND_PING_TIMEOUT_MS = 3500;
+const BACKEND_FAILURE_THRESHOLD = 4;
+const BACKEND_PROBE_INTERVAL_MS = 15000;
+
 /**
  * Returns real-time online/offline state for GRABIX.
  *
@@ -29,6 +33,8 @@ export function useOfflineDetection(backendPingUrl: string): OfflineState {
   }));
 
   const sinceRef = useRef<string | null>(state.since);
+  const backendFailureCountRef = useRef(0);
+  const hasEverConnectedRef = useRef(false);
 
   const markOffline = (reason: OfflineReason) => {
     const since = sinceRef.current ?? new Date().toISOString();
@@ -37,6 +43,8 @@ export function useOfflineDetection(backendPingUrl: string): OfflineState {
   };
 
   const markOnline = () => {
+    backendFailureCountRef.current = 0;
+    hasEverConnectedRef.current = true;
     sinceRef.current = null;
     setState({ isOffline: false, reason: null, since: null });
   };
@@ -47,7 +55,10 @@ export function useOfflineDetection(backendPingUrl: string): OfflineState {
       // Browser says we're back — do a quick backend probe before clearing
       void probBackend();
     };
-    const handleOffline = () => markOffline("network");
+    const handleOffline = () => {
+      backendFailureCountRef.current = 0;
+      markOffline("network");
+    };
 
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
@@ -61,27 +72,40 @@ export function useOfflineDetection(backendPingUrl: string): OfflineState {
       try {
         const res = await fetch(`${backendPingUrl}/health/ping`, {
           method: "GET",
-          signal: AbortSignal.timeout(3000),
+          signal: AbortSignal.timeout(BACKEND_PING_TIMEOUT_MS),
           cache: "no-store",
         });
         if (res.ok) {
           markOnline();
         } else {
-          markOffline("backend");
+          if (!hasEverConnectedRef.current) {
+            return;
+          }
+          backendFailureCountRef.current += 1;
+          if (backendFailureCountRef.current >= BACKEND_FAILURE_THRESHOLD) {
+            markOffline("backend");
+          }
         }
       } catch {
         // fetch threw — either network or backend down
         if (!navigator.onLine) {
+          backendFailureCountRef.current = 0;
           markOffline("network");
         } else {
-          markOffline("backend");
+          if (!hasEverConnectedRef.current) {
+            return;
+          }
+          backendFailureCountRef.current += 1;
+          if (backendFailureCountRef.current >= BACKEND_FAILURE_THRESHOLD) {
+            markOffline("backend");
+          }
         }
       }
     };
 
     // Probe immediately, then every 15 seconds
     void probBackend();
-    const probeInterval = window.setInterval(() => void probBackend(), 15_000);
+    const probeInterval = window.setInterval(() => void probBackend(), BACKEND_PROBE_INTERVAL_MS);
 
     return () => {
       window.removeEventListener("online", handleOnline);

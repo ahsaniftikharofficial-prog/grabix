@@ -110,6 +110,7 @@ export interface CircuitBreakerResetPayload {
 }
 
 let backendRequestContextPromise: Promise<BackendRequestContext> | null = null;
+let cloudAccessTokenResolver: (() => Promise<string | null> | string | null) | null = null;
 
 function normalizeHeaders(input?: HeadersInit): Headers {
   return new Headers(input || {});
@@ -130,6 +131,12 @@ async function getBackendRequestContext(): Promise<BackendRequestContext> {
 async function buildBackendRequestInit(init?: RequestInit, sensitive = false): Promise<RequestInit> {
   const nextInit: RequestInit = { ...(init || {}) };
   const headers = normalizeHeaders(init?.headers);
+  if (!headers.has("Authorization") && cloudAccessTokenResolver) {
+    const resolvedToken = await cloudAccessTokenResolver();
+    if (resolvedToken) {
+      headers.set("Authorization", `Bearer ${resolvedToken}`);
+    }
+  }
   if (sensitive) {
     const context = await getBackendRequestContext();
     if (context.desktop_auth_token) {
@@ -138,6 +145,12 @@ async function buildBackendRequestInit(init?: RequestInit, sensitive = false): P
   }
   nextInit.headers = headers;
   return nextInit;
+}
+
+export function setCloudAccessTokenResolver(
+  resolver: (() => Promise<string | null> | string | null) | null
+) {
+  cloudAccessTokenResolver = resolver;
 }
 
 export function extractBackendErrorMessage(payload: unknown, fallback: string): string {

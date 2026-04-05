@@ -39,6 +39,8 @@ export function useWatchdog(): WatchdogState {
   const consecutiveFails  = useRef(0);
   const reconnectStart    = useRef<number | null>(null);
   const lingerTimer       = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollDelayTimer    = useRef<number | null>(null);
+  const pollInterval      = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -95,17 +97,15 @@ export function useWatchdog(): WatchdogState {
       }
     };
 
-    const startTimer = window.setTimeout(() => {
+    pollDelayTimer.current = window.setTimeout(() => {
       void probe();
-      const interval = window.setInterval(() => void probe(), POLL_MS);
-      (startTimer as unknown as { _iv: ReturnType<typeof setInterval> })._iv = interval;
+      pollInterval.current = window.setInterval(() => void probe(), POLL_MS);
     }, INITIAL_POLL_DELAY_MS);
 
     return () => {
       cancelled = true;
-      clearTimeout(startTimer);
-      const iv = (startTimer as unknown as { _iv?: ReturnType<typeof setInterval> })._iv;
-      if (iv !== undefined) clearInterval(iv);
+      if (pollDelayTimer.current !== null) clearTimeout(pollDelayTimer.current);
+      if (pollInterval.current !== null) clearInterval(pollInterval.current);
       if (lingerTimer.current) clearTimeout(lingerTimer.current);
     };
   }, []);

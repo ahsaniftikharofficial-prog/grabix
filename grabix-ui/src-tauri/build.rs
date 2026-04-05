@@ -36,6 +36,7 @@ fn ensure_resource_staging_placeholders() {
     for relative in [
         ["backend-staging", "backend", ".placeholder"].as_slice(),
         ["consumet-staging", ".placeholder"].as_slice(),
+        ["runtime-tools", ".placeholder"].as_slice(),
         ["generated", ".placeholder"].as_slice(),
     ] {
         let target = relative

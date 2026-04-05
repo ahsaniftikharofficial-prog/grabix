@@ -43,6 +43,7 @@ const DESKTOP_AUTH_FILE_NAME: &str = "desktop-auth.json";
 const RUNTIME_CONFIG_FILE_NAME: &str = "runtime-config.json";
 const BACKEND_STATE_DIR_NAME: &str = "backend-state";
 const GENERATED_RUNTIME_CONFIG_SUBPATH: &str = "generated/runtime-config.json";
+const BUNDLED_RUNTIME_TOOLS_DIR_ENV: &str = "GRABIX_BUNDLED_RUNTIME_TOOLS_DIR";
 
 // ── Startup state (read by React via get_startup_diagnostics) ─────────────────
 
@@ -512,6 +513,28 @@ fn find_packaged_runtime_config(app: &AppHandle) -> Option<PathBuf> {
         }
     }
     candidates.into_iter().find(|path| path.exists())
+}
+
+fn find_bundled_runtime_tools_dir(app: &AppHandle) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("runtime-tools"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("resources").join("runtime-tools"));
+            candidates.push(exe_dir.join("runtime-tools"));
+        }
+    }
+    candidates.into_iter().find(|path| path.exists())
+}
+
+fn apply_bundled_runtime_tools_env(app: &AppHandle) {
+    if let Some(path) = find_bundled_runtime_tools_dir(app) {
+        std::env::set_var(BUNDLED_RUNTIME_TOOLS_DIR_ENV, path.display().to_string());
+    } else {
+        std::env::remove_var(BUNDLED_RUNTIME_TOOLS_DIR_ENV);
+    }
 }
 
 fn sync_packaged_runtime_config(app: &AppHandle) -> Result<Option<PathBuf>, String> {
@@ -1164,6 +1187,7 @@ pub fn run() {
             let desktop_auth = load_or_create_desktop_auth(app.handle())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             let runtime_config_sync = sync_packaged_runtime_config(app.handle());
+            apply_bundled_runtime_tools_env(app.handle());
             apply_backend_runtime_env(&desktop_auth);
             if let Ok(mut state) = app.state::<DesktopAuthState>().context.lock() {
                 *state = desktop_auth.clone();

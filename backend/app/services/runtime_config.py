@@ -22,6 +22,8 @@ DESKTOP_AUTH_OBSERVE_ONLY_ENV = "GRABIX_DESKTOP_AUTH_OBSERVE_ONLY"
 BACKEND_PORT_ENV = "GRABIX_BACKEND_PORT"
 BACKEND_PUBLIC_BASE_ENV = "GRABIX_PUBLIC_BASE_URL"
 ALLOWED_ORIGINS_ENV = "GRABIX_ALLOWED_ORIGINS"
+SUPABASE_URL_ENV = "GRABIX_SUPABASE_URL"
+SUPABASE_ANON_KEY_ENV = "GRABIX_SUPABASE_ANON_KEY"
 
 _storage_lock = threading.Lock()
 _storage_layout: dict[str, Any] | None = None
@@ -262,5 +264,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "tmdb_config_source": tmdb_config_source(),
         "desktop_auth_required": is_desktop_auth_required(),
         "desktop_auth_ready": bool(desktop_auth_token()),
+        "supabase_url_ready": bool(str(os.getenv(SUPABASE_URL_ENV, "")).strip()),
+        "supabase_anon_key_ready": bool(str(os.getenv(SUPABASE_ANON_KEY_ENV, "")).strip()),
         "migration": layout["migration"],
     }

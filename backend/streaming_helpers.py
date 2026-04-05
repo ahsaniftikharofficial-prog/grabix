@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -123,12 +124,26 @@ def _looks_like_playable_media_url(url: str) -> bool:
     )
 
 
+def _hidden_subprocess_kwargs() -> dict[str, object]:
+    if os.name != "nt":
+        return {}
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+    startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "startupinfo": startupinfo,
+    }
+
+
 def _extract_stream_url(url: str) -> tuple[str, str]:
     result = subprocess.run(
         ["yt-dlp", "--get-url", "--no-playlist", url],
         capture_output=True,
         text=True,
         timeout=30,
+        **_hidden_subprocess_kwargs(),
     )
     output_lines = result.stdout.strip().splitlines()
     direct_url = output_lines[0].strip() if output_lines else ""

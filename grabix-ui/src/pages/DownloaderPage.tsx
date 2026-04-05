@@ -391,7 +391,7 @@ export default function DownloaderPage() {
 
     try {
       const trimEnabled = trimOpen && trimEnd - trimStart < info!.duration;
-      const res = await backendFetch(`${API}/download?url=${encodeURIComponent(url)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`, undefined, { sensitive: true });
+      const res = await backendFetch(`${API}/download?url=${encodeURIComponent(url)}&title=${encodeURIComponent(info.title || "")}&thumbnail=${encodeURIComponent(info.thumbnail || "")}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`, undefined, { sensitive: true });
       if (!res.ok) {
         throw new Error(`Download request failed with ${res.status}`);
       }
@@ -402,7 +402,7 @@ export default function DownloaderPage() {
 
       const interval = setInterval(async () => {
         try {
-          const pr = await fetch(`${API}/download-status/${serverTaskId}`);
+          const pr = await backendFetch(`${API}/download-status/${serverTaskId}`, undefined, { sensitive: true });
           const pd = await pr.json();
           setQueue(prev => prev.map(q => (q.serverId || q.id) === serverTaskId
             ? {
@@ -430,20 +430,34 @@ export default function DownloaderPage() {
             clearInterval(interval);
             pollingRef.current.delete(serverTaskId);
           }
-        } catch { clearInterval(interval); }
+        } catch (error) {
+          clearInterval(interval);
+          pollingRef.current.delete(serverTaskId);
+          setQueue(prev => prev.map(q => (q.serverId || q.id) === serverTaskId
+            ? {
+                ...q,
+                status: "failed",
+                error: error instanceof Error ? error.message : "Could not read live download status.",
+                recoverable: true,
+              }
+            : q
+          ));
+        }
       }, 1000);
       pollingRef.current.set(serverTaskId, interval);
 
-    } catch {
-      let pct = 0;
-      const sim = setInterval(() => {
-        pct = Math.min(100, pct + Math.random() * 8);
-        setQueue(prev => prev.map(q => q.id === taskId
-          ? { ...q, status: pct >= 100 ? "done" : "downloading", percent: Math.round(pct) }
-          : q
-        ));
-        if (pct >= 100) clearInterval(sim);
-      }, 400);
+    } catch (error) {
+      setQueue(prev => prev.map(q => q.id === taskId
+        ? {
+            ...q,
+            status: "failed",
+            error: error instanceof Error ? error.message : "Download could not be started.",
+            recoverable: true,
+          }
+        : q
+      ));
+      setErrMsg(error instanceof Error ? error.message : "Download could not be started.");
+      setStatus("error");
     }
   };
 
@@ -474,7 +488,7 @@ export default function DownloaderPage() {
       setQueue(prev => [newItem, ...prev]);
       try {
         const trimEnabled = trimOpen && info && trimEnd - trimStart < info.duration;
-        const res = await backendFetch(`${API}/download?url=${encodeURIComponent(bUrl)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`, undefined, { sensitive: true });
+        const res = await backendFetch(`${API}/download?url=${encodeURIComponent(bUrl)}&title=${encodeURIComponent(newItem.title)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`, undefined, { sensitive: true });
         if (!res.ok) {
           throw new Error(`Download request failed with ${res.status}`);
         }
@@ -483,7 +497,7 @@ export default function DownloaderPage() {
       setQueue(prev => prev.map(q => q.id === taskId ? { ...q, id: serverTaskId, serverId: serverTaskId } : q));
         const interval = setInterval(async () => {
           try {
-            const pr = await fetch(`${API}/download-status/${serverTaskId}`);
+            const pr = await backendFetch(`${API}/download-status/${serverTaskId}`, undefined, { sensitive: true });
             const pd = await pr.json();
             setQueue(prev => prev.map(q => (q.serverId || q.id) === serverTaskId
               ? {
@@ -510,19 +524,31 @@ export default function DownloaderPage() {
             if (["done", "failed", "canceled", "error"].includes(pd.status)) {
               clearInterval(interval); pollingRef.current.delete(serverTaskId);
             }
-          } catch { clearInterval(interval); }
+          } catch (error) {
+            clearInterval(interval);
+            pollingRef.current.delete(serverTaskId);
+            setQueue(prev => prev.map(q => (q.serverId || q.id) === serverTaskId
+              ? {
+                  ...q,
+                  status: "failed",
+                  error: error instanceof Error ? error.message : "Could not read live download status.",
+                  recoverable: true,
+                }
+              : q
+            ));
+          }
         }, 1000);
         pollingRef.current.set(serverTaskId, interval);
-      } catch {
-        let pct = 0;
-        const sim = setInterval(() => {
-          pct = Math.min(100, pct + Math.random() * 8);
-          setQueue(prev => prev.map(q => q.id === taskId
-            ? { ...q, status: pct >= 100 ? "done" : "downloading", percent: Math.round(pct) }
-            : q
-          ));
-          if (pct >= 100) clearInterval(sim);
-        }, 400);
+      } catch (error) {
+        setQueue(prev => prev.map(q => q.id === taskId
+          ? {
+              ...q,
+              status: "failed",
+              error: error instanceof Error ? error.message : "Download could not be started.",
+              recoverable: true,
+            }
+          : q
+        ));
       }
     }
     setBatchUrls("");

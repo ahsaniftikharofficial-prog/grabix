@@ -1024,6 +1024,81 @@ def normalize_watch_payload(
     }
 
 
+def merge_watch_payloads(
+    payloads: list[dict[str, Any]],
+    *,
+    provider: str,
+    requested_audio: str,
+    selected_server: str | None = None,
+) -> dict[str, Any]:
+    audio_priority = (
+        ["hi", "en", "original"]
+        if requested_audio == "hi"
+        else ["en", "original", "hi"]
+        if requested_audio == "en"
+        else ["original", "en", "hi"]
+    )
+    merged_sources: list[dict[str, Any]] = []
+    merged_subtitles: list[dict[str, Any]] = []
+    seen_sources: set[tuple[str, str, str]] = set()
+    seen_subtitles: set[str] = set()
+    headers: dict[str, Any] = {}
+    download = ""
+
+    for payload in payloads:
+        payload_headers = payload.get("headers") or {}
+        if not headers and isinstance(payload_headers, dict):
+            headers = dict(payload_headers)
+        if not download and payload.get("download"):
+            download = str(payload.get("download") or "")
+
+        for subtitle in payload.get("subtitles") or []:
+            if not isinstance(subtitle, dict):
+                continue
+            subtitle_url = str(subtitle.get("originalUrl") or subtitle.get("url") or "").strip()
+            if not subtitle_url or subtitle_url in seen_subtitles:
+                continue
+            seen_subtitles.add(subtitle_url)
+            merged_subtitles.append(subtitle)
+
+        for source in payload.get("sources") or []:
+            if not isinstance(source, dict):
+                continue
+            url = str(source.get("externalUrl") or source.get("url") or "").strip()
+            if not url:
+                continue
+            dedup_key = (
+                str(source.get("kind") or "").strip(),
+                url,
+                str(source.get("language") or "").strip().lower(),
+            )
+            if dedup_key in seen_sources:
+                continue
+            seen_sources.add(dedup_key)
+            merged_sources.append(source)
+
+    ordered_sources = sorted(
+        merged_sources,
+        key=lambda item: (
+            _language_rank(item.get("language"), audio_priority),
+            str(item.get("kind") or "") == "embed",
+            str(item.get("quality") or "Auto") != "1080p",
+        ),
+    )
+
+    return {
+        "provider": provider,
+        "requested_audio": requested_audio,
+        "available_audio": list(dict.fromkeys([(item.get("language") or "original") for item in ordered_sources])),
+        "selected_server": selected_server or "",
+        "headers": headers,
+        "download": download,
+        "sources": ordered_sources,
+        "subtitles": _sort_subtitles(merged_subtitles),
+        "raw": {"merged": True, "count": len(payloads)},
+    }
+
+
 async def get_health_status() -> dict[str, Any]:
     configured = _consumet_configured()
     if not configured:
@@ -1421,7 +1496,7 @@ async def fetch_anime_watch(
 
     if provider == "zoro":
         categories = ["dub", "sub"] if requested_audio in {"hi", "en"} else ["sub", "dub"]
-        servers_z = [server] if server else ["hd-1", "hd-2", "streamsb", "streamtape"]
+        servers_z = [server] if server and server != "auto" else ["hd-1", "hd-2", "streamsb", "streamtape"]
         last_error2: HTTPException | None = None
         for category in categories:
             for server_name in servers_z:

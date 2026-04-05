@@ -36,6 +36,7 @@
       "python-runtime/**/*",
       "backend-staging/backend/**/*",
       "consumet-staging/**/*",
+      "runtime-tools/**/*",
       "generated/**/*"
     ],
     "icon": [
