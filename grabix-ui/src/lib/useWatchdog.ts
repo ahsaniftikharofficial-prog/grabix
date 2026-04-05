@@ -38,10 +38,11 @@ export function useWatchdog(): WatchdogState {
   const wasDown           = useRef(false);
   const consecutiveFails  = useRef(0);
   const reconnectStart    = useRef<number | null>(null);
-  const lingerTimer       = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lingerTimer       = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    let intervalId: number | null = null;
 
     const probe = async () => {
       if (cancelled) return;
@@ -64,8 +65,8 @@ export function useWatchdog(): WatchdogState {
           if (!cancelled) {
             setStatus("reconnected");
             setVisible(true);
-            if (lingerTimer.current) clearTimeout(lingerTimer.current);
-            lingerTimer.current = setTimeout(() => {
+            if (lingerTimer.current !== null) window.clearTimeout(lingerTimer.current);
+            lingerTimer.current = window.setTimeout(() => {
               if (!cancelled) { setStatus("idle"); setVisible(false); }
             }, BANNER_LINGER_MS);
           }
@@ -97,16 +98,14 @@ export function useWatchdog(): WatchdogState {
 
     const startTimer = window.setTimeout(() => {
       void probe();
-      const interval = window.setInterval(() => void probe(), POLL_MS);
-      (startTimer as unknown as { _iv: ReturnType<typeof setInterval> })._iv = interval;
+      intervalId = window.setInterval(() => void probe(), POLL_MS);
     }, INITIAL_POLL_DELAY_MS);
 
     return () => {
       cancelled = true;
-      clearTimeout(startTimer);
-      const iv = (startTimer as unknown as { _iv?: ReturnType<typeof setInterval> })._iv;
-      if (iv !== undefined) clearInterval(iv);
-      if (lingerTimer.current) clearTimeout(lingerTimer.current);
+      window.clearTimeout(startTimer);
+      if (intervalId !== null) window.clearInterval(intervalId);
+      if (lingerTimer.current !== null) window.clearTimeout(lingerTimer.current);
     };
   }, []);
 

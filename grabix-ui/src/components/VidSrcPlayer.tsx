@@ -534,26 +534,17 @@ export default function VidSrcPlayer({
     if (!activeSource) return;
 
     if (activeSource.kind === "embed") {
-<<<<<<< HEAD
       // After 45s, warn the user but keep the embed alive.
       // Do NOT failover: embed onLoad may never fire in Tauri for cross-origin
       // iframes, and auto-failover exhausts all sources → "Playback failed".
       // The user can switch sources manually via the server picker if needed.
       const noticeTimeout = window.setTimeout(() => {
-=======
-      // Auto-failover after 25 s if the iframe never fired onLoad
-      const failoverTimeout = window.setTimeout(() => {
->>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
         if (!embedLoadedRef.current) {
           embedLoadedRef.current = true; // prevent further timeouts on re-render
           setFallbackNotice("Stream is taking a while — still connecting. Use the server picker to switch if needed.");
           setIsLoading(false);
         }
-<<<<<<< HEAD
       }, 45_000);
-=======
-      }, 8_000);
->>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
 
       return () => {
         window.clearTimeout(noticeTimeout);

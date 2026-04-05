@@ -26,11 +26,6 @@ import {
   IconStar,
   IconX,
 } from "../components/Icons";
-<<<<<<< HEAD
-=======
-import { readLocalAppSettings } from "../lib/appSettings";
-import CachedImage from "../components/CachedImage";
->>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
 
 type Filter = "all" | "movie" | "series" | "anime" | "hindi";
 

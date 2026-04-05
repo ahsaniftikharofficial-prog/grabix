@@ -21,13 +21,10 @@ import {
   type ConsumetHealth,
   type ConsumetMediaSummary,
 } from "../lib/consumetProviders";
+import { BACKEND_API } from "../lib/api";
 import { fetchTmdbSeasonMap as fetchTmdbSeasonMapFromBackend, searchTmdbMedia } from "../lib/tmdb";
 import { fetchMovieBoxSources, resolveAnimePlaybackSources, searchMovieBox, type StreamSource } from "../lib/streamProviders";
-<<<<<<< HEAD
-=======
 import CachedImage from "../components/CachedImage";
-import { readLocalAppSettings } from "../lib/appSettings";
->>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
 
 const JIKAN = "https://api.jikan.moe/v4";
 
@@ -70,11 +67,6 @@ interface AnimeCardItem extends ConsumetMediaSummary {
   trailer_url?: string;
 }
 
-<<<<<<< HEAD
-function toCardItem(item: ConsumetMediaSummary): AnimeCardItem {
-  return {
-    ...item,
-=======
 function normalizeAnimeImageUrl(value?: string | null): string {
   const url = (value || "").trim();
   if (!url) return "";
@@ -95,7 +87,6 @@ function toCardItem(item: ConsumetMediaSummary): AnimeCardItem {
   return {
     ...item,
     image: normalizeAnimeImageUrl(item.image),
->>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
     episodes_count: item.episodes_count,
   };
 }
@@ -107,11 +98,7 @@ function mapLegacyAnime(item: LegacyAnime): AnimeCardItem {
     type: "anime",
     title: item.title_english ?? item.title,
     alt_title: item.title,
-<<<<<<< HEAD
-    image: item.images.jpg.large_image_url ?? item.images.jpg.image_url,
-=======
     image: normalizeAnimeImageUrl(item.images.jpg.large_image_url ?? item.images.jpg.image_url),
->>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
     description: item.synopsis,
     year: item.year,
     rating: item.score ?? null,
@@ -409,8 +396,6 @@ export default function AnimePage() {
   }, [tab, query, trendingPeriod]);
 
   useEffect(() => {
-<<<<<<< HEAD
-=======
     if (query) return;
     const warmTabs = (["trending", "popular", "toprated", "seasonal", "movie"] as const).filter((value) => value !== tab);
     const timer = window.setTimeout(() => {
@@ -418,9 +403,7 @@ export default function AnimePage() {
     }, 900);
     return () => window.clearTimeout(timer);
   }, [query, tab, trendingPeriod]);
-
   useEffect(() => {
->>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
     const node = bottomRef.current;
     const root = scrollRef.current;
     if (!node || !root) return;
@@ -577,11 +560,7 @@ function AnimeCard({ anime, activeTab, featured, rank, onClick }: { anime: Anime
   return (
     <div className="card" style={{ overflow: "hidden", cursor: "pointer", transition: "transform 0.15s", minHeight: featured ? 360 : undefined }} onClick={onClick} onMouseEnter={(e) => (e.currentTarget.style.transform = "translateY(-3px)")} onMouseLeave={(e) => (e.currentTarget.style.transform = "translateY(0)")}>
       <div style={{ position: "relative" }}>
-<<<<<<< HEAD
-        <img src={anime.image || "https://via.placeholder.com/150x210?text=No+Image"} alt={anime.title} style={{ width: "100%", height: featured ? 265 : 210, objectFit: "cover" }} onError={(e) => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/150x210?text=No+Image"; }} />
-=======
-        <CachedImage src={anime.image || ""} fallbackSrc="https://via.placeholder.com/150x210?text=No+Image" alt={anime.title} referrerPolicy="no-referrer" style={{ width: "100%", height: posterHeight, objectFit: "cover" }} />
->>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
+        <CachedImage src={anime.image || ""} fallbackSrc="https://via.placeholder.com/150x210?text=No+Image" alt={anime.title} referrerPolicy="no-referrer" style={{ width: "100%", height: featured ? 265 : 210, objectFit: "cover" }} />
         {featured && rank ? <div style={{ position: "absolute", bottom: 8, left: 8, background: "rgba(0,0,0,0.78)", color: "white", fontSize: 12, padding: "4px 10px", borderRadius: 999, fontWeight: 700 }}>#{rank}</div> : null}
         {anime.rating ? <div style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.75)", color: "#fdd663", fontSize: 11, padding: "2px 7px", borderRadius: 6, display: "flex", alignItems: "center", gap: 3, fontWeight: 600 }}><IconStar size={10} color="#fdd663" /> {anime.rating.toFixed(1)}</div> : null}
         <button
@@ -646,13 +625,8 @@ function AnimeDetail({
   const [episode, setEpisode] = useState(1);
   const [dubEpisodeCount, setDubEpisodeCount] = useState<number | null>(null);
   const hasDub = dubEpisodeCount === null ? false : (dubEpisodeCount === 0 ? false : episode <= dubEpisodeCount);
-<<<<<<< HEAD
   const [audio, setAudio] = useState<AudioPreference>("original");
   const [server, setServer] = useState<AnimeServerOption>("auto");
-=======
-  const [audio, setAudio] = useState<AudioPreference>(normalizeAudioPreference(appSettings.anime_default_audio));
-  const [server, setServer] = useState<AnimeServerOption>(appSettings.anime_default_server);
->>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
   useEffect(() => {
     if (!hasDub && audio === "en") setAudio("original");
   }, [hasDub]);
@@ -1073,6 +1047,45 @@ function AnimeDetail({
   const resolveHindiMovieBoxSources = async (targetEpisode = episode): Promise<StreamSource[]> =>
     resolveMovieBoxAnimeSources(targetEpisode, { preferHindi: true });
 
+  const isHiAnimePrimarySource = (source: StreamSource): boolean => {
+    const provider = `${source.provider || ""} ${source.description || ""}`.toLowerCase();
+    return provider.includes("consumet") || provider.includes("hianime") || provider.includes("zoro");
+  };
+
+  const mergeAnimeFallbackSources = async (
+    primarySources: StreamSource[],
+    targetEpisode = episode
+  ): Promise<StreamSource[]> => {
+    const normalizedAudio = normalizeAudioPreference(audio);
+    if (normalizedAudio === "hi") {
+      return primarySources;
+    }
+
+    const movieBoxSources = await resolveMovieBoxAnimeSources(targetEpisode);
+    if (movieBoxSources.length === 0) {
+      return primarySources;
+    }
+
+    if (primarySources.length === 0) {
+      return movieBoxSources;
+    }
+
+    const primaryLooksFragile = primarySources.every(isHiAnimePrimarySource);
+    if (!primaryLooksFragile) {
+      return primarySources;
+    }
+
+    const merged: StreamSource[] = [];
+    const seen = new Set<string>();
+    for (const source of [...movieBoxSources, ...primarySources]) {
+      const key = `${source.provider}|${source.url}|${source.language || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(source);
+    }
+    return merged;
+  };
+
   const resolvePlayableSources = async (targetEpisode = episode): Promise<StreamSource[]> => {
     const normalizedAudio = normalizeAudioPreference(audio);
     const tmdbEpisode = await resolveTmdbEpisodeNumber(tmdbId, targetEpisode);
@@ -1181,9 +1194,19 @@ function AnimeDetail({
   }, [audio, server, episode, totalEpisodes, resolvedAnime, candidateAnimes]);
 
   const buildPlayerPayload = async (targetEpisode = episode) => {
-    const sources = await resolvePlayableSources(targetEpisode);
+    const sources = await mergeAnimeFallbackSources(await resolvePlayableSources(targetEpisode), targetEpisode);
     const normalizedAudio = normalizeAudioPreference(audio);
     if (sources.length === 0) {
+      if (normalizedAudio !== "hi") {
+        const fallbackSources = await resolveMovieBoxAnimeSources(targetEpisode);
+        if (fallbackSources.length > 0) {
+          return {
+            sources: fallbackSources,
+            subtitle: buildSubtitleText(targetEpisode),
+            subtitleSearchTitle: buildSubtitleSearchTitle(targetEpisode),
+          };
+        }
+      }
       throw new Error(
         normalizedAudio === "hi"
           ? "No Hindi sources were found for this title."
@@ -1378,11 +1401,7 @@ function AnimeDetail({
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
       <div style={{ background: "var(--bg-surface)", borderRadius: 16, width: "100%", maxWidth: 720, maxHeight: "90vh", overflow: "hidden", display: "flex", flexDirection: "column", boxShadow: "var(--shadow-lg)", border: "1px solid var(--border)" }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", gap: 16, padding: "20px 20px 0" }}>
-<<<<<<< HEAD
-          <img src={anime.image || "https://via.placeholder.com/100x145"} alt={title} style={{ width: 100, height: 145, objectFit: "cover", borderRadius: 10, flexShrink: 0, border: "1px solid var(--border)" }} onError={(e) => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/100x145"; }} />
-=======
           <img src={anime.image || "https://via.placeholder.com/100x145"} alt={title} referrerPolicy="no-referrer" style={{ width: 100, height: 145, objectFit: "cover", borderRadius: 10, flexShrink: 0, border: "1px solid var(--border)" }} onError={(e) => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/100x145"; }} />
->>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6, lineHeight: 1.3 }}>{title}</div>
             <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 8 }}>

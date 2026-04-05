@@ -1356,46 +1356,9 @@ async def resolve_anime_playback(
         if moviebox_sources:
             groups.append({"id": "moviebox", "label": "Movie Box last-resort fallback", "sources": moviebox_sources})
 
-<<<<<<< HEAD
     # Embed (VidSrc) fallback intentionally removed for anime — VidSrc does not
     # reliably host anime content and always shows "We're Sorry / file not found".
     # If HiAnime and MovieBox both fail, return whatever groups were collected.
-=======
-        if not groups and tmdb_id:
-            try:
-                embed_sources = await registry.execute(
-                    "embed",
-                    "sources",
-                    correlation_id=correlation_id,
-                    fallback_used=True,
-                    media_type="anime",
-                    tmdb_id=tmdb_id,
-                    season=max(1, fallback_season),
-                    episode=max(1, fallback_episode or episode_number),
-                )
-                if embed_sources:
-                    attempts.append(
-                        _attempt_payload(
-                            provider="embed",
-                            operation="sources",
-                            success=True,
-                            message=f"Prepared {len(embed_sources)} anime embed fallback sources.",
-                            fallback_used=True,
-                        )
-                    )
-                    groups.append({"id": "embed", "label": "Embed last-resort fallback", "sources": embed_sources})
-            except ProviderServiceError as error:
-                attempts.append(
-                    _attempt_payload(
-                        provider="embed",
-                        operation="sources",
-                        success=False,
-                        message=error.message,
-                        fallback_used=True,
-                        retryable=error.retryable,
-                    )
-                )
->>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
 
     payload = _resolution_payload(
         correlation_id=correlation_id,

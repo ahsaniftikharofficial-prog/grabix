@@ -10,12 +10,7 @@ import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
 import { filterAdultContent } from "../lib/contentFilter";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
 import { TMDB_BACKDROP_BASE as IMG_LG, TMDB_IMAGE_BASE as IMG_BASE, discoverTmdbMedia, fetchTmdbDetails, fetchTmdbTvSeason, searchTmdbMedia } from "../lib/tmdb";
-import { fetchMovieBoxSources, getTvSources, resolveTvPlaybackSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
-<<<<<<< HEAD
-=======
-import CachedImage from "../components/CachedImage";
-import { readLocalAppSettings } from "../lib/appSettings";
->>>>>>> parent of ee60160 (Add Supabase auth and bundled runtime-tools)
+import { fetchMovieBoxDiscover, fetchMovieBoxSources, getTvSources, resolveTvPlaybackSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
 
 interface Show {
   id: number;
@@ -23,6 +18,8 @@ interface Show {
   overview: string;
   poster_path: string;
   backdrop_path?: string;
+  poster_url?: string;
+  moviebox_subject_id?: string;
   vote_average: number;
   first_air_date: string;
   genres?: { id: number; name: string }[];
@@ -34,6 +31,47 @@ interface Show {
 }
 
 type Tab = "trending" | "popular" | "toprated" | "onair";
+
+function makeFallbackShowId(subjectId: string): number {
+  let hash = 0;
+  for (const char of subjectId) {
+    hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
+  }
+  return -(Math.abs(hash) || 1);
+}
+
+function mapMovieBoxSeriesToShow(item: MovieBoxItem): Show {
+  const seasons = (item.available_seasons ?? []).map((seasonNumber) => ({
+    season_number: seasonNumber,
+    episode_count: item.season_episode_counts?.[seasonNumber] ?? 0,
+    name: `Season ${seasonNumber}`,
+  }));
+  const totalEpisodes = seasons.reduce((sum, season) => sum + Math.max(season.episode_count ?? 0, 0), 0);
+  return {
+    id: makeFallbackShowId(item.id),
+    name: item.title,
+    overview: item.description || "",
+    poster_path: "",
+    poster_url: item.poster_proxy || item.poster || "",
+    moviebox_subject_id: item.id,
+    vote_average: item.imdb_rating ?? 0,
+    first_air_date: item.year ? `${item.year}-01-01` : "",
+    genres: (item.genres ?? []).map((genre, index) => ({ id: index + 1, name: genre })),
+    number_of_seasons: seasons.length || undefined,
+    number_of_episodes: totalEpisodes || undefined,
+    seasons,
+  };
+}
+
+function getShowPoster(show: Show): string {
+  if (show.poster_url) return show.poster_url;
+  if (show.poster_path) return `${IMG_BASE}${show.poster_path}`;
+  return "";
+}
+
+function getShowBackdrop(show: Show): string {
+  return show.backdrop_path ? `${IMG_LG}${show.backdrop_path}` : "";
+}
 
 export default function TVSeriesPage() {
   const { adultContentBlocked } = useContentFilter();
@@ -70,8 +108,20 @@ export default function TVSeriesPage() {
       const nextShows = (data.results ?? []) as Show[];
       setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
     } catch {
-      setShows([]);
-      setPageError("TV series could not be loaded right now.");
+      try {
+        const discover = await fetchMovieBoxDiscover();
+        const nextShows = (discover.sections ?? [])
+          .flatMap((section) => section.items ?? [])
+          .filter((item) => item.moviebox_media_type === "series")
+          .map(mapMovieBoxSeriesToShow);
+        setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
+        if (nextShows.length === 0) {
+          setPageError("TV series could not be loaded right now.");
+        }
+      } catch {
+        setShows([]);
+        setPageError("TV series could not be loaded right now.");
+      }
     } finally {
       setLoading(false);
     }
@@ -85,8 +135,17 @@ export default function TVSeriesPage() {
       const nextShows = (data.results ?? []) as Show[];
       setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
     } catch {
-      setShows([]);
-      setPageError("TV search could not be completed right now.");
+      try {
+        const data = await searchMovieBox({ query: nextQuery, mediaType: "series", perPage: 24, sortBy: "search" });
+        const nextShows = (data.items ?? []).map(mapMovieBoxSeriesToShow);
+        setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
+        if (nextShows.length === 0) {
+          setPageError("TV search could not be completed right now.");
+        }
+      } catch {
+        setShows([]);
+        setPageError("TV search could not be completed right now.");
+      }
     } finally {
       setLoading(false);
     }
@@ -197,10 +256,11 @@ export default function TVSeriesPage() {
 }
 
 function SeriesCard({ show, onClick }: { show: Show; onClick: () => void }) {
+  const poster = getShowPoster(show);
   return (
     <div className="card" style={{ overflow: "hidden", cursor: "pointer", transition: "transform 0.15s" }} onClick={onClick} onMouseEnter={(e) => (e.currentTarget.style.transform = "translateY(-3px)")} onMouseLeave={(e) => (e.currentTarget.style.transform = "translateY(0)")}>
       <div style={{ position: "relative" }}>
-        {show.poster_path ? <img src={`${IMG_BASE}${show.poster_path}`} alt={show.name} style={{ width: "100%", height: 210, objectFit: "cover" }} /> : <div style={{ width: "100%", height: 210, background: "var(--bg-surface2)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>No Poster</div>}
+        {poster ? <img src={poster} alt={show.name} style={{ width: "100%", height: 210, objectFit: "cover" }} /> : <div style={{ width: "100%", height: 210, background: "var(--bg-surface2)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>No Poster</div>}
         {show.vote_average > 0 && <div style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.75)", color: "#fdd663", fontSize: 11, padding: "2px 7px", borderRadius: 6, display: "flex", alignItems: "center", gap: 3, fontWeight: 600 }}><IconStar size={10} color="#fdd663" /> {show.vote_average.toFixed(1)}</div>}
       </div>
       <div style={{ padding: "8px 10px" }}>
@@ -243,10 +303,15 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (kind: "d
   const [downloadOptions, setDownloadOptions] = useState<DownloadQualityOption[]>([]);
   const [downloadLoading, setDownloadLoading] = useState(false);
   const [downloadError, setDownloadError] = useState("");
+  const isMovieBoxFallback = Boolean(show.moviebox_subject_id);
 
   useEffect(() => {
+    if (isMovieBoxFallback) {
+      setFull(null);
+      return;
+    }
     tf("details", show.id).then(setFull).catch(() => {});
-  }, [show.id, tf]);
+  }, [isMovieBoxFallback, show.id, tf]);
   useEffect(() => {
     let cancelled = false;
     fetchConsumetMetaSearch(show.name, "tv")
@@ -270,6 +335,14 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (kind: "d
   useEffect(() => {
     let cancelled = false;
     const seasonOwner = full ?? show;
+    if (isMovieBoxFallback) {
+      const fallback = seasonOwner.seasons?.find((item) => item.season_number === season)?.episode_count ?? 12;
+      setSeasonEpisodes(Math.max(fallback, 1));
+      setEpisode((current) => Math.min(current, Math.max(fallback, 1)));
+      return () => {
+        cancelled = true;
+      };
+    }
     tf("season", show.id, season)
       .then((seasonData) => {
         if (cancelled) return;
@@ -286,11 +359,12 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (kind: "d
     return () => {
       cancelled = true;
     };
-  }, [show, full, season, tf]);
+  }, [isMovieBoxFallback, show, full, season, tf]);
 
   const data = full ?? show;
-  const poster = data.poster_path ? `${IMG_BASE}${data.poster_path}` : "";
-  const fallbackSources = getTvSources({ tmdbId: show.id, imdbId: data.external_ids?.imdb_id }, { season, episode });
+  const poster = getShowPoster(data);
+  const backdrop = getShowBackdrop(data);
+  const fallbackSources = isMovieBoxFallback ? [] : getTvSources({ tmdbId: show.id, imdbId: data.external_ids?.imdb_id }, { season, episode });
   const seriesYear = data.first_air_date ? Number(data.first_air_date.slice(0, 4)) : undefined;
   const availableSeasons = (data.seasons ?? [])
     .map((item) => item.season_number)
@@ -328,6 +402,20 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (kind: "d
   const visibleGlobalEpisodes = Array.from({ length: Math.max(0, globalEnd - globalStart + 1) }, (_, index) => globalStart + index);
 
   const loadMovieBoxSources = async () => {
+    if (show.moviebox_subject_id) {
+      try {
+        const sources = await fetchMovieBoxSources({
+          subjectId: show.moviebox_subject_id,
+          mediaType: "series",
+          year: Number.isFinite(seriesYear) ? seriesYear : undefined,
+          season,
+          episode,
+        });
+        if (sources.length > 0) return sources;
+      } catch {
+        // Fall back to title-based matching below.
+      }
+    }
     const titles = [data.name, ...altTitles];
     for (const title of titles) {
       try {
@@ -424,18 +512,22 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (kind: "d
   }, [downloadDialogOpen, downloadLanguage, data.name, season, episode, seriesYear]);
 
   const handlePlay = async () => {
-    const sources = await resolveTvPlaybackSources({
-      tmdbId: show.id,
-      imdbId: data.external_ids?.imdb_id,
-      title: data.name,
-      altTitles,
-      year: Number.isFinite(seriesYear) ? seriesYear : undefined,
-      season,
-      episode,
-    });
+    const sources = isMovieBoxFallback
+      ? await loadMovieBoxSources()
+      : await resolveTvPlaybackSources({
+          tmdbId: show.id,
+          imdbId: data.external_ids?.imdb_id,
+          title: data.name,
+          altTitles,
+          year: Number.isFinite(seriesYear) ? seriesYear : undefined,
+          season,
+          episode,
+        });
     onPlay({
       title: data.name,
-      subtitle: `TV playback for S${season}E${episode} with Movie Box primary and embed fallbacks`,
+      subtitle: isMovieBoxFallback
+        ? `TV playback for S${season}E${episode} with Movie Box sources`
+        : `TV playback for S${season}E${episode} with Movie Box primary and embed fallbacks`,
       poster: poster || undefined,
       sources: sources.length > 0 ? sources : fallbackSources,
     });
@@ -444,7 +536,7 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (kind: "d
   const handleDownload = async () => {
     const movieBoxSources = await loadMovieBoxSources();
     const movieBoxDirectSource = movieBoxSources[0];
-    const thumbnail = data.poster_path ? `${IMG_BASE}${data.poster_path}` : "";
+    const thumbnail = poster;
     const labelBase = `${data.name} — S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")} — English`;
     if (movieBoxDirectSource) {
       await queueVideoDownload({
@@ -457,7 +549,7 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (kind: "d
       return;
     }
 
-    const fallbackSource = getTvSources({ tmdbId: show.id, imdbId: data.external_ids?.imdb_id }, { season, episode })[0];
+    const fallbackSource = fallbackSources[0];
     if (fallbackSource) {
       await queueVideoDownload({
         url: fallbackSource.url,
@@ -510,16 +602,16 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (kind: "d
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
       <div style={{ background: "var(--bg-surface)", borderRadius: 16, width: "100%", maxWidth: 700, maxHeight: "90vh", overflow: "hidden", display: "flex", flexDirection: "column", boxShadow: "var(--shadow-lg)", border: "1px solid var(--border)" }} onClick={(e) => e.stopPropagation()}>
-        {data.backdrop_path && (
+        {backdrop && (
           <div style={{ position: "relative", flexShrink: 0 }}>
-            <img src={`${IMG_LG}${data.backdrop_path}`} alt="" style={{ width: "100%", height: 180, objectFit: "cover" }} />
+            <img src={backdrop} alt="" style={{ width: "100%", height: 180, objectFit: "cover" }} />
             <div style={{ position: "absolute", inset: 0, background: "linear-gradient(transparent 40%, var(--bg-surface))" }} />
           </div>
         )}
         <div style={{ flex: 1, overflowY: "auto", padding: "0 20px 24px" }}>
-          <div style={{ display: "flex", gap: 16, marginTop: data.backdrop_path ? -50 : 20 }}>
-            {data.poster_path && <img src={`${IMG_BASE}${data.poster_path}`} alt={data.name} style={{ width: 90, height: 135, objectFit: "cover", borderRadius: 10, flexShrink: 0, border: "2px solid var(--border)", position: "relative", zIndex: 1 }} />}
-            <div style={{ flex: 1, paddingTop: data.backdrop_path ? 55 : 0, minWidth: 0 }}>
+          <div style={{ display: "flex", gap: 16, marginTop: backdrop ? -50 : 20 }}>
+            {poster && <img src={poster} alt={data.name} style={{ width: 90, height: 135, objectFit: "cover", borderRadius: 10, flexShrink: 0, border: "2px solid var(--border)", position: "relative", zIndex: 1 }} />}
+            <div style={{ flex: 1, paddingTop: backdrop ? 55 : 0, minWidth: 0 }}>
               <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 6 }}>{data.name}</div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
                 {data.vote_average > 0 && <span style={{ display: "flex", alignItems: "center", gap: 4, background: "var(--bg-surface2)", padding: "3px 9px", borderRadius: 20, fontSize: 12, fontWeight: 600, color: "#fdd663" }}><IconStar size={11} color="#fdd663" /> {data.vote_average.toFixed(1)}</span>}
@@ -530,7 +622,7 @@ function SeriesDetail({ show, tf, onClose, onPlay }: { show: Show; tf: (kind: "d
                 {(data.genres ?? []).slice(0, 4).map((genre) => <span key={genre.id} style={{ background: "var(--bg-active)", color: "var(--text-accent)", padding: "2px 7px", borderRadius: 10, fontSize: 11, fontWeight: 500 }}>{genre.name}</span>)}
               </div>
             </div>
-            <button className="btn-icon" style={{ alignSelf: "flex-start", flexShrink: 0, marginTop: data.backdrop_path ? 55 : 0 }} onClick={onClose}><IconX size={16} /></button>
+            <button className="btn-icon" style={{ alignSelf: "flex-start", flexShrink: 0, marginTop: backdrop ? 55 : 0 }} onClick={onClose}><IconX size={16} /></button>
           </div>
 
           {data.overview && <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7, margin: "14px 0" }}>{data.overview}</div>}
