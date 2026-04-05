@@ -162,17 +162,3 @@ async def get_top_manga(page: int = 1) -> list[dict]:
         items.append(_map_manga(item))
     await set_cached(cache_key, items, "jikan", expires_hours=6)
     return items
-
-
-async def get_popular_manga(page: int = 1) -> list[dict]:
-    cache_key = f"jikan:popular:{page}"
-    cached = await get_cached(cache_key)
-    if cached:
-        return list(cached["data"])
-
-    data = await jikan_request("/top/manga", {"page": page, "limit": 20, "filter": "bypopularity"})
-    items = []
-    for item in data.get("data") or []:
-        items.append(_map_manga(item))
-    await set_cached(cache_key, items, "jikan", expires_hours=6)
-    return items

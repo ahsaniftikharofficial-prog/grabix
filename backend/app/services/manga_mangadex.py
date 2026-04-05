@@ -98,35 +98,6 @@ async def search_manga(title: str) -> list[dict]:
     return items
 
 
-async def discover_manga(section: str = "popular", page: int = 1, limit: int = 12) -> list[dict]:
-    section_key = (section or "popular").strip().lower()
-    cache_key = f"mangadex:discover:{section_key}:{page}:{limit}"
-    cached = await get_cached(cache_key)
-    if cached:
-        return list(cached["data"])
-
-    offset = max(page - 1, 0) * max(limit, 1)
-    params: dict[str, Any] = {
-        "limit": limit,
-        "offset": offset,
-        "includes[]": "cover_art",
-        "contentRating[]": ["safe", "suggestive"],
-        "hasAvailableChapters": "true",
-    }
-
-    if section_key == "recent":
-        params["order[latestUploadedChapter]"] = "desc"
-    elif section_key == "top":
-        params["order[rating]"] = "desc"
-    else:
-        params["order[followedCount]"] = "desc"
-
-    data = await mangadex_request(f"{MANGADEX_BASE}/manga", params)
-    items = [_map_search_item(item) for item in (data.get("data") or [])]
-    await set_cached(cache_key, items, "mangadex", expires_hours=2)
-    return items
-
-
 async def get_manga_details(manga_id: str) -> dict:
     cache_key = f"mangadex:details:{manga_id}"
     cached = await get_cached(cache_key)

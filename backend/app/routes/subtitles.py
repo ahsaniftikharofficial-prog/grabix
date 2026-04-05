@@ -1,7 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query, Response
 
 from app.services.logging_utils import get_logger
-from app.services.request_guard import clean_text, require_choice
 from app.services.subtitles import (
     cache_subtitle_content,
     download_subtitle,
@@ -19,9 +18,6 @@ async def subtitle_search(
     language: str = Query("en", min_length=2),
     type: str = Query("movie", min_length=2),
 ):
-    title = clean_text(title, field="title", max_length=140)
-    language = require_choice(language, field="language", allowed=("en", "ur", "ar", "hi", "fr", "es", "de"))
-    type = require_choice(type, field="type", allowed=("movie", "tv", "series", "show", "anime"))
     return {
         "title": title,
         "language": language.lower(),
@@ -36,9 +32,6 @@ async def subtitle_cached(
     language: str = Query("en", min_length=2),
     type: str = Query("movie", min_length=2),
 ):
-    title = clean_text(title, field="title", max_length=140)
-    language = require_choice(language, field="language", allowed=("en", "ur", "ar", "hi", "fr", "es", "de"))
-    type = require_choice(type, field="type", allowed=("movie", "tv", "series", "show", "anime"))
     cached = await get_cached_subtitle_content(title, language, type)
     if not cached:
         raise HTTPException(status_code=404, detail="No cached subtitle found")
@@ -54,12 +47,6 @@ async def subtitle_download(
     source: str = Query("manual"),
     format: str = Query("srt"),
 ):
-    url = clean_text(url, field="url", max_length=2000)
-    title = clean_text(title, field="title", max_length=140)
-    language = require_choice(language, field="language", allowed=("en", "ur", "ar", "hi", "fr", "es", "de"))
-    type = require_choice(type, field="type", allowed=("movie", "tv", "series", "show", "anime"))
-    source = clean_text(source, field="source", max_length=40)
-    format = require_choice(format, field="format", allowed=("srt", "vtt", "ass", "ssa"))
     try:
         content = await download_subtitle(url)
     except (ValueError, OSError) as exc:

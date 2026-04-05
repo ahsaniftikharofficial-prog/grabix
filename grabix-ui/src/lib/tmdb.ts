@@ -1,5 +1,4 @@
 import { BACKEND_API } from "./api";
-import { readLocalAppSettings } from "./appSettings";
 import { getCachedJson } from "./cache";
 
 export const TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500";
@@ -13,12 +12,11 @@ function buildMetadataUrl(path: string): string {
 }
 
 async function fetchCachedMetadata<T>(key: string, path: string, ttlMs = 180_000): Promise<T> {
-  const settings = readLocalAppSettings();
   return await getCachedJson<T>({
     key,
     url: buildMetadataUrl(path),
     ttlMs,
-    scope: settings.metadata_cache_mode === "persistent" ? "local" : "session",
+    scope: "session",
   });
 }
 

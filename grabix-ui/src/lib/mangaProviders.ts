@@ -22,8 +22,6 @@ export const MANGA_ENDPOINTS = {
   recommendations: (id: string | number) => `${BACKEND_BASE}/manga/recommendations/${id}`,
   seasonal: (year: number, season: string) =>
     `${BACKEND_BASE}/manga/seasonal?year=${year}&season=${season}`,
-  discover: (section = "popular", page = 1, limit = 12) =>
-    `${BACKEND_BASE}/manga/discover?section=${encodeURIComponent(section)}&page=${page}&limit=${limit}`,
   frontpage: (section = "trending", page = 1, limit = 12, days = 7) =>
     `${BACKEND_BASE}/manga/frontpage?section=${encodeURIComponent(section)}&page=${page}&limit=${limit}&days=${days}`,
   comickChapters: (title: string) =>
@@ -131,8 +129,7 @@ export async function fetchTrendingManga(page = 1): Promise<MangaDiscoveryItem[]
   const data = await getCachedMangaJson<{ items: MangaDiscoveryItem[] }>(
     `manga:trending:${page}`,
     MANGA_ENDPOINTS.trending(page),
-    300_000,
-    "local"
+    300_000
   );
   return data.items ?? [];
 }
@@ -141,18 +138,7 @@ export async function fetchSeasonalManga(year: number, season: string): Promise<
   const data = await getCachedMangaJson<{ items: MangaDiscoveryItem[] }>(
     `manga:seasonal:${year}:${season}`,
     MANGA_ENDPOINTS.seasonal(year, season),
-    300_000,
-    "local"
-  );
-  return data.items ?? [];
-}
-
-export async function fetchDiscoverManga(section = "popular", page = 1, limit = 12): Promise<MangaDiscoveryItem[]> {
-  const data = await getCachedMangaJson<{ items: MangaDiscoveryItem[] }>(
-    `manga:discover:${section}:${page}:${limit}`,
-    MANGA_ENDPOINTS.discover(section, page, limit),
-    300_000,
-    "local"
+    300_000
   );
   return data.items ?? [];
 }
@@ -170,8 +156,7 @@ export async function fetchMangaDetails(id: string | number, source = "anilist_i
   return await getCachedMangaJson<MangaDetailsResponse>(
     `manga:details:${source}:${id}`,
     MANGA_ENDPOINTS.details(id, source),
-    300_000,
-    "local"
+    300_000
   );
 }
 
@@ -179,8 +164,7 @@ export async function fetchMangaChapters(id: string, language = "en"): Promise<M
   const data = await getCachedMangaJson<{ items: MangaChapter[] }>(
     `manga:chapters:${id}:${language}`,
     MANGA_ENDPOINTS.chapters(id, language),
-    300_000,
-    "local"
+    300_000
   );
   return data.items ?? [];
 }
@@ -199,8 +183,7 @@ export async function fetchMangaRecommendations(id: string | number): Promise<Ma
   const data = await getCachedMangaJson<{ items: MangaDiscoveryItem[] }>(
     `manga:recommendations:${id}`,
     MANGA_ENDPOINTS.recommendations(id),
-    300_000,
-    "local"
+    300_000
   );
   return data.items ?? [];
 }
@@ -218,8 +201,7 @@ export async function fetchComickChapters(title: string): Promise<{ match: Manga
   return await getCachedMangaJson<{ match: MangaDiscoveryItem | null; items: MangaChapter[]; total: number }>(
     `manga:comick:chapters:${title.trim().toLowerCase()}`,
     MANGA_ENDPOINTS.comickChapters(title),
-    300_000,
-    "local"
+    300_000
   );
 }
 

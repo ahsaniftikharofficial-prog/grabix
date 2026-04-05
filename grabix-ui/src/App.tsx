@@ -1,9 +1,11 @@
-import { Suspense, lazy, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { HashLoader } from "react-spinners";
+import { Suspense, lazy, useEffect, useState, type ReactNode } from "react";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { WatchdogBanner } from "./components/WatchdogBanner";
+<<<<<<< HEAD
 import { IconRefresh, IconServers, IconWifi } from "./components/Icons";
+=======
+>>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
 import { useOfflineDetection } from "./lib/useOfflineDetection";
 import { useWatchdog } from "./lib/useWatchdog";
 import { ThemeProvider } from "./context/ThemeContext";
@@ -15,12 +17,12 @@ import {
   BACKEND_API,
   deriveRuntimeState,
   fetchBackendPing,
+<<<<<<< HEAD
   invalidateRuntimeRecoveryCaches,
+=======
+>>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
   fetchRuntimeHealth,
   fetchStartupDiagnostics,
-  resetServiceCircuitBreaker,
-  restartConsumetSidecar,
-  restartGrabix,
   type RuntimeHealthPayload,
   type RuntimeState,
   type StartupDiagnosticsPayload,
@@ -46,525 +48,6 @@ const TVSeriesPage = lazy(() => import("./pages/TVSeriesPage"));
 const FavoritesPage = lazy(() => import("./pages/FavoritesPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const RatingsPage  = lazy(() => import("./pages/RatingsPage"));
-const AUTO_SERVICE_RESET_INTERVAL_MS = 2200;
-const AUTO_SERVICE_RESTART_INTERVAL_MS = 6500;
-const AUTO_CONSUMET_RESTART_GRACE_MS = 5000;
-const MANUAL_SERVICE_ACTION_ATTEMPTS = 5;
-const MANUAL_RESTART_ESCALATION_ATTEMPTS = 6;
-const MAX_AUTO_RECOVERY_ATTEMPTS = 6;
-const NETWORK_REQUIRED_PAGES = new Set<Page>(["anime", "manga", "explore", "movies", "moviebox", "series", "ratings"]);
-
-type RecoveryAction = {
-  id: string;
-  label: string;
-  variant?: "primary" | "secondary";
-  onClick: () => void;
-  loading?: boolean;
-};
-
-type RecoveryTone = "info" | "warning" | "danger";
-
-interface PageServiceIssue {
-  serviceKey: "consumet" | "moviebox" | "manga" | "ffmpeg";
-  status: "degraded" | "offline";
-  retryable: boolean;
-  title: string;
-  message: string;
-  restartLabel?: string;
-}
-
-interface AutoRecoveryState {
-  serviceKey: PageServiceIssue["serviceKey"];
-  label: string;
-  attempt: number;
-  phase: "retrying" | "restarting";
-  message: string;
-}
-
-function getRecoveryBackoffMs(baseMs: number, attempt: number, maxMs: number): number {
-  const exponent = Math.max(0, Math.min(attempt, 4));
-  return Math.min(baseMs * (2 ** exponent), maxMs);
-}
-
-function isOnlyConsumetDegraded(health: RuntimeHealthPayload | null): boolean {
-  const degraded = health?.summary.degraded_services ?? [];
-  return degraded.length === 1 && degraded[0] === "consumet";
-}
-
-function getPageServiceIssue(
-  page: Page,
-  health: RuntimeHealthPayload | null
-): PageServiceIssue | null {
-  const services = health?.services;
-  if (!services) return null;
-
-  switch (page) {
-    case "anime": {
-      const animeService = services.anime;
-      const consumetService = services.consumet;
-      if (!animeService || !["degraded", "offline"].includes(animeService.status)) return null;
-      return {
-        serviceKey: "consumet",
-        status: animeService.status === "offline" ? "offline" : "degraded",
-        retryable: consumetService?.retryable ?? animeService.retryable,
-        title: "Getting Anime Ready",
-        message: "Please wait a moment while Anime gets ready.",
-      };
-    }
-    case "moviebox": {
-      const service = services.moviebox;
-      if (!service || !["degraded", "offline"].includes(service.status)) return null;
-      return {
-        serviceKey: "moviebox",
-        status: service.status === "offline" ? "offline" : "degraded",
-        retryable: service.retryable,
-        title: "Getting Movie Box Ready",
-        message: "Please wait a moment while Movie Box gets ready.",
-      };
-    }
-    case "manga": {
-      const service = services.manga;
-      if (!service || !["degraded", "offline"].includes(service.status)) return null;
-      return {
-        serviceKey: "manga",
-        status: service.status === "offline" ? "offline" : "degraded",
-        retryable: service.retryable,
-        title: "Getting Manga Ready",
-        message: "Please wait a moment while Manga gets ready.",
-      };
-    }
-    case "converter": {
-      const service = services.ffmpeg;
-      if (!service || !["degraded", "offline"].includes(service.status)) return null;
-      return {
-        serviceKey: "ffmpeg",
-        status: service.status === "offline" ? "offline" : "degraded",
-        retryable: service.retryable,
-        title: "Getting Converter Ready",
-        message: "Please wait a moment while the converter gets ready.",
-      };
-    }
-    default:
-      return null;
-  }
-}
-
-function getServiceLabel(serviceKey: PageServiceIssue["serviceKey"]): string {
-  switch (serviceKey) {
-    case "consumet":
-      return "Anime";
-    case "moviebox":
-      return "Movie Box";
-    case "manga":
-      return "Manga";
-    case "ffmpeg":
-      return "Converter";
-    default:
-      return "GRABIX";
-  }
-}
-
-function getAutoRecoveryCandidate(
-  page: Page,
-  health: RuntimeHealthPayload | null
-): PageServiceIssue | null {
-  const pageIssue = getPageServiceIssue(page, health);
-  if (pageIssue?.retryable) {
-    return pageIssue;
-  }
-
-  const services = health?.services;
-  if (!services) return null;
-
-  const priority: Array<PageServiceIssue["serviceKey"]> = ["consumet", "moviebox", "manga", "ffmpeg"];
-  for (const serviceKey of priority) {
-    const service = services[serviceKey];
-    if (!service || !service.retryable || !["degraded", "offline"].includes(service.status)) {
-      continue;
-    }
-    if (serviceKey === "consumet" && services.anime?.status === "online") {
-      continue;
-    }
-
-    return {
-      serviceKey,
-      status: service.status === "offline" ? "offline" : "degraded",
-      retryable: service.retryable,
-      title: `Getting ${getServiceLabel(serviceKey)} Ready`,
-      message: `Please wait a moment while ${getServiceLabel(serviceKey)} gets ready.`,
-      restartLabel: serviceKey === "consumet" ? "Restart Anime Engine" : undefined,
-    };
-  }
-
-  return null;
-}
-
-function shouldAutoRestartConsumet(
-  diagnostics: StartupDiagnosticsPayload | null,
-  issue: PageServiceIssue,
-  startupAgeMs: number
-): boolean {
-  if (issue.serviceKey !== "consumet") return false;
-
-  const status = diagnostics?.consumet.status ?? "";
-  const failureCode = diagnostics?.consumet.failure_code ?? "";
-
-  if (status === "missing" || failureCode === "consumet_runtime_missing" || failureCode === "consumet_resource_missing") {
-    return false;
-  }
-  if (status === "starting") {
-    return startupAgeMs >= AUTO_CONSUMET_RESTART_GRACE_MS;
-  }
-
-  return issue.status === "offline" || ["failed", "timeout", "port_in_use", "port_in_use"].includes(status);
-}
-
-function getPageSkeletonProfile(page: Page): {
-  mode: "grid" | "rails" | "panels";
-  cards: number;
-  chips: number;
-  title: string;
-  subtitle: string;
-} {
-  switch (page) {
-    case "anime":
-      return { mode: "grid", cards: 12, chips: 5, title: "Anime", subtitle: "Loading anime for you." };
-    case "movies":
-      return { mode: "grid", cards: 12, chips: 5, title: "Movies", subtitle: "Loading movies for you." };
-    case "series":
-      return { mode: "grid", cards: 12, chips: 5, title: "TV Series", subtitle: "Loading shows for you." };
-    case "moviebox":
-      return { mode: "rails", cards: 12, chips: 4, title: "Movie Box", subtitle: "Loading titles for you." };
-    case "manga":
-      return { mode: "rails", cards: 10, chips: 3, title: "Manga", subtitle: "Loading manga for you." };
-    case "explore":
-    case "favorites":
-    case "ratings":
-      return { mode: "grid", cards: 10, chips: 4, title: "Browse", subtitle: "Loading this page for you." };
-    case "downloader":
-      return { mode: "panels", cards: 4, chips: 2, title: "Downloader", subtitle: "Loading your downloads." };
-    case "converter":
-      return { mode: "panels", cards: 3, chips: 2, title: "Converter", subtitle: "Loading your converter." };
-    case "library":
-      return { mode: "panels", cards: 5, chips: 3, title: "Library", subtitle: "Loading your library." };
-    case "settings":
-      return { mode: "panels", cards: 4, chips: 2, title: "Settings", subtitle: "Loading your settings." };
-    default:
-      return { mode: "grid", cards: 10, chips: 4, title: "GRABIX", subtitle: "Loading this page for you." };
-  }
-}
-
-function BootStage({
-  title,
-  subtitle,
-  detail,
-  progress,
-  caption,
-}: {
-  title: string;
-  subtitle: string;
-  detail?: string;
-  progress: number;
-  caption: string;
-}) {
-  const clampedProgress = Math.max(6, Math.min(progress, 100));
-  const progressLabel = Math.round(clampedProgress);
-
-  return (
-    <div className="boot-stage">
-      <div className="boot-stage__panel">
-        <div className="startup-stage__badge">GRABIX</div>
-        <div
-          className="boot-stage__ring"
-          style={{ "--boot-progress": `${clampedProgress * 3.6}deg` } as CSSProperties}
-        >
-          <div className="boot-stage__ring-core">
-            <strong>{progressLabel}</strong>
-            <span>%</span>
-          </div>
-          <div className="boot-stage__ring-orbit" />
-        </div>
-        <div className="boot-stage__copy">
-          <h1>{title}</h1>
-          <p>{subtitle}</p>
-          {detail ? <span>{detail}</span> : null}
-        </div>
-        <div className="boot-stage__meter">
-          <div className="boot-stage__meter-fill" style={{ width: `${clampedProgress}%` }} />
-        </div>
-        <div className="boot-stage__caption">{caption}</div>
-      </div>
-    </div>
-  );
-}
-
-function getReconnectLabel(issue: PageServiceIssue | null): string {
-  if (!issue) return "Reconnect Service";
-  switch (issue.serviceKey) {
-    case "consumet":
-      return "Reconnect Anime";
-    case "moviebox":
-      return "Reconnect Movie Box";
-    case "manga":
-      return "Reconnect Manga";
-    case "ffmpeg":
-      return "Reconnect Converter";
-    default:
-      return "Reconnect Service";
-  }
-}
-
-function RecoveryStage({
-  title,
-  subtitle,
-  detail,
-  icon,
-  tone = "info",
-  actions = [],
-}: {
-  title: string;
-  subtitle: string;
-  detail?: string;
-  icon: ReactNode;
-  tone?: RecoveryTone;
-  actions?: RecoveryAction[];
-}) {
-  const accent =
-    tone === "danger" ? "var(--danger)" : tone === "warning" ? "var(--warning)" : "var(--accent)";
-
-  return (
-    <div className="startup-stage">
-      <div className="startup-stage__panel">
-        <div className="startup-stage__badge">GRABIX</div>
-        <div
-          style={{
-            width: 68,
-            height: 68,
-            borderRadius: 22,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "color-mix(in srgb, var(--bg-surface2) 78%, transparent)",
-            border: `1px solid color-mix(in srgb, ${accent} 28%, transparent)`,
-            color: accent,
-          }}
-        >
-          {icon}
-        </div>
-        <HashLoader color={accent} size={54} speedMultiplier={0.9} />
-        <h2>{title}</h2>
-        <p>{subtitle}</p>
-        {detail ? <span>{detail}</span> : null}
-        {actions.length > 0 ? (
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              justifyContent: "center",
-              gap: 10,
-              marginTop: 4,
-            }}
-          >
-            {actions.map((action) => (
-              <button
-                key={action.id}
-                className={`btn ${action.variant === "secondary" ? "btn-ghost" : "btn-primary"}`}
-                onClick={action.onClick}
-                disabled={action.loading}
-                style={{ minWidth: 156, justifyContent: "center" }}
-              >
-                {action.loading ? "Working..." : action.label}
-              </button>
-            ))}
-          </div>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-function ServiceRecoveryCard({
-  title,
-  message,
-  actions,
-  feedback,
-  error,
-  autoRecovery,
-}: {
-  title: string;
-  message: string;
-  actions: RecoveryAction[];
-  feedback?: string;
-  error?: string;
-  autoRecovery?: AutoRecoveryState | null;
-}) {
-  return (
-    <div
-      style={{
-        position: "relative",
-        width: "min(360px, calc(100vw - 40px))",
-        maxWidth: "100%",
-        padding: 18,
-        borderRadius: 20,
-        background: "color-mix(in srgb, var(--bg-surface) 94%, transparent)",
-        border: "1px solid color-mix(in srgb, var(--border) 84%, transparent)",
-        boxShadow: "var(--shadow-lg)",
-        backdropFilter: "blur(14px)",
-        WebkitBackdropFilter: "blur(14px)",
-      }}
-    >
-      {autoRecovery ? (
-        <div
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 8,
-            marginBottom: 12,
-            padding: "7px 10px",
-            borderRadius: 999,
-            background: "color-mix(in srgb, var(--accent-subtle) 80%, transparent)",
-            border: "1px solid color-mix(in srgb, var(--accent) 22%, transparent)",
-            color: "var(--text-accent)",
-            fontSize: 12,
-            fontWeight: 600,
-          }}
-        >
-          <IconRefresh size={13} className="spin-slow" />
-          {autoRecovery.message}
-        </div>
-      ) : null}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
-        <div
-          style={{
-            width: 42,
-            height: 42,
-            borderRadius: 14,
-            background: "var(--accent-subtle)",
-            border: "1px solid color-mix(in srgb, var(--accent) 24%, transparent)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "var(--text-accent)",
-          }}
-        >
-          <IconServers size={20} />
-        </div>
-        <div>
-          <div style={{ fontSize: 14, fontWeight: 700 }}>{title}</div>
-          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>{message}</div>
-        </div>
-      </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-        {actions.map((action) => (
-          <button
-            key={action.id}
-            className={`btn ${action.variant === "secondary" ? "btn-ghost" : "btn-primary"}`}
-            onClick={action.onClick}
-            disabled={action.loading}
-            style={{ minWidth: 132, justifyContent: "center" }}
-          >
-            {action.loading ? "Working..." : action.label}
-          </button>
-        ))}
-      </div>
-      {feedback ? (
-        <div style={{ fontSize: 12, color: "var(--text-success)", marginTop: 10 }}>{feedback}</div>
-      ) : null}
-      {error ? (
-        <div style={{ fontSize: 12, color: "var(--text-danger)", marginTop: 10 }}>{error}</div>
-      ) : null}
-    </div>
-  );
-}
-
-function ContentSkeletonStage({
-  page,
-  title,
-  subtitle,
-  detail,
-  overlay,
-}: {
-  page: Page;
-  title?: string;
-  subtitle?: string;
-  detail?: string;
-  overlay?: ReactNode;
-}) {
-  const profile = getPageSkeletonProfile(page);
-
-  return (
-    <div className="content-skeleton">
-      <div className="content-skeleton__header">
-        <div>
-          <div className="content-skeleton__eyebrow">{title || profile.title}</div>
-          <h2>{title || profile.title}</h2>
-          <p>{subtitle || profile.subtitle}</p>
-          {detail ? <span>{detail}</span> : null}
-        </div>
-        <div className="content-skeleton__status">
-          <IconRefresh size={16} className="spin-slow" />
-          Please wait
-        </div>
-      </div>
-
-      <div className="content-skeleton__toolbar">
-        <div className="content-skeleton__line content-skeleton__line--lg" />
-        <div className="content-skeleton__line content-skeleton__line--md" />
-        <div className="content-skeleton__controls">
-          {Array.from({ length: profile.chips }).map((_, index) => (
-            <div
-              key={`chip-${index}`}
-              className="content-skeleton__chip shimmer"
-              style={{ width: `${88 - (index % 3) * 12}px` }}
-            />
-          ))}
-        </div>
-      </div>
-
-      {profile.mode === "grid" ? (
-        <div className="content-skeleton__grid">
-          {Array.from({ length: profile.cards }).map((_, index) => (
-            <div key={`card-${index}`} className="content-skeleton__card">
-              <div className="content-skeleton__poster shimmer" />
-              <div className="content-skeleton__text shimmer" style={{ width: "84%" }} />
-              <div className="content-skeleton__text shimmer" style={{ width: "52%" }} />
-            </div>
-          ))}
-        </div>
-      ) : profile.mode === "rails" ? (
-        <div className="content-skeleton__rails">
-          {Array.from({ length: 2 }).map((_, railIndex) => (
-            <section key={`rail-${railIndex}`} className="content-skeleton__rail">
-              <div className="content-skeleton__line content-skeleton__line--md" />
-              <div className="content-skeleton__line content-skeleton__line--sm" />
-              <div className="content-skeleton__grid content-skeleton__grid--rail">
-                {Array.from({ length: profile.cards / 2 }).map((__, cardIndex) => (
-                  <div key={`rail-card-${railIndex}-${cardIndex}`} className="content-skeleton__card">
-                    <div className="content-skeleton__poster shimmer" />
-                    <div className="content-skeleton__text shimmer" style={{ width: "84%" }} />
-                    <div className="content-skeleton__text shimmer" style={{ width: "52%" }} />
-                  </div>
-                ))}
-              </div>
-            </section>
-          ))}
-        </div>
-      ) : (
-        <div className="content-skeleton__panels">
-          {Array.from({ length: profile.cards }).map((_, index) => (
-            <div key={`panel-${index}`} className="content-skeleton__panel shimmer">
-              <div className="content-skeleton__line content-skeleton__line--md" />
-              <div className="content-skeleton__line content-skeleton__line--lg" />
-              <div className="content-skeleton__line content-skeleton__line--sm" />
-            </div>
-          ))}
-        </div>
-      )}
-
-      {overlay ? <div className="content-skeleton__overlay">{overlay}</div> : null}
-    </div>
-  );
-}
 
 function Inner() {
   const offlineState = useOfflineDetection(BACKEND_API);
@@ -577,21 +60,6 @@ function Inner() {
   const [activeDownloads, setActiveDownloads] = useState(0);
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealthPayload | null>(null);
   const [startupDiagnostics, setStartupDiagnostics] = useState<StartupDiagnosticsPayload | null>(null);
-  const [startupAgeMs, setStartupAgeMs] = useState(0);
-  const [recoveryActionId, setRecoveryActionId] = useState("");
-  const [recoveryFeedback, setRecoveryFeedback] = useState("");
-  const [recoveryError, setRecoveryError] = useState("");
-  const [autoRecovery, setAutoRecovery] = useState<AutoRecoveryState | null>(null);
-  const [autoRecoveryAttempts, setAutoRecoveryAttempts] =
-    useState<Partial<Record<PageServiceIssue["serviceKey"], number>>>({});
-  const [bootVisualProgress, setBootVisualProgress] = useState(8);
-  const [bootOverlayVisible, setBootOverlayVisible] = useState(true);
-  const [initialLaunchComplete, setInitialLaunchComplete] = useState(false);
-  const onlineStateRef = useRef(offlineState.isOffline);
-  const autoRecoveryInFlightRef = useRef<PageServiceIssue["serviceKey"] | null>(null);
-  const autoRecoveryLastResetRef = useRef<Partial<Record<PageServiceIssue["serviceKey"], number>>>({});
-  const autoRecoveryLastRestartRef = useRef<Partial<Record<PageServiceIssue["serviceKey"], number>>>({});
-  const autoRecoveryAttemptRef = useRef<Partial<Record<PageServiceIssue["serviceKey"], number>>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -640,7 +108,7 @@ function Inner() {
     };
 
     const bootstrapBackend = async () => {
-      const coreReady = await waitForBackendCoreReady(75000, 250);
+      const coreReady = await waitForBackendCoreReady(75000, 500);
       if (cancelled) return;
 
       setBackendCoreReady(coreReady);
@@ -708,14 +176,6 @@ function Inner() {
   }, []);
 
   useEffect(() => {
-    const startedAt = Date.now();
-    const interval = window.setInterval(() => {
-      setStartupAgeMs(Date.now() - startedAt);
-    }, 300);
-    return () => window.clearInterval(interval);
-  }, []);
-
-  useEffect(() => {
     setRuntimeState(
       deriveRuntimeState({
         health: runtimeHealth,
@@ -771,48 +231,6 @@ function Inner() {
     }
   };
 
-  const refreshRuntimeSnapshot = async () => {
-    invalidateRuntimeRecoveryCaches();
-    try {
-      const diagnostics = await fetchStartupDiagnostics();
-      setStartupDiagnostics(diagnostics);
-    } catch {
-      // ignore diagnostics refresh failures
-    }
-
-    try {
-      const ping = await fetchBackendPing();
-      setBackendCoreReady(Boolean(ping.core_ready));
-    } catch {
-      setBackendCoreReady(false);
-    }
-
-    await refreshRuntimeHealth();
-  };
-
-  const runRecoveryAction = async (
-    actionId: string,
-    action: () => Promise<string | void>,
-    options?: { refreshAfter?: boolean }
-  ) => {
-    setRecoveryFeedback("");
-    setRecoveryError("");
-    setRecoveryActionId(actionId);
-    try {
-      const message = await action();
-      if (message) {
-        setRecoveryFeedback(message);
-      }
-    } catch (error) {
-      setRecoveryError(error instanceof Error ? error.message : "Recovery action could not be completed.");
-    } finally {
-      if (options?.refreshAfter !== false) {
-        await refreshRuntimeSnapshot();
-      }
-      setRecoveryActionId("");
-    }
-  };
-
   const navigateToPage = (nextPage: Page, options?: { refresh?: boolean }) => {
     setPage((current) => {
       if (current === nextPage || options?.refresh) {
@@ -822,6 +240,7 @@ function Inner() {
     });
   };
 
+<<<<<<< HEAD
   const pageServiceIssue = getPageServiceIssue(page, runtimeHealth);
   const autoRecoveryCandidate = getAutoRecoveryCandidate(page, runtimeHealth);
   const startupGateSatisfied = Boolean(
@@ -1166,19 +585,13 @@ function Inner() {
         ? `${consumetDiagnosticDetail} Automatic recovery has paused so you can choose the next step.`
         : consumetDiagnosticDetail || pageServiceIssue?.message;
 
+=======
+>>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
   return (
-    <div style={{ position: "relative", display: "flex", height: "100vh", width: "100vw", overflow: "hidden" }}>
+    <div style={{ display: "flex", height: "100vh", width: "100vw", overflow: "hidden" }}>
       <OfflineBanner offlineState={offlineState} />
       <WatchdogBanner status={watchdog.status} isBannerVisible={watchdog.isBannerVisible} />
-      <Sidebar
-        page={page}
-        setPage={navigateToPage}
-        activeDownloads={activeDownloads}
-        runtimeState={runtimeState}
-        runtimeHealth={runtimeHealth}
-        statusOverride={sidebarStatusOverride}
-        statusToneOverride={sidebarStatusTone}
-      />
+      <Sidebar page={page} setPage={navigateToPage} activeDownloads={activeDownloads} runtimeState={runtimeState} runtimeHealth={runtimeHealth} />
       <main
         style={{
           flex: 1,
@@ -1192,6 +605,7 @@ function Inner() {
         }}
       >
         <RuntimeHealthProvider value={{ health: runtimeHealth, runtimeState, refreshHealth: refreshRuntimeHealth }}>
+<<<<<<< HEAD
           {bootShouldStayVisible ? (
             <div style={{ flex: 1 }} />
           ) : networkRecoveryVisible ? (
@@ -1231,30 +645,26 @@ function Inner() {
               </div>
             </Suspense>
           )}
+=======
+          <Suspense fallback={<PageLoadingState page={page} />}>
+            <div key={`${page}:${pageRevision}`} style={{ display: "flex", flexDirection: "column", flex: 1, width: "100%", minWidth: 0, minHeight: 0 }}>
+              {pages[page]}
+            </div>
+          </Suspense>
+>>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
         </RuntimeHealthProvider>
       </main>
-      {bootOverlayVisible ? (
-        <div className="boot-stage-overlay">
-          <BootStage
-            title={startupTitle}
-            subtitle="Getting GRABIX ready for you."
-            detail={startupDetail}
-            progress={bootProgress}
-            caption={bootCaption}
-          />
-        </div>
-      ) : null}
     </div>
   );
 }
 
 function PageLoadingState({ page }: { page: Page }) {
   return (
-    <ContentSkeletonStage
-      page={page}
-      title={getPageSkeletonProfile(page).title}
-      subtitle="This page is loading now."
-    />
+    <div className="empty-state" style={{ height: "100%" }}>
+      <div className="player-loader" />
+      <p>Loading {page}...</p>
+      <span>Preparing this part of GRABIX on demand for a faster startup.</span>
+    </div>
   );
 }
 

@@ -19,8 +19,13 @@ OPENSUBTITLES_ORG_HEADERS = {
     "User-Agent": "TemporaryUserAgent",
     "Accept": "application/json",
 }
-OPENSUBTITLES_COM_API_KEY = os.environ.get("OPENSUBTITLES_COM_API_KEY", "").strip()
+OPENSUBTITLES_COM_API_KEY = "zoOjoVaadmVovAQTja9Vo3tkVP14tO9q"
 OPENSUBTITLES_COM_URL = "https://api.opensubtitles.com/api/v1"
+OPENSUBTITLES_COM_HEADERS = {
+    "Api-Key": OPENSUBTITLES_COM_API_KEY,
+    "User-Agent": "GRABIX v1.0",
+    "Accept": "application/json",
+}
 OPENSUBTITLES_COM_LINK_PREFIX = "opensubtitles-com://"
 DB_PATH = Path.home() / "Downloads" / "GRABIX" / "grabix.db"
 
@@ -213,16 +218,10 @@ def _subdl_download_url(item: dict, result_item: dict | None) -> str:
 
 
 def _resolve_opensubtitles_com_download_url(file_id: int | str) -> str:
-    if not OPENSUBTITLES_COM_API_KEY:
-        return ""
     data = _fetch_json_post_sync(
         f"{OPENSUBTITLES_COM_URL}/download",
         {"file_id": int(file_id)},
-        {
-            "Api-Key": OPENSUBTITLES_COM_API_KEY,
-            "User-Agent": "GRABIX v1.0",
-            "Accept": "application/json",
-        },
+        OPENSUBTITLES_COM_HEADERS,
     )
     return str(data.get("link") or "")
 
@@ -295,21 +294,11 @@ async def search_opensubtitles_org(title: str, language: str) -> list[dict]:
 
 
 async def search_opensubtitles_com(title: str, language: str) -> list[dict]:
-    if not OPENSUBTITLES_COM_API_KEY:
-        return []
     codes = _language_codes(language)
     search_url = f"{OPENSUBTITLES_COM_URL}/subtitles?{urlencode({'query': title, 'languages': codes['com']})}"
 
     try:
-        data = await asyncio.to_thread(
-            _fetch_json_sync,
-            search_url,
-            {
-                "Api-Key": OPENSUBTITLES_COM_API_KEY,
-                "User-Agent": "GRABIX v1.0",
-                "Accept": "application/json",
-            },
-        )
+        data = await asyncio.to_thread(_fetch_json_sync, search_url, OPENSUBTITLES_COM_HEADERS)
     except Exception:
         return []
 

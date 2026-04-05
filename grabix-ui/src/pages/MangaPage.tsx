@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchConsumetMangaChapters,
+  fetchConsumetMangaDiscover,
   fetchConsumetMangaRead,
   searchConsumetManga,
   type ConsumetChapter,
@@ -8,12 +9,13 @@ import {
 } from "../lib/consumetProviders";
 import {
   fetchComickChapters,
+  fetchComickFrontpage,
   fetchComickPages,
-  fetchDiscoverManga,
   fetchMangaChapters,
   fetchMangaDetails,
   fetchMangaPages,
   fetchMangaRecommendations,
+  fetchSeasonalManga,
   fetchTrendingManga,
   searchManga,
   toMangaImageProxy,
@@ -36,15 +38,15 @@ import {
   type OfflineMangaRecord,
 } from "../lib/mangaOffline";
 import { createCbzBlob, triggerFileDownload } from "../lib/mangaZip";
+<<<<<<< HEAD
 import CachedImage from "../components/CachedImage";
 import { readLocalAppSettings } from "../lib/appSettings";
 import { warmMediaCache } from "../lib/mediaCache";
+=======
+>>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
 
 type ReaderState = { chapterIndex: number; chapter: MangaChapter };
 type ChapterSource = "auto" | "mangadex" | "consumet" | "comick";
-type MangaHomeTab = "discover" | "trending" | "popular" | "recent" | "top10";
-type MangaDiscoverSection = "popular" | "recent" | "top";
-type MangaHomeSection = "trending" | "popular" | "recent" | "top10";
 type DownloadState = {
   status: "idle" | "downloading" | "paused" | "done" | "error";
   message?: string;
@@ -71,15 +73,14 @@ const LANGUAGE_OPTIONS = [
   { label: "Spanish", value: "es" },
   { label: "French", value: "fr" },
 ];
-const HOME_TABS: Array<{ id: MangaHomeTab; label: string; subtitle: string }> = [
-  { id: "discover", label: "Discover", subtitle: "Scroll to keep finding more manga" },
-  { id: "trending", label: "Trending", subtitle: "Popular manga people are opening right now" },
-  { id: "popular", label: "Most Popular", subtitle: "Big fan-favorite manga" },
-  { id: "recent", label: "Recent", subtitle: "Freshly updated chapters and new arrivals" },
-  { id: "top10", label: "Top Rated", subtitle: "Highest-rated manga worth opening next" },
-];
 
-const HOME_DISCOVER_PAGE_SIZE = 18;
+function currentSeason(): string {
+  const month = new Date().getMonth() + 1;
+  if (month <= 3) return "WINTER";
+  if (month <= 6) return "SPRING";
+  if (month <= 9) return "SUMMER";
+  return "FALL";
+}
 
 function coverFallback(title: string): string {
   return `https://via.placeholder.com/300x420/1b1f2a/e5e7eb?text=${encodeURIComponent((title || "M").slice(0, 1).toUpperCase())}`;
@@ -99,6 +100,19 @@ function sortPageUrls(pages: string[]): string[] {
     .map((url, index) => ({ url, index, key: extractKey(url, index) }))
     .sort((left, right) => left.key - right.key || left.index - right.index)
     .map((item) => item.url);
+}
+
+function mergeChapterSets(...sets: MangaChapter[][]): MangaChapter[] {
+  const byNumber = new Map<string, MangaChapter>();
+  for (const set of sets) {
+    for (const chapter of set) {
+      const number = String(chapter.chapter_number || "").trim();
+      const key = number || chapter.chapter_id;
+      if (!key || byNumber.has(key)) continue;
+      byNumber.set(key, chapter);
+    }
+  }
+  return [...byNumber.values()].sort((left, right) => chapterNumber(left.chapter_number) - chapterNumber(right.chapter_number));
 }
 
 function mapConsumetMangaToDiscovery(item: ConsumetMediaSummary): MangaDiscoveryItem {
@@ -157,13 +171,6 @@ function LoadingGrid({ count = 8 }: { count?: number }) {
   );
 }
 
-function getReaderModeLabel(source: ChapterSource, resolvedSource: "mangadex" | "comick" | null): string {
-  if (resolvedSource === "comick" || source === "comick") return "Backup reader";
-  if (source === "consumet") return "Fast reader";
-  if (source === "mangadex") return "Standard reader";
-  return "Best available reader";
-}
-
 function MangaReaderImage({ src, alt, index, total, onLoadNext }: { src: string; alt: string; index: number; total: number; onLoadNext: () => void }) {
   return (
     <div style={{ width: "100%", maxWidth: 900 }}>
@@ -187,30 +194,25 @@ function MangaCard({
   onOpen,
   onRead,
   onDownloadAll,
-  compact,
-  showRatings,
 }: {
   item: MangaDiscoveryItem;
   onOpen: () => void;
   onRead: () => void;
   onDownloadAll: () => void;
-  compact: boolean;
-  showRatings: boolean;
 }) {
-  const coverHeight = compact ? 198 : 230;
   return (
     <div className="card" style={{ overflow: "hidden", textAlign: "left", cursor: "pointer", border: "1px solid var(--border)", background: "var(--bg-surface)" }}>
       <div role="button" tabIndex={0} onClick={onOpen} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onOpen(); }} style={{ outline: "none" }}>
       <div style={{ position: "relative" }}>
-        <CachedImage
-          src={item.cover_image || ""}
-          fallbackSrc={coverFallback(item.title)}
+        <img
+          src={item.cover_image || coverFallback(item.title)}
           alt={item.title}
           loading="lazy"
           decoding="async"
-          style={{ width: "100%", height: coverHeight, objectFit: "cover", display: "block" }}
+          style={{ width: "100%", height: 230, objectFit: "cover", display: "block" }}
+          onError={(event) => { (event.target as HTMLImageElement).src = coverFallback(item.title); }}
         />
-        {showRatings && !!item.score && (
+        {!!item.score && (
           <div style={{ position: "absolute", top: 8, right: 8, display: "flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: 999, background: "rgba(0,0,0,0.72)", color: "#f6d061", fontSize: 11, fontWeight: 700 }}>
             <IconStar size={10} color="#f6d061" />
             {item.score}
@@ -239,48 +241,54 @@ function MangaCard({
   );
 }
 
+function HorizontalRail({
+  title,
+  subtitle,
+  items,
+  onOpen,
+  onRead,
+  onDownloadAll,
+}: {
+  title: string;
+  subtitle?: string;
+  items: MangaDiscoveryItem[];
+  onOpen: (item: MangaDiscoveryItem) => void;
+  onRead: (item: MangaDiscoveryItem) => void;
+  onDownloadAll: (item: MangaDiscoveryItem) => void;
+}) {
+  return (
+    <section>
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ fontSize: 16, fontWeight: 700 }}>{title}</div>
+        {subtitle ? <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>{subtitle}</div> : null}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(165px, 1fr))", gap: 14 }}>
+        {items.map((item) => {
+          return (
+            <MangaCard
+              key={`${title}-${item.anilist_id ?? item.mangadex_id ?? item.title}`}
+              item={item}
+              onOpen={() => onOpen(item)}
+              onRead={() => onRead(item)}
+              onDownloadAll={() => onDownloadAll(item)}
+            />
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 export default function MangaPage() {
-  const appSettings = readLocalAppSettings();
   const { adultContentBlocked } = useContentFilter();
   const [searchText, setSearchText] = useState("");
   const [query, setQuery] = useState("");
   const [trending, setTrending] = useState<MangaDiscoveryItem[]>([]);
-  const [recent, setRecent] = useState<MangaDiscoveryItem[]>([]);
-  const [popular, setPopular] = useState<MangaDiscoveryItem[]>([]);
-  const [topTen, setTopTen] = useState<MangaDiscoveryItem[]>([]);
-  const [homeTab, setHomeTab] = useState<MangaHomeTab>("trending");
-  const [homeSectionLoading, setHomeSectionLoading] = useState<Record<MangaHomeSection, boolean>>({
-    trending: true,
-    popular: true,
-    recent: true,
-    top10: true,
-  });
-  const [homeSectionLoaded, setHomeSectionLoaded] = useState<Record<MangaHomeSection, boolean>>({
-    trending: false,
-    popular: false,
-    recent: false,
-    top10: false,
-  });
-  const [discoverSection, setDiscoverSection] = useState<MangaDiscoverSection>("popular");
-  const [homeSectionPage, setHomeSectionPage] = useState<Record<MangaHomeSection, number>>({
-    trending: 1,
-    popular: 1,
-    recent: 1,
-    top10: 1,
-  });
-  const [homeSectionHasMore, setHomeSectionHasMore] = useState<Record<MangaHomeSection, boolean>>({
-    trending: true,
-    popular: true,
-    recent: true,
-    top10: true,
-  });
-  const [homeSectionLoadingMore, setHomeSectionLoadingMore] = useState<Record<MangaHomeSection, boolean>>({
-    trending: false,
-    popular: false,
-    recent: false,
-    top10: false,
-  });
+  const [seasonal, setSeasonal] = useState<MangaDiscoveryItem[]>([]);
+  const [comickHot, setComickHot] = useState<MangaDiscoveryItem[]>([]);
+  const [consumetHot, setConsumetHot] = useState<MangaDiscoveryItem[]>([]);
   const [searchResults, setSearchResults] = useState<MangaDiscoveryItem[]>([]);
+  const [homeLoading, setHomeLoading] = useState(true);
   const [searchLoading, setSearchLoading] = useState(false);
   const [homeError, setHomeError] = useState<string | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -291,16 +299,8 @@ export default function MangaPage() {
   const [chapters, setChapters] = useState<MangaChapter[]>([]);
   const [chaptersLoading, setChaptersLoading] = useState(false);
   const [chaptersError, setChaptersError] = useState<string | null>(null);
-  const [chapterLanguage, setChapterLanguage] = useState(appSettings.manga_default_language || "en");
-  const [chapterSource, setChapterSource] = useState<ChapterSource>(
-    appSettings.manga_reader_mode === "fast"
-      ? "consumet"
-      : appSettings.manga_reader_mode === "backup"
-        ? "comick"
-        : appSettings.manga_reader_mode === "standard"
-          ? "mangadex"
-          : "auto"
-  );
+  const [chapterLanguage, setChapterLanguage] = useState("en");
+  const [chapterSource, setChapterSource] = useState<ChapterSource>("auto");
   const [resolvedChapterSource, setResolvedChapterSource] = useState<"mangadex" | "comick" | null>(null);
   const [chapterGroup, setChapterGroup] = useState(0);
   const [reader, setReader] = useState<ReaderState | null>(null);
@@ -313,68 +313,15 @@ export default function MangaPage() {
   const [chapterDownloadStates, setChapterDownloadStates] = useState<Record<string, DownloadState>>({});
   const [downloadedChapterKeys, setDownloadedChapterKeys] = useState<Set<string>>(new Set());
   const chapterDownloadSessionsRef = useRef<Record<string, ChapterDownloadSession>>({});
-  const contentScrollRef = useRef<HTMLDivElement | null>(null);
 
+  const season = useMemo(() => currentSeason(), []);
+  const seasonYear = useMemo(() => new Date().getFullYear(), []);
   const filteredTrending = useMemo(() => filterAdultContent(trending, adultContentBlocked), [trending, adultContentBlocked]);
-  const filteredRecent = useMemo(() => filterAdultContent(recent, adultContentBlocked), [recent, adultContentBlocked]);
-  const filteredPopular = useMemo(() => filterAdultContent(popular, adultContentBlocked), [popular, adultContentBlocked]);
-  const filteredTopTen = useMemo(() => filterAdultContent(topTen, adultContentBlocked), [topTen, adultContentBlocked]);
+  const filteredSeasonal = useMemo(() => filterAdultContent(seasonal, adultContentBlocked), [seasonal, adultContentBlocked]);
+  const filteredComickHot = useMemo(() => filterAdultContent(comickHot, adultContentBlocked), [comickHot, adultContentBlocked]);
+  const filteredConsumetHot = useMemo(() => filterAdultContent(consumetHot, adultContentBlocked), [consumetHot, adultContentBlocked]);
   const filteredSearchResults = useMemo(() => filterAdultContent(searchResults, adultContentBlocked), [searchResults, adultContentBlocked]);
   const filteredRecommendations = useMemo(() => filterAdultContent(recommendations, adultContentBlocked), [recommendations, adultContentBlocked]);
-  const activeDiscoverItems = useMemo(() => {
-    switch (discoverSection) {
-      case "recent":
-        return filteredRecent;
-      case "top":
-        return filteredTopTen;
-      case "popular":
-      default:
-        return filteredPopular;
-    }
-  }, [discoverSection, filteredPopular, filteredRecent, filteredTopTen]);
-  const activeHomeSectionKey: MangaHomeSection = homeTab === "discover"
-    ? discoverSection === "recent"
-      ? "recent"
-      : discoverSection === "top"
-        ? "top10"
-        : "popular"
-    : homeTab === "top10"
-      ? "top10"
-      : homeTab;
-  const activeHomeRail = useMemo(() => {
-    switch (homeTab) {
-      case "popular":
-        return {
-          title: "Most Popular",
-          subtitle: "Big fan-favorite manga people keep opening.",
-          items: filteredPopular,
-        };
-      case "recent":
-        return {
-          title: "Recent",
-          subtitle: "Fresh updates and newly active manga.",
-          items: filteredRecent,
-        };
-      case "top10":
-        return {
-          title: "Top Rated",
-          subtitle: "Highly rated manga worth opening next.",
-          items: filteredTopTen,
-        };
-      case "trending":
-      default:
-        return {
-          title: "Trending Now",
-          subtitle: "Popular manga people are checking out right now.",
-          items: filteredTrending,
-        };
-    }
-  }, [filteredPopular, filteredRecent, filteredTopTen, filteredTrending, homeTab]);
-  const activeHomeItems = homeTab === "discover" ? activeDiscoverItems : activeHomeRail.items;
-  const activeHomeLoading = homeSectionLoading[activeHomeSectionKey];
-  const activeHomePage = homeSectionPage[activeHomeSectionKey];
-  const activeHomeHasMore = homeSectionHasMore[activeHomeSectionKey];
-  const activeHomeLoadingMore = homeSectionLoadingMore[activeHomeSectionKey];
   const updateChapterDownloadState = (mangaKey: string, chapterId: string, next: DownloadState) => {
     const key = chapterDownloadKey(mangaKey, chapterId);
     setChapterDownloadStates((current) => ({ ...current, [key]: next }));
@@ -383,103 +330,6 @@ export default function MangaPage() {
   const markChapterDownloaded = (mangaKey: string, chapterId: string) => {
     const key = chapterDownloadKey(mangaKey, chapterId);
     setDownloadedChapterKeys((current) => new Set([...current, key]));
-  };
-
-  const setSectionLoading = (section: MangaHomeSection, loading: boolean) => {
-    setHomeSectionLoading((current) => (
-      current[section] === loading ? current : { ...current, [section]: loading }
-    ));
-  };
-
-  const markSectionLoaded = (section: MangaHomeSection) => {
-    setHomeSectionLoaded((current) => (
-      current[section] ? current : { ...current, [section]: true }
-    ));
-  };
-
-  const setSectionPage = (section: MangaHomeSection, page: number) => {
-    setHomeSectionPage((current) => (
-      current[section] === page ? current : { ...current, [section]: page }
-    ));
-  };
-
-  const setSectionHasMore = (section: MangaHomeSection, hasMore: boolean) => {
-    setHomeSectionHasMore((current) => (
-      current[section] === hasMore ? current : { ...current, [section]: hasMore }
-    ));
-  };
-
-  const setSectionLoadingMore = (section: MangaHomeSection, loading: boolean) => {
-    setHomeSectionLoadingMore((current) => (
-      current[section] === loading ? current : { ...current, [section]: loading }
-    ));
-  };
-
-  const loadTrendingFeed = async (page = 1, options?: { append?: boolean }) => {
-    const sectionKey: MangaHomeSection = "trending";
-    if (options?.append) {
-      setSectionLoadingMore(sectionKey, true);
-    } else {
-      setSectionLoading(sectionKey, true);
-    }
-
-    try {
-      const items = dedupeMangaItems(await fetchTrendingManga(page));
-      const hasMoreItems = items.length >= 20;
-      setTrending((current) => (options?.append ? dedupeMangaItems([...current, ...items]) : items));
-      setSectionPage(sectionKey, page);
-      setSectionHasMore(sectionKey, hasMoreItems);
-      return { items, hasMoreItems };
-    } finally {
-      markSectionLoaded(sectionKey);
-      if (options?.append) {
-        setSectionLoadingMore(sectionKey, false);
-      } else {
-        setSectionLoading(sectionKey, false);
-      }
-    }
-  };
-
-  const loadDiscoverFeed = async (
-    section: MangaDiscoverSection,
-    page = 1,
-    options?: { append?: boolean }
-  ) => {
-    const normalizedSection: MangaDiscoverSection = section || "popular";
-    const sectionKey: MangaHomeSection =
-      normalizedSection === "recent" ? "recent" : normalizedSection === "top" ? "top10" : "popular";
-    const limit = HOME_DISCOVER_PAGE_SIZE;
-
-    if (options?.append) {
-      setSectionLoadingMore(sectionKey, true);
-    } else {
-      setSectionLoading(sectionKey, true);
-    }
-
-    try {
-      const items = dedupeMangaItems(await fetchDiscoverManga(normalizedSection, page, limit));
-      const hasMoreItems = items.length >= limit;
-
-      if (normalizedSection === "recent") {
-        setRecent((current) => (options?.append ? dedupeMangaItems([...current, ...items]) : items));
-      } else if (normalizedSection === "top") {
-        setTopTen((current) => (options?.append ? dedupeMangaItems([...current, ...items]) : items));
-      } else {
-        setPopular((current) => (options?.append ? dedupeMangaItems([...current, ...items]) : items));
-      }
-
-      setSectionPage(sectionKey, page);
-      setSectionHasMore(sectionKey, hasMoreItems);
-
-      return { items, hasMoreItems };
-    } finally {
-      markSectionLoaded(sectionKey);
-      if (options?.append) {
-        setSectionLoadingMore(sectionKey, false);
-      } else {
-        setSectionLoading(sectionKey, false);
-      }
-    }
   };
 
   const revealDownloadedChapter = async (chapter: MangaChapter) => {
@@ -516,71 +366,53 @@ export default function MangaPage() {
 
   const resolveChaptersForItem = async (item: MangaDiscoveryItem, details: MangaDetailsResponse | null, language = "en", source: ChapterSource = "auto") => {
     const mangadexId = details?.mangadex?.mangadex_id || item.mangadex_id;
-    const fetchMangaDexFirst = async () => {
-      if (!mangadexId) return [] as MangaChapter[];
-      const items = await fetchMangaChapters(mangadexId, language);
-      return [...items]
-        .map((entry) => ({ ...entry, provider: "mangadex" as const }))
-        .sort((a, b) => chapterNumber(a.chapter_number) - chapterNumber(b.chapter_number));
-    };
+    const wantsMangadex = source !== "comick" && source !== "consumet" && !!mangadexId;
+    const wantsConsumet = source !== "comick" && !!mangadexId;
+    const wantsComick = source !== "mangadex";
+    const [mdxResult, consumetResult, comickResult] = await Promise.allSettled([
+      wantsMangadex ? fetchMangaChapters(mangadexId!, language) : Promise.resolve([] as MangaChapter[]),
+      wantsConsumet ? fetchConsumetMangaChapters(mangadexId!, "mangadex") : Promise.resolve([] as ConsumetChapter[]),
+      wantsComick ? fetchComickChapters(item.title) : Promise.resolve({ match: null, items: [] as MangaChapter[], total: 0 }),
+    ]);
 
-    const fetchFastReader = async () => {
-      if (!mangadexId) return [] as MangaChapter[];
-      const items = await fetchConsumetMangaChapters(mangadexId, "mangadex");
-      return [...items]
-        .map(mapConsumetChapter)
-        .sort((a, b) => chapterNumber(a.chapter_number) - chapterNumber(b.chapter_number));
-    };
+    const mdxItems = mdxResult.status === "fulfilled"
+      ? [...mdxResult.value].map((entry) => ({ ...entry, provider: "mangadex" as const })).sort((a, b) => chapterNumber(a.chapter_number) - chapterNumber(b.chapter_number))
+      : [];
+    const consumetItems = consumetResult.status === "fulfilled"
+      ? [...consumetResult.value].map(mapConsumetChapter).sort((a, b) => chapterNumber(a.chapter_number) - chapterNumber(b.chapter_number))
+      : [];
+    const comickItems = comickResult.status === "fulfilled"
+      ? [...(comickResult.value.items ?? [])].map((entry) => ({ ...entry, provider: "comick" as const })).sort((a, b) => chapterNumber(a.chapter_number) - chapterNumber(b.chapter_number))
+      : [];
 
-    const fetchBackupReader = async () => {
-      const result = await fetchComickChapters(item.title);
-      return [...(result.items ?? [])]
-        .map((entry) => ({ ...entry, provider: "comick" as const }))
-        .sort((a, b) => chapterNumber(a.chapter_number) - chapterNumber(b.chapter_number));
-    };
-
+    let chosen: MangaChapter[] = [];
+    let resolvedSource: "mangadex" | "comick" | null = null;
     if (source === "mangadex") {
-      const chapters = await fetchMangaDexFirst();
-      if (chapters.length) return { chapters, resolvedSource: "mangadex" as const };
-      throw new Error("No chapters are available for this title right now.");
+      chosen = mdxItems;
+      resolvedSource = chosen.length ? "mangadex" : null;
+    } else if (source === "consumet") {
+      chosen = consumetItems;
+      resolvedSource = chosen.length ? "mangadex" : null;
+    } else if (source === "comick") {
+      chosen = comickItems;
+      resolvedSource = chosen.length ? "comick" : null;
+    } else {
+      chosen = mergeChapterSets(consumetItems, mdxItems, comickItems);
+      resolvedSource = consumetItems.length || mdxItems.length ? "mangadex" : (comickItems.length ? "comick" : null);
     }
 
-    if (source === "consumet") {
-      const chapters = await fetchFastReader();
-      if (chapters.length) return { chapters, resolvedSource: "mangadex" as const };
-      throw new Error("No chapters are available for this title right now.");
+    if (!chosen.length && mdxItems.length) {
+      chosen = mdxItems;
+      resolvedSource = "mangadex";
     }
-
-    if (source === "comick") {
-      const chapters = await fetchBackupReader();
-      if (chapters.length) return { chapters, resolvedSource: "comick" as const };
-      throw new Error("No chapters are available for this title right now.");
+    if (!chosen.length && comickItems.length) {
+      chosen = comickItems;
+      resolvedSource = "comick";
     }
-
-    try {
-      const standard = await fetchMangaDexFirst();
-      if (standard.length) {
-        return { chapters: standard, resolvedSource: "mangadex" as const };
-      }
-    } catch {
-      // fall through
+    if (!chosen.length) {
+      throw new Error("No chapters available from Consumet, MangaDex, or Comick for this title.");
     }
-
-    try {
-      const backup = await fetchBackupReader();
-      if (backup.length) {
-        return { chapters: backup, resolvedSource: "comick" as const };
-      }
-    } catch {
-      // fall through
-    }
-
-    const fastReader = await fetchFastReader();
-    if (fastReader.length) {
-      return { chapters: fastReader, resolvedSource: "mangadex" as const };
-    }
-
-    throw new Error("No chapters are available for this title right now.");
+    return { chapters: chosen, resolvedSource };
   };
 
   const resolvePagesForChapter = async (chapter: MangaChapter): Promise<string[]> => {
@@ -626,13 +458,6 @@ export default function MangaPage() {
     const localRecord = await getOfflineMangaRecord(key);
     setSelectedItem(item);
     setReader(null);
-    setDetailData(localRecord?.detailData ?? null);
-    setChapters(localRecord?.chapters ?? []);
-    setResolvedChapterSource(localRecord?.chapterSource ?? null);
-    setDetailError(null);
-    setChaptersError(null);
-    setDetailLoading(!localRecord);
-    setChaptersLoading(!localRecord);
     if (preferOffline && localRecord) {
       setOfflineRecord(localRecord);
       setDetailData(localRecord.detailData);
@@ -801,97 +626,53 @@ export default function MangaPage() {
   };
 
   const loadHome = async () => {
+    setHomeLoading(true);
     setHomeError(null);
-    setHomeSectionLoading({
-      trending: true,
-      popular: true,
-      recent: true,
-      top10: true,
-    });
-    setHomeSectionLoaded({
-      trending: false,
-      popular: false,
-      recent: false,
-      top10: false,
-    });
-    setHomeSectionPage({
-      trending: 1,
-      popular: 1,
-      recent: 1,
-      top10: 1,
-    });
-    setHomeSectionHasMore({
-      trending: true,
-      popular: true,
-      recent: true,
-      top10: true,
-    });
-    setHomeSectionLoadingMore({
-      trending: false,
-      popular: false,
-      recent: false,
-      top10: false,
-    });
+    try {
+      const [trendingResult, seasonalResult] = await Promise.allSettled([
+        fetchTrendingManga(1),
+        fetchSeasonalManga(seasonYear, season),
+      ]);
 
-    const trendingPromise = loadTrendingFeed(1);
-    const popularPromise = loadDiscoverFeed("popular", 1);
-    const recentPromise = loadDiscoverFeed("recent", 1);
-    const topPromise = loadDiscoverFeed("top", 1);
+      const nextTrending = trendingResult.status === "fulfilled" ? trendingResult.value : [];
+      const nextSeasonal = seasonalResult.status === "fulfilled" ? seasonalResult.value : [];
 
-    const settled = await Promise.allSettled([
-      trendingPromise,
-      popularPromise,
-      recentPromise,
-      topPromise,
-    ]);
+      setTrending(nextTrending);
+      setSeasonal(nextSeasonal);
 
-    const trendingResult = settled[0];
-    const popularResult = settled[1];
-    const recentResult = settled[2];
-    const topResult = settled[3];
-
-    const nextTrending = trendingResult.status === "fulfilled" ? trendingResult.value.items : [];
-    const nextPopular = popularResult.status === "fulfilled" ? popularResult.value.items : [];
-    const nextRecent = recentResult.status === "fulfilled" ? recentResult.value.items : [];
-    const nextTop = topResult.status === "fulfilled" ? topResult.value.items : [];
-
-    if (!nextTrending.length && nextPopular.length && homeTab === "trending") {
-      setHomeTab("discover");
+      if (!nextTrending.length && !nextSeasonal.length) {
+        const reasons = [trendingResult, seasonalResult]
+          .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+          .map((result) => (result.reason instanceof Error ? result.reason.message : "Could not load manga discovery."));
+        setHomeError(reasons[0] || "Could not load manga discovery.");
+      }
+    } finally {
+      setHomeLoading(false);
     }
 
-    if (!nextTrending.length && !nextPopular.length && !nextRecent.length && !nextTop.length) {
-      const reasons = settled
-        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
-        .map((result) => (result.reason instanceof Error ? result.reason.message : "Could not load manga discovery."));
-      setHomeError(reasons[0] || "Could not load manga discovery.");
-    }
+    void Promise.allSettled([
+      fetchComickFrontpage("trending", 1, 12, 7),
+      fetchConsumetMangaDiscover("trending", 1),
+    ]).then(([comickResult, consumetResult]) => {
+      const nextComickHot = comickResult.status === "fulfilled" ? comickResult.value : [];
+      const nextConsumetHot = consumetResult.status === "fulfilled"
+        ? consumetResult.value.map(mapConsumetMangaToDiscovery)
+        : [];
+      setComickHot(nextComickHot);
+      setConsumetHot(nextConsumetHot);
+    }).catch(() => {
+      // secondary manga rails are optional
+    });
   };
 
   useEffect(() => { void loadHome(); }, []);
-
-  const loadMoreHomeFeed = async () => {
-    if (activeHomeLoadingMore || activeHomeLoading || !activeHomeHasMore) return;
-    const nextPage = activeHomePage + 1;
-    if (homeTab === "trending") {
-      await loadTrendingFeed(nextPage, { append: true });
-      return;
-    }
-    const section =
-      homeTab === "discover"
-        ? discoverSection
-        : homeTab === "recent"
-          ? "recent"
-          : homeTab === "top10"
-            ? "top"
-            : "popular";
-    await loadDiscoverFeed(section, nextPage, { append: true });
-  };
 
   useEffect(() => {
     void hydrateOfflineFlags();
   }, []);
 
   useEffect(() => {
+<<<<<<< HEAD
     contentScrollRef.current?.scrollTo({ top: 0 });
   }, [homeTab, query, selectedItem, reader, discoverSection]);
 
@@ -920,6 +701,8 @@ export default function MangaPage() {
   }, [activeHomeItems, filteredRecommendations, filteredSearchResults, query, reader, selectedItem]);
 
   useEffect(() => {
+=======
+>>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
     if (!query.trim()) {
       setSearchResults([]);
       setSearchError(null);
@@ -1075,12 +858,12 @@ export default function MangaPage() {
         if (!cancelled) {
           setReaderPages(sortPageUrls(pages));
           if (!pages.length) {
-            setReaderError("No pages were returned for this chapter.");
+            setReaderError("No reader pages were returned from MangaDex or ComicK for this chapter.");
           }
         }
       } catch (error) {
         if (!cancelled) {
-          setReaderError(error instanceof Error ? error.message : "Could not load chapter pages right now.");
+          setReaderError(error instanceof Error ? error.message : "Could not load chapter pages from MangaDex or ComicK.");
           setReaderPages([]);
         }
       } finally {
@@ -1123,43 +906,13 @@ export default function MangaPage() {
   const visibleChapters = chapters.slice(chapterGroup * 100, chapterGroup * 100 + 100);
   const chapterGroups = Math.max(1, Math.ceil(chapters.length / 100));
   const activeChapter = reader?.chapter ?? null;
-  const handleHomeScroll = () => {
-    const node = contentScrollRef.current;
-    if (!node || selectedItem || reader || query) return;
-    if (activeHomeLoading || activeHomeLoadingMore || !activeHomeHasMore) return;
-    const remaining = node.scrollHeight - node.scrollTop - node.clientHeight;
-    if (remaining < 420) {
-      void loadMoreHomeFeed();
-    }
-  };
-  const detailCover =
-    detailData?.jikan?.cover_image ||
-    detailData?.anilist?.cover_image ||
-    detailData?.mangadex?.cover_image ||
-    detailData?.comick?.cover_image ||
-    selectedItem?.cover_image ||
-    coverFallback(selectedItem?.title || "M");
-  const detailSynopsis =
-    detailData?.jikan?.synopsis ||
-    detailData?.anilist?.description ||
-    detailData?.mangadex?.description ||
-    selectedItem?.description ||
-    (detailLoading ? "Loading manga details for you." : "Metadata unavailable.");
-  const detailStatus =
-    detailData?.jikan?.status ||
-    detailData?.anilist?.status ||
-    detailData?.mangadex?.status ||
-    selectedItem?.status ||
-    "Unknown";
-  const readerModeLabel = getReaderModeLabel(chapterSource, resolvedChapterSource);
-  const showLanguageSelect = chapterSource === "mangadex";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <div style={{ padding: "14px 24px", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <div>
           <div style={{ fontSize: 16, fontWeight: 600 }}>Manga</div>
-          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 1 }}>Browse popular manga, open chapters fast, and keep reading without the noise.</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 1 }}>AniList discovery, Jikan metadata, plus switchable Consumet, MangaDex, and Comick readers</div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <div style={{ position: "relative" }}>
@@ -1170,9 +923,9 @@ export default function MangaPage() {
           {(query || selectedItem) && <button className="btn btn-ghost" onClick={() => { setSearchText(""); setQuery(""); setSelectedItem(null); setReader(null); }}><IconX size={13} /> Clear</button>}
         </div>
       </div>
-      <div ref={contentScrollRef} onScroll={handleHomeScroll} style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
+      <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
         {!selectedItem && !reader && !query && (
-          homeError && !activeHomeLoading && activeHomeItems.length === 0 ? (
+          homeLoading ? <LoadingGrid count={10} /> : homeError ? (
             <PageErrorState
               title="Manga home is unavailable right now"
               subtitle={homeError}
@@ -1180,95 +933,10 @@ export default function MangaPage() {
             />
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
-              <section>
-                <div style={{ marginBottom: 14 }}>
-                  <div style={{ fontSize: 16, fontWeight: 700 }}>Manga Home</div>
-                  <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>Switch tabs and keep scrolling to find more manga.</div>
-                </div>
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  {HOME_TABS.map((tab) => (
-                    <button
-                      key={tab.id}
-                      className="btn"
-                      onClick={() => setHomeTab(tab.id)}
-                      style={{
-                        height: 34,
-                        padding: "0 14px",
-                        border: homeTab === tab.id ? "1px solid var(--accent)" : "1px solid var(--border)",
-                        background: homeTab === tab.id ? "var(--accent-light)" : "transparent",
-                        color: homeTab === tab.id ? "var(--text-accent)" : "var(--text-secondary)",
-                      }}
-                    >
-                      {tab.label}
-                    </button>
-                  ))}
-                </div>
-                {homeTab === "discover" ? (
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
-                    {([
-                      { id: "popular", label: "Popular" },
-                      { id: "recent", label: "Recent" },
-                      { id: "top", label: "Top Rated" },
-                    ] as const).map((section) => (
-                      <button
-                        key={section.id}
-                        className="btn"
-                        onClick={() => setDiscoverSection(section.id)}
-                        style={{
-                          height: 32,
-                          padding: "0 12px",
-                          border: discoverSection === section.id ? "1px solid var(--accent)" : "1px solid var(--border)",
-                          background: discoverSection === section.id ? "var(--accent-light)" : "transparent",
-                          color: discoverSection === section.id ? "var(--text-accent)" : "var(--text-secondary)",
-                        }}
-                      >
-                        {section.label}
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
-              </section>
-              {activeHomeLoading && activeHomeItems.length === 0 ? (
-                <LoadingGrid count={10} />
-              ) : activeHomeItems.length > 0 ? (
-                <section>
-                  <div style={{ marginBottom: 12 }}>
-                    <div style={{ fontSize: 16, fontWeight: 700 }}>
-                      {homeTab === "discover" ? "Discover Manga" : activeHomeRail.title}
-                    </div>
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
-                      {homeTab === "discover" ? "Scroll down to keep finding more manga." : activeHomeRail.subtitle}
-                    </div>
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(165px, 1fr))", gap: 14 }}>
-                    {activeHomeItems.map((item) => (
-                      <MangaCard
-                        key={`${homeTab}-${discoverSection}-${item.anilist_id ?? item.mal_id ?? item.mangadex_id ?? item.title}`}
-                        item={item}
-                        onOpen={() => void openDetails(item)}
-                        onRead={() => void handleRead(item)}
-                        onDownloadAll={() => void handleDownloadAll(item)}
-                        compact={appSettings.compact_media_cards}
-                        showRatings={appSettings.show_ratings_badges}
-                      />
-                    ))}
-                  </div>
-                  {activeHomeLoadingMore ? (
-                    <div style={{ marginTop: 18 }}>
-                      <LoadingGrid count={6} />
-                    </div>
-                  ) : !activeHomeHasMore ? (
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", textAlign: "center", marginTop: 16 }}>
-                      You reached the end of this list.
-                    </div>
-                  ) : null}
-                </section>
-              ) : (
-                <PageEmptyState
-                  title={`${HOME_TABS.find((tab) => tab.id === homeTab)?.label || "This tab"} is unavailable right now`}
-                  subtitle="That manga section could not load right now. Try again in a moment."
-                />
-              )}
+              <HorizontalRail title="Trending Now" subtitle="Powered by AniList discovery" items={filteredTrending} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownloadAll={(item) => void handleDownloadAll(item)} />
+              <HorizontalRail title={`${season.charAt(0)}${season.slice(1).toLowerCase()} Picks`} subtitle={`Seasonal manga for ${seasonYear}`} items={filteredSeasonal} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownloadAll={(item) => void handleDownloadAll(item)} />
+              {filteredConsumetHot.length > 0 && <HorizontalRail title="Consumet MangaDex" subtitle="Primary manga reader matches from Consumet" items={filteredConsumetHot} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownloadAll={(item) => void handleDownloadAll(item)} />}
+              {filteredComickHot.length > 0 && <HorizontalRail title="Comick Hot" subtitle="Backup reader picks for long series" items={filteredComickHot} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownloadAll={(item) => void handleDownloadAll(item)} />}
             </div>
           )
         )}
@@ -1293,8 +961,6 @@ export default function MangaPage() {
                   onOpen={() => void openDetails(item)}
                   onRead={() => void handleRead(item)}
                   onDownloadAll={() => void handleDownloadAll(item)}
-                  compact={appSettings.compact_media_cards}
-                  showRatings={appSettings.show_ratings_badges}
                 />
               ))}
             </div>
@@ -1308,56 +974,41 @@ export default function MangaPage() {
             <button className="btn btn-primary" style={{ position: "fixed", right: 24, bottom: 24, zIndex: 25, boxShadow: "var(--shadow-lg)" }} onClick={() => setSelectedItem(null)}>
               Back
             </button>
-            <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+            {detailLoading ? <LoadingGrid count={4} /> : detailError ? (
+              <PageErrorState
+                title="Manga details could not be loaded"
+                subtitle={detailError}
+                onRetry={() => setSelectedItem({ ...selectedItem })}
+              />
+            ) : detailData ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
                 <section className="card" style={{ padding: 18, display: "grid", gridTemplateColumns: "160px minmax(0, 1fr)", gap: 18 }}>
-                  <CachedImage src={detailCover} fallbackSrc={coverFallback(selectedItem.title)} alt={selectedItem.title} loading="eager" decoding="async" style={{ width: 160, height: 230, objectFit: "cover", borderRadius: 14, border: "1px solid var(--border)" }} />
+                  <img src={detailData.jikan?.cover_image || detailData.anilist?.cover_image || detailData.mangadex?.cover_image || detailData.comick?.cover_image || coverFallback(selectedItem.title)} alt={selectedItem.title} loading="eager" decoding="async" style={{ width: 160, height: 230, objectFit: "cover", borderRadius: 14, border: "1px solid var(--border)" }} onError={(event) => { (event.target as HTMLImageElement).src = coverFallback(selectedItem.title); }} />
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: 24, fontWeight: 800, lineHeight: 1.2 }}>{selectedItem.title}</div>
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
-                      {!!detailData?.jikan?.score && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "var(--bg-surface2)", padding: "5px 10px", borderRadius: 999, color: "#f6d061", fontSize: 12, fontWeight: 700 }}><IconStar size={11} color="#f6d061" /> Score {detailData.jikan.score}</span>}
-                      {!!detailData?.anilist?.score && <span style={{ background: "var(--bg-surface2)", padding: "5px 10px", borderRadius: 999, fontSize: 12 }}>Community {detailData.anilist.score}</span>}
-                      <span style={{ background: "var(--bg-surface2)", padding: "5px 10px", borderRadius: 999, fontSize: 12 }}>{detailStatus}</span>
+                      {!!detailData.jikan?.score && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "var(--bg-surface2)", padding: "5px 10px", borderRadius: 999, color: "#f6d061", fontSize: 12, fontWeight: 700 }}><IconStar size={11} color="#f6d061" /> MAL {detailData.jikan.score}</span>}
+                      {!!detailData.anilist?.score && <span style={{ background: "var(--bg-surface2)", padding: "5px 10px", borderRadius: 999, fontSize: 12 }}>AniList {detailData.anilist.score}</span>}
+                      <span style={{ background: "var(--bg-surface2)", padding: "5px 10px", borderRadius: 999, fontSize: 12 }}>{detailData.jikan?.status || detailData.anilist?.status || detailData.mangadex?.status || "Unknown"}</span>
                     </div>
-                    <div style={{ marginTop: 14, fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7 }}>{detailSynopsis}</div>
-                    {detailLoading ? <div style={{ marginTop: 12, fontSize: 12, color: "var(--text-muted)" }}>Loading the rest of this manga now.</div> : null}
+                    <div style={{ marginTop: 14, fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7 }}>{detailData.jikan?.synopsis || detailData.anilist?.description || detailData.mangadex?.description || "Metadata unavailable."}</div>
                   </div>
                 </section>
-                {detailError && !detailData ? (
-                  <PageErrorState
-                    title="Manga details could not be loaded"
-                    subtitle={detailError}
-                    onRetry={() => setSelectedItem({ ...selectedItem })}
-                  />
-                ) : null}
                 <section className="card" style={{ padding: 18 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
                     <div>
                       <div style={{ fontSize: 16, fontWeight: 700 }}>Chapter List</div>
-                      <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>{readerModeLabel}</div>
+                      <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>{resolvedChapterSource === "comick" ? "Comick backup reader" : chapterSource === "consumet" ? "Consumet MangaDex reader" : "MangaDex reader"}</div>
                     </div>
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                      {showLanguageSelect ? (
-                        <select className="input-base" style={{ width: 140, fontSize: 13 }} value={chapterLanguage} onChange={(event) => setChapterLanguage(event.target.value)}>
-                          {LANGUAGE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                        </select>
-                      ) : null}
-                      <select
-                        className="input-base"
-                        style={{ width: 180, fontSize: 13 }}
-                        value={chapterSource}
-                        onChange={(event) => {
-                          const nextSource = event.target.value as ChapterSource;
-                          setChapterSource(nextSource);
-                          if (nextSource !== "mangadex" && chapterLanguage !== "en") {
-                            setChapterLanguage("en");
-                          }
-                        }}
-                        title="Reading mode"
-                      >
-                        <option value="auto">Best Available</option>
-                        <option value="consumet">Fast Reader</option>
-                        <option value="mangadex">Standard Reader</option>
-                        <option value="comick">Backup Reader</option>
+                      <select className="input-base" style={{ width: 140, fontSize: 13 }} value={chapterLanguage} onChange={(event) => setChapterLanguage(event.target.value)}>
+                        {LANGUAGE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                      </select>
+                      <select className="input-base" style={{ width: 180, fontSize: 13 }} value={chapterSource} onChange={(event) => setChapterSource(event.target.value as ChapterSource)} title="Reader source">
+                        <option value="auto">Auto</option>
+                        <option value="consumet">Consumet Reader</option>
+                        <option value="mangadex">MangaDex Reader</option>
+                        <option value="comick">Comick Reader</option>
                       </select>
                     </div>
                   </div>
@@ -1369,8 +1020,8 @@ export default function MangaPage() {
                     />
                   ) : chapters.length === 0 ? (
                     <PageEmptyState
-                      title="No chapters are available right now"
-                      subtitle={showLanguageSelect ? "Try another language or reading mode." : "Try another reading mode."}
+                      title="No chapters are available from this reader source"
+                      subtitle="Try another reader source or language."
                     />
                   ) : (
                     <>
@@ -1384,19 +1035,16 @@ export default function MangaPage() {
                         </div>
                       )}
                       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        {visibleChapters.map((chapter, index) => {
+{visibleChapters.map((chapter, index) => {
                           const mangaKey = getOfflineMangaKey(selectedItem);
                           const stateKey = chapterDownloadKey(mangaKey, chapter.chapter_id);
                           const downloadState = chapterDownloadStates[stateKey];
                           const isDownloaded = downloadedChapterKeys.has(stateKey);
-                          const chapterMeta = showLanguageSelect && chapter.language
-                            ? `Language ${chapter.language.toUpperCase()}`
-                            : "Ready to read";
                           return (
                             <div key={`${chapter.provider ?? "mangadex"}-${chapter.chapter_id}`} className="card" style={{ padding: "12px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", textAlign: "left", gap: 12, border: "1px solid var(--border)", background: "var(--bg-surface)" }}>
                               <div style={{ minWidth: 0 }}>
-                                <div style={{ fontSize: 13, fontWeight: 600 }}>Chapter {chapter.chapter_number}{chapter.title ? ` - ${chapter.title}` : ""}</div>
-                                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>{chapterMeta}</div>
+                                <div style={{ fontSize: 13, fontWeight: 600 }}>Chapter {chapter.chapter_number}{chapter.title ? ` · ${chapter.title}` : ""}</div>
+                                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>{(chapter.source_name || chapter.provider || resolvedChapterSource || "mangadex").toUpperCase()} · {chapter.language.toUpperCase()}</div>
                                 {downloadState?.message ? <div style={{ fontSize: 11, color: downloadState.status === "error" ? "var(--text-danger)" : "var(--text-muted)", marginTop: 6 }}>{downloadState.message}</div> : null}
                               </div>
                               <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
@@ -1465,12 +1113,11 @@ export default function MangaPage() {
                       onOpen={() => void openDetails(item)}
                       onRead={() => void handleRead(item)}
                       onDownloadAll={() => void handleDownloadAll(item)}
-                      compact={appSettings.compact_media_cards}
-                      showRatings={appSettings.show_ratings_badges}
                     />
                   ))}</div>}
                 </section>
               </div>
+            ) : null}
           </>
         )}
         {selectedItem && reader && activeChapter && (
@@ -1486,9 +1133,9 @@ export default function MangaPage() {
               Back
             </button>
             <div className="card" style={{ padding: 16, marginBottom: 16 }}>
-              <div style={{ fontSize: 18, fontWeight: 700 }}>{selectedItem.title} - Chapter {activeChapter.chapter_number}</div>
+              <div style={{ fontSize: 18, fontWeight: 700 }}>{selectedItem.title} · Chapter {activeChapter.chapter_number}</div>
               {activeChapter.title ? <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 4 }}>{activeChapter.title}</div> : null}
-              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>Reading mode: {readerModeLabel}</div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>Source: {(activeChapter.source_name || activeChapter.provider || resolvedChapterSource || "mangadex").toUpperCase()}</div>
             </div>
             {readerLoading ? <LoadingGrid count={6} /> : readerError ? (
               <PageErrorState
@@ -1499,7 +1146,7 @@ export default function MangaPage() {
             ) : readerPages.length === 0 ? (
               <PageEmptyState
                 title="This chapter is unavailable right now"
-                subtitle="Try another chapter or change the reading mode."
+                subtitle="Try another chapter or switch the reader source."
               />
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "center" }}>

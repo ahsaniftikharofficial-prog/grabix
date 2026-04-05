@@ -85,75 +85,14 @@ function Remove-PathIfPresent([string]$Path) {
     }
 }
 
-function Write-Utf8NoBom([string]$Path, [string]$Content) {
-    $parent = Split-Path -Parent $Path
-    if (-not [string]::IsNullOrWhiteSpace($parent)) {
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    }
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
-}
-
-function Get-RuntimeConfigCandidatePaths() {
-    $paths = New-Object System.Collections.Generic.List[string]
-
-    $rootLocalRuntimeConfig = Join-Path $root "runtime-config.local.json"
-    $paths.Add($rootLocalRuntimeConfig) | Out-Null
-    $paths.Add($tauriRuntimeConfig) | Out-Null
-
-    foreach ($base in @(
-        (Join-Path $env:LOCALAPPDATA "com.grabix.app"),
-        (Join-Path $env:LOCALAPPDATA "GRABIX")
-    )) {
-        if ([string]::IsNullOrWhiteSpace($base)) {
-            continue
-        }
-        $paths.Add((Join-Path $base "backend-state\runtime-config.json")) | Out-Null
-        $paths.Add((Join-Path $base "runtime-config.json")) | Out-Null
-    }
-
-    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-    $ordered = New-Object System.Collections.Generic.List[string]
-    foreach ($candidate in $paths) {
-        if ([string]::IsNullOrWhiteSpace($candidate)) {
-            continue
-        }
-        if ($seen.Add($candidate)) {
-            $ordered.Add($candidate) | Out-Null
-        }
-    }
-    return $ordered
-}
-
-function Resolve-RuntimeConfigSource() {
-    $explicitSource = [string]$env:GRABIX_RUNTIME_CONFIG_SOURCE
-    if (-not [string]::IsNullOrWhiteSpace($explicitSource)) {
-        return @{
-            Path = $explicitSource
-            Origin = "env:GRABIX_RUNTIME_CONFIG_SOURCE"
-            Explicit = $true
-        }
-    }
-
-    foreach ($candidate in (Get-RuntimeConfigCandidatePaths)) {
-        if (Test-Path -LiteralPath $candidate) {
-            return @{
-                Path = $candidate
-                Origin = $candidate
-                Explicit = $false
-            }
-        }
-    }
-
-    return $null
-}
-
 function Write-PackagedRuntimeConfig([string]$DestinationPath) {
-    $runtimeConfigSource = $null
+    $runtimeConfigSource = [string]$env:GRABIX_RUNTIME_CONFIG_SOURCE
     $tmdbToken = [string]$env:GRABIX_TMDB_BEARER_TOKEN
-    $resolvedSource = Resolve-RuntimeConfigSource
-    if ($null -ne $resolvedSource) {
-        $runtimeConfigSource = [string]$resolvedSource.Path
+    if ([string]::IsNullOrWhiteSpace($runtimeConfigSource)) {
+        $defaultLocalRuntimeConfig = Join-Path $root "runtime-config.local.json"
+        if (Test-Path -LiteralPath $defaultLocalRuntimeConfig) {
+            $runtimeConfigSource = $defaultLocalRuntimeConfig
+        }
     }
 
     if (-not [string]::IsNullOrWhiteSpace($runtimeConfigSource)) {
@@ -184,17 +123,8 @@ function Write-PackagedRuntimeConfig([string]$DestinationPath) {
                 -Hint "Add tmdb_bearer_token to the runtime config JSON before building the installer."
         }
 
-        Write-Utf8NoBom -Path $DestinationPath -Content $raw
-
-        $defaultLocalRuntimeConfig = Join-Path $root "runtime-config.local.json"
-        if ($null -ne $resolvedSource -and -not [bool]$resolvedSource.Explicit -and `
-            ($runtimeConfigSource -ne $defaultLocalRuntimeConfig) -and `
-            (-not (Test-Path -LiteralPath $defaultLocalRuntimeConfig))) {
-            Write-Utf8NoBom -Path $defaultLocalRuntimeConfig -Content $raw
-            Write-Host "      cached runtime-config.local.json from $($resolvedSource.Origin)" -ForegroundColor DarkGray
-        } elseif ($null -ne $resolvedSource) {
-            Write-Host "      using runtime config from $($resolvedSource.Origin)" -ForegroundColor DarkGray
-        }
+        New-Item -ItemType Directory -Path (Split-Path -Parent $DestinationPath) -Force | Out-Null
+        Set-Content -LiteralPath $DestinationPath -Value $raw -Encoding UTF8
         return
     }
 
@@ -212,7 +142,8 @@ function Write-PackagedRuntimeConfig([string]$DestinationPath) {
         tmdb_bearer_token = $tmdbToken.Trim()
     }
 
-    Write-Utf8NoBom -Path $DestinationPath -Content ($payload | ConvertTo-Json -Depth 10)
+    New-Item -ItemType Directory -Path (Split-Path -Parent $DestinationPath) -Force | Out-Null
+    $payload | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $DestinationPath -Encoding UTF8
 }
 
 function Test-IncludedBackendFile([System.IO.FileInfo]$File, [string]$RootPath) {

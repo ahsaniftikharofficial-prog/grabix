@@ -11,9 +11,12 @@ import { useContentFilter } from "../context/ContentFilterContext";
 import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
 import { filterAdultContent } from "../lib/contentFilter";
 import { getCachedJson } from "../lib/cache";
+<<<<<<< HEAD
 import CachedImage from "../components/CachedImage";
 import { readLocalAppSettings } from "../lib/appSettings";
 import { warmMediaCache } from "../lib/mediaCache";
+=======
+>>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
 import { TMDB_BACKDROP_BASE as IMG_LG, TMDB_IMAGE_BASE as IMG_BASE, discoverTmdbMedia, fetchTmdbDetails, searchTmdbMedia } from "../lib/tmdb";
 import VidSrcPlayer from "../components/VidSrcPlayer";
@@ -33,7 +36,6 @@ interface ArchiveItem {
 type Tab = "trending" | "popular" | "toprated" | "free";
 
 export default function MoviesPage() {
-  const appSettings = readLocalAppSettings();
   const { adultContentBlocked } = useContentFilter();
   const [tab, setTab]       = useState<Tab>("trending");
   const [movies, setMovies] = useState<Movie[]>([]);
@@ -115,23 +117,6 @@ export default function MoviesPage() {
     if (query) { searchMovies(query, 1); return; }
     if (tab === "free") fetchFree(); else fetchTMDB(tab, 1);
   }, [tab, query]);
-
-  useEffect(() => {
-    if (query || tab === "free") return;
-    const warmTabs = (["trending", "popular", "toprated"] as const).filter((value) => value !== tab);
-    const timer = window.setTimeout(() => {
-      void Promise.allSettled(
-        warmTabs.map((value) =>
-          discoverTmdbMedia(
-            "movie",
-            value === "toprated" ? "top_rated" : value === "popular" ? "popular" : "trending",
-            1
-          )
-        )
-      );
-    }, 900);
-    return () => window.clearTimeout(timer);
-  }, [query, tab]);
 
   useEffect(() => {
     if (tab === "free") return;
@@ -225,7 +210,7 @@ export default function MoviesPage() {
          ) : (
           <>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 }}>
-              {filteredMovies.map(m => <MovieCard key={m.id} movie={m} onClick={() => setDetail(m)} compact={appSettings.compact_media_cards} showRatings={appSettings.show_ratings_badges} />)}
+              {filteredMovies.map(m => <MovieCard key={m.id} movie={m} onClick={() => setDetail(m)} />)}
             </div>
             <div ref={bottomRef} style={{ height: 24 }} />
           </>
@@ -239,13 +224,12 @@ export default function MoviesPage() {
   );
 }
 
-function MovieCard({ movie, onClick, compact, showRatings }: { movie: Movie; onClick: () => void; compact: boolean; showRatings: boolean }) {
-  const posterHeight = compact ? 188 : 210;
+function MovieCard({ movie, onClick }: { movie: Movie; onClick: () => void }) {
   return (
     <div className="card" style={{ overflow: "hidden", cursor: "pointer", transition: "transform 0.15s" }} onClick={onClick} onMouseEnter={e => (e.currentTarget.style.transform = "translateY(-3px)")} onMouseLeave={e => (e.currentTarget.style.transform = "translateY(0)")}>
       <div style={{ position: "relative" }}>
-        {movie.poster_path ? <CachedImage src={`${IMG_BASE}${movie.poster_path}`} alt={movie.title} style={{ width: "100%", height: posterHeight, objectFit: "cover" }} /> : <div style={{ width: "100%", height: posterHeight, background: "var(--bg-surface2)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>No Poster</div>}
-        {showRatings && movie.vote_average > 0 && <div style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.75)", color: "#fdd663", fontSize: 11, padding: "2px 7px", borderRadius: 6, display: "flex", alignItems: "center", gap: 3, fontWeight: 600 }}><IconStar size={10} color="#fdd663" /> {movie.vote_average.toFixed(1)}</div>}
+        {movie.poster_path ? <img src={`${IMG_BASE}${movie.poster_path}`} alt={movie.title} style={{ width: "100%", height: 210, objectFit: "cover" }} /> : <div style={{ width: "100%", height: 210, background: "var(--bg-surface2)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>No Poster</div>}
+        {movie.vote_average > 0 && <div style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.75)", color: "#fdd663", fontSize: 11, padding: "2px 7px", borderRadius: 6, display: "flex", alignItems: "center", gap: 3, fontWeight: 600 }}><IconStar size={10} color="#fdd663" /> {movie.vote_average.toFixed(1)}</div>}
       </div>
       <div style={{ padding: "8px 10px" }}>
         <div style={{ fontSize: 12, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{movie.title}</div>
@@ -259,7 +243,7 @@ function FreeCard({ movie, onClick }: { movie: ArchiveItem; onClick: () => void 
   return (
     <div className="card" style={{ overflow: "hidden", cursor: "pointer", transition: "transform 0.15s" }} onClick={onClick} onMouseEnter={e => (e.currentTarget.style.transform = "translateY(-3px)")} onMouseLeave={e => (e.currentTarget.style.transform = "translateY(0)")}>
       <div style={{ position: "relative" }}>
-        <CachedImage src={movie.thumb || ""} fallbackSrc="https://via.placeholder.com/150x210?text=No+Poster" alt={movie.title} style={{ width: "100%", height: 210, objectFit: "cover" }} />
+        <img src={movie.thumb} alt={movie.title} style={{ width: "100%", height: 210, objectFit: "cover" }} onError={e => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/150x210?text=No+Poster"; }} />
         <div style={{ position: "absolute", top: 6, left: 6, background: "var(--text-success)", color: "white", fontSize: 9, padding: "2px 6px", borderRadius: 5, fontWeight: 700 }}>FREE</div>
       </div>
       <div style={{ padding: "8px 10px" }}>

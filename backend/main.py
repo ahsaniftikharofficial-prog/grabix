@@ -29,7 +29,6 @@ from app.services.errors import json_error_response
 from app.services.logging_utils import LOG_DIR, backend_log_path, get_logger, log_event, read_recent_log_events
 from app.services.archive_installer import parse_checksum_manifest, safe_extract_zip, sha256_file
 from app.services.desktop_auth import DESKTOP_AUTH_HEADER, desktop_auth_state_snapshot, validate_desktop_auth_request
-from app.services.request_guard import enforce_rate_limit
 from app.services.network_policy import validate_outbound_target
 from app.services.route_registry import register_route_handlers
 from app.services.runtime_config import (
@@ -387,7 +386,10 @@ def _correlation_id_from_request(request: Request | None) -> str:
 async def correlation_middleware(request: Request, call_next):
     correlation_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
     request.state.correlation_id = correlation_id
+<<<<<<< HEAD
     # Rate limiting removed — local desktop app, no need to throttle own requests.
+=======
+>>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
     auth_failure = validate_desktop_auth_request(request)
     if auth_failure is not None:
         payload = dict(auth_failure["payload"])

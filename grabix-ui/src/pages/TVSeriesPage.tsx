@@ -10,10 +10,14 @@ import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
 import { filterAdultContent } from "../lib/contentFilter";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
 import { TMDB_BACKDROP_BASE as IMG_LG, TMDB_IMAGE_BASE as IMG_BASE, discoverTmdbMedia, fetchTmdbDetails, fetchTmdbTvSeason, searchTmdbMedia } from "../lib/tmdb";
+<<<<<<< HEAD
 import { fetchMovieBoxSources, getTvSources, prewarmPlaybackSources, resolveTvPlaybackSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
 import CachedImage from "../components/CachedImage";
 import { readLocalAppSettings } from "../lib/appSettings";
 import { warmMediaCache } from "../lib/mediaCache";
+=======
+import { fetchMovieBoxSources, getTvSources, resolveTvPlaybackSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
+>>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
 
 interface Show {
   id: number;
@@ -34,7 +38,6 @@ interface Show {
 type Tab = "trending" | "popular" | "toprated" | "onair";
 
 export default function TVSeriesPage() {
-  const appSettings = readLocalAppSettings();
   const { adultContentBlocked } = useContentFilter();
   const [tab, setTab] = useState<Tab>("trending");
   const [shows, setShows] = useState<Show[]>([]);
@@ -108,23 +111,6 @@ export default function TVSeriesPage() {
     }
     fetchTMDB(tab, 1);
   }, [tab, query]);
-
-  useEffect(() => {
-    if (query) return;
-    const warmTabs = (["trending", "popular", "toprated", "onair"] as const).filter((value) => value !== tab);
-    const timer = window.setTimeout(() => {
-      void Promise.allSettled(
-        warmTabs.map((value) =>
-          discoverTmdbMedia(
-            "tv",
-            value === "toprated" ? "top_rated" : value === "popular" ? "popular" : value === "onair" ? "on_the_air" : "trending",
-            1
-          )
-        )
-      );
-    }, 900);
-    return () => window.clearTimeout(timer);
-  }, [query, tab]);
 
   useEffect(() => {
     const root = scrollRef.current;
@@ -211,7 +197,7 @@ export default function TVSeriesPage() {
         ) : (
           <>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 }}>
-              {filteredShows.map((show) => <SeriesCard key={show.id} show={show} onClick={() => setDetail(show)} compact={appSettings.compact_media_cards} showRatings={appSettings.show_ratings_badges} />)}
+              {filteredShows.map((show) => <SeriesCard key={show.id} show={show} onClick={() => setDetail(show)} />)}
             </div>
             <div ref={bottomRef} style={{ height: 24 }} />
           </>
@@ -224,13 +210,12 @@ export default function TVSeriesPage() {
   );
 }
 
-function SeriesCard({ show, onClick, compact, showRatings }: { show: Show; onClick: () => void; compact: boolean; showRatings: boolean }) {
-  const posterHeight = compact ? 188 : 210;
+function SeriesCard({ show, onClick }: { show: Show; onClick: () => void }) {
   return (
     <div className="card" style={{ overflow: "hidden", cursor: "pointer", transition: "transform 0.15s" }} onClick={onClick} onMouseEnter={(e) => (e.currentTarget.style.transform = "translateY(-3px)")} onMouseLeave={(e) => (e.currentTarget.style.transform = "translateY(0)")}>
       <div style={{ position: "relative" }}>
-        {show.poster_path ? <CachedImage src={`${IMG_BASE}${show.poster_path}`} alt={show.name} style={{ width: "100%", height: posterHeight, objectFit: "cover" }} /> : <div style={{ width: "100%", height: posterHeight, background: "var(--bg-surface2)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>No Poster</div>}
-        {showRatings && show.vote_average > 0 && <div style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.75)", color: "#fdd663", fontSize: 11, padding: "2px 7px", borderRadius: 6, display: "flex", alignItems: "center", gap: 3, fontWeight: 600 }}><IconStar size={10} color="#fdd663" /> {show.vote_average.toFixed(1)}</div>}
+        {show.poster_path ? <img src={`${IMG_BASE}${show.poster_path}`} alt={show.name} style={{ width: "100%", height: 210, objectFit: "cover" }} /> : <div style={{ width: "100%", height: 210, background: "var(--bg-surface2)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>No Poster</div>}
+        {show.vote_average > 0 && <div style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.75)", color: "#fdd663", fontSize: 11, padding: "2px 7px", borderRadius: 6, display: "flex", alignItems: "center", gap: 3, fontWeight: 600 }}><IconStar size={10} color="#fdd663" /> {show.vote_average.toFixed(1)}</div>}
       </div>
       <div style={{ padding: "8px 10px" }}>
         <div style={{ fontSize: 12, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{show.name}</div>

@@ -27,9 +27,12 @@ import {
   IconStar,
   IconX,
 } from "../components/Icons";
+<<<<<<< HEAD
 import { readLocalAppSettings } from "../lib/appSettings";
 import CachedImage from "../components/CachedImage";
 import { warmMediaCache } from "../lib/mediaCache";
+=======
+>>>>>>> parent of bccccc5 (Add request guard, validation, and rate limiting)
 
 type Filter = "all" | "movie" | "series" | "anime" | "hindi";
 
@@ -59,7 +62,6 @@ function toServerOption(option: DownloadQualityOption) {
 }
 
 export default function MovieBoxPage() {
-  const appSettings = readLocalAppSettings();
   const { adultContentBlocked } = useContentFilter();
   const [discover, setDiscover] = useState<MovieBoxSection[]>([]);
   const [popularSearches, setPopularSearches] = useState<string[]>([]);
@@ -68,7 +70,7 @@ export default function MovieBoxPage() {
   const [pageError, setPageError] = useState("");
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<Filter>(appSettings.moviebox_prefer_hindi ? "hindi" : "all");
+  const [filter, setFilter] = useState<Filter>("all");
   const [page, setPage] = useState(1);
   const [detail, setDetail] = useState<MovieBoxItem | null>(null);
   const [player, setPlayer] = useState<PlayerState | null>(null);
@@ -270,7 +272,7 @@ export default function MovieBoxPage() {
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
                 Searching Movie Box with Hindi priority and direct-source playback.
               </div>
-              <MediaGrid items={filteredResults} onOpen={setDetail} compact={appSettings.compact_media_cards} showRatings={appSettings.show_ratings_badges} />
+              <MediaGrid items={filteredResults} onOpen={setDetail} />
               <div style={{ textAlign: "center", marginTop: 24 }}>
                 <button className="btn btn-ghost" style={{ gap: 6 }} onClick={loadMore} disabled={loading || filteredResults.length < 24}>
                   <IconRefresh size={14} /> Load more
@@ -302,7 +304,7 @@ export default function MovieBoxPage() {
                     Focus
                   </button>
                 </div>
-                <MediaGrid items={section.items.slice(0, 8)} onOpen={setDetail} compact={appSettings.compact_media_cards} showRatings={appSettings.show_ratings_badges} />
+                <MediaGrid items={section.items.slice(0, 8)} onOpen={setDetail} />
               </section>
             ))}
           </div>
@@ -315,18 +317,7 @@ export default function MovieBoxPage() {
   );
 }
 
-function MediaGrid({
-  items,
-  onOpen,
-  compact,
-  showRatings,
-}: {
-  items: MovieBoxItem[];
-  onOpen: (item: MovieBoxItem) => void;
-  compact: boolean;
-  showRatings: boolean;
-}) {
-  const posterHeight = compact ? 196 : 220;
+function MediaGrid({ items, onOpen }: { items: MovieBoxItem[]; onOpen: (item: MovieBoxItem) => void }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(155px, 1fr))", gap: 14 }}>
       {items.map((item) => (
@@ -340,13 +331,13 @@ function MediaGrid({
         >
           <div style={{ position: "relative" }}>
             {item.poster ? (
-              <MovieBoxPoster item={item} alt={item.title} height={posterHeight} />
+              <MovieBoxPoster item={item} alt={item.title} height={220} />
             ) : (
-              <div style={{ width: "100%", height: posterHeight, background: "var(--bg-surface2)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>
+              <div style={{ width: "100%", height: 220, background: "var(--bg-surface2)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>
                 No Poster
               </div>
             )}
-            {showRatings && item.imdb_rating ? (
+            {item.imdb_rating ? (
               <div style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.75)", color: "#fdd663", fontSize: 11, padding: "2px 7px", borderRadius: 6, display: "flex", alignItems: "center", gap: 3, fontWeight: 600 }}>
                 <IconStar size={10} color="#fdd663" /> {item.imdb_rating.toFixed(1)}
               </div>
@@ -951,9 +942,8 @@ function MovieBoxPoster({
   }, [item.poster, item.poster_proxy]);
 
   return (
-    <CachedImage
+    <img
       src={src}
-      fallbackSrc={item.poster_proxy || item.poster || ""}
       alt={alt}
       loading="lazy"
       decoding="async"
