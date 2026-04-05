@@ -1278,6 +1278,21 @@ async def resolve_anime_playback(
                 if not any(group.get("id") == group_id for group in groups):
                     groups.append({"id": group_id, "label": f"{provider_name} watch fallback", "sources": watch_sources})
                 if purpose == "play":
+                    if tmdb_id and not any(g.get("id") == "embed" for g in groups):
+                        try:
+                            _eb = await registry.execute(
+                                "embed", "sources",
+                                correlation_id=correlation_id,
+                                fallback_used=True,
+                                media_type="anime",
+                                tmdb_id=tmdb_id,
+                                season=max(1, fallback_season),
+                                episode=max(1, fallback_episode or episode_number),
+                            )
+                            if _eb:
+                                groups.append({"id": "embed", "label": "Embed fallback", "sources": _eb})
+                        except ProviderServiceError:
+                            pass
                     return _resolution_payload(
                         correlation_id=correlation_id,
                         groups=groups,
@@ -1337,6 +1352,21 @@ async def resolve_anime_playback(
                 if not any(group.get("id") == group_id for group in groups):
                     groups.append({"id": group_id, "label": f"Backend resolved fallback ({provider_name})", "sources": resolved_sources})
                 if purpose == "play":
+                    if tmdb_id and not any(g.get("id") == "embed" for g in groups):
+                        try:
+                            _eb = await registry.execute(
+                                "embed", "sources",
+                                correlation_id=correlation_id,
+                                fallback_used=True,
+                                media_type="anime",
+                                tmdb_id=tmdb_id,
+                                season=max(1, fallback_season),
+                                episode=max(1, fallback_episode or episode_number),
+                            )
+                            if _eb:
+                                groups.append({"id": "embed", "label": "Embed fallback", "sources": _eb})
+                        except ProviderServiceError:
+                            pass
                     return _resolution_payload(
                         correlation_id=correlation_id,
                         groups=groups,

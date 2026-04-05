@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import time
@@ -1469,29 +1470,35 @@ async def fetch_anime_watch(
         else:
             servers = ["vidstreaming", "vidcloud"]
         categories = ["dub", "sub"] if requested_audio in {"hi", "en"} else ["sub", "dub"]
-        last_error: HTTPException | None = None
-        for category in categories:
-            for server_name in servers:
-                try:
-                    payload = await _fetch_consumet_json(
-                        f"/anime/{provider}/watch/{quote(episode_id)}",
-                        params={"server": server_name, "category": category},
-                        ttl_seconds=180,
-                    )
-                    normalized = normalize_watch_payload(
-                        payload,
-                        provider=provider,
-                        requested_audio=requested_audio if category == "dub" else "original",
-                        server=server_name,
-                    )
-                    if normalized["sources"]:
-                        normalized["category"] = category
-                        return normalized
-                except HTTPException as exc:
-                    last_error = exc
-                    continue
-        if last_error:
-            raise last_error
+
+        async def _try_hianime(category: str, server_name: str) -> "dict[str, Any] | None":
+            try:
+                payload = await _fetch_consumet_json(
+                    f"/anime/{provider}/watch/{quote(episode_id)}",
+                    params={"server": server_name, "category": category},
+                    ttl_seconds=180,
+                )
+                normalized = normalize_watch_payload(
+                    payload,
+                    provider=provider,
+                    requested_audio=requested_audio if category == "dub" else "original",
+                    server=server_name,
+                )
+                if normalized["sources"]:
+                    normalized["category"] = category
+                    return normalized
+            except HTTPException:
+                pass
+            return None
+
+        combos = [(cat, srv) for cat in categories for srv in servers]
+        results = await asyncio.gather(
+            *[_try_hianime(cat, srv) for cat, srv in combos],
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, dict) and result.get("sources"):
+                return result
         raise _http_error("Hianime did not return any playable anime sources.")
 
     if provider == "zoro":

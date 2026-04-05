@@ -507,7 +507,7 @@ export default function VidSrcPlayer({
         if (!embedLoadedRef.current) {
           goToNextSource("timeout");
         }
-      }, 20_000);
+      }, 8_000);
 
       return () => {
         window.clearTimeout(failoverTimeout);
