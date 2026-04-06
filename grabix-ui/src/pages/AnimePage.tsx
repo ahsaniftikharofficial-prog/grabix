@@ -52,8 +52,8 @@ const AUDIO_BUTTONS: Array<{ id: AnimeAudioOption; label: string; help: string }
 ];
 const SERVER_BUTTONS: Array<{ id: AnimeServerOption; label: string; help: string }> = [
   { id: "auto", label: "Auto", help: "Fastest available source" },
-  { id: "hd-1", label: "HD-1", help: "HiAnime primary" },
-  { id: "hd-2", label: "HD-2", help: "HiAnime backup" },
+  { id: "hd-1", label: "HD-1", help: "AniWatch primary" },
+  { id: "hd-2", label: "HD-2", help: "AniWatch backup" },
 ];
 
 interface LegacyAnime {
@@ -848,6 +848,13 @@ function AnimeDetail({
         : dedupeItems([anime]);
       setCandidateAnimes(nextCandidates);
 
+      // ── Fast dub detection for AniWatch items ────────────────────────────
+      // AniWatch search/discover results already carry dub_episode_count;
+      // use it immediately so the Dub button appears without the slow round-trip.
+      if (anime.provider === "hianime" && typeof anime.dub_episode_count === "number") {
+        setDubEpisodeCount(anime.dub_episode_count);
+      }
+
       const titleCandidates = expandAnimeTitles(anime.title, anime.alt_title).slice(0, 4);
       void Promise.allSettled(
         titleCandidates.map((candidateTitle) =>
@@ -893,7 +900,11 @@ function AnimeDetail({
             };
             if (nextEpisodes.length > 0) {
               setResolvedAnime({ ...candidate, ...detail.item, provider: candidate.provider, id: candidate.id });
-              setDubEpisodeCount(typeof detail.item.dub_episode_count === "number" ? detail.item.dub_episode_count : (detail.item.languages ?? []).some((l: string) => l === "en" || l === "dub") ? Infinity : 0);
+              // Refine dub count from detail — prefer explicit number, fall back to language flags
+              const detailDubCount = typeof detail.item.dub_episode_count === "number"
+                ? detail.item.dub_episode_count
+                : (detail.item.languages ?? []).some((l: string) => l === "en" || l === "dub") ? Infinity : 0;
+              setDubEpisodeCount(detailDubCount);
               setEpisodes(nextEpisodes);
               setKnownEpisodeCount((current) => Math.max(current ?? 0, nextEpisodes.length));
               setDetailHint(`Episode sources available via ${candidate.provider.toUpperCase()}`);
@@ -1266,11 +1277,11 @@ function AnimeDetail({
   const playerServerOptions = (() => {
     const normalizedAudio = normalizeAudioPreference(audio);
     const subOptions = [
-      { id: "hd-1:original", label: "HD-1 SUB" },
-      { id: "hd-2:original", label: "HD-2 SUB" },
+      { id: "hd-1:original", label: "AniWatch SUB" },
+      { id: "hd-2:original", label: "AniWatch SUB-2" },
     ];
     const dubOptions = hasDub
-      ? [{ id: "hd-1:en", label: "HD-1 DUB" }, { id: "hd-2:en", label: "HD-2 DUB" }]
+      ? [{ id: "hd-1:en", label: "AniWatch DUB" }, { id: "hd-2:en", label: "AniWatch DUB-2" }]
       : [];
     return normalizedAudio === "en" ? [...dubOptions, ...subOptions] : [...subOptions, ...dubOptions];
   })();

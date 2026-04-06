@@ -671,7 +671,7 @@ class AnimeResolvedProviderAdapter(BaseProviderAdapter):
     async def health(self, **kwargs) -> Any:
         consumet = await get_health_status()
         if consumet.get("healthy"):
-            return {"status": "online", "message": "HiAnime primary resolver is healthy."}
+            return {"status": "online", "message": "AniWatch primary resolver is healthy."}
         raise ProviderServiceError(
             code="anime_primary_degraded",
             message=str(consumet.get("message") or "Anime primary resolver is degraded."),
@@ -700,6 +700,11 @@ class AnimeResolvedProviderAdapter(BaseProviderAdapter):
         url = str(source.get("url") or "").strip()
         if not url:
             return []
+        # Filter out embed sources — embed URLs (e.g. MegaCloud/VidStreaming iframes)
+        # are unplayable and show "We're Sorry" pages; only keep hls/direct streams.
+        source_kind = str(source.get("kind") or "direct")
+        if source_kind == "embed":
+            return []
         subtitles = [
             {
                 "id": f"anime-resolved-sub-{index}",
@@ -710,11 +715,19 @@ class AnimeResolvedProviderAdapter(BaseProviderAdapter):
             for index, track in enumerate(resolved.get("subtitles") or [])
             if isinstance(track, dict) and track.get("url")
         ]
+        # Ensure anime HLS/direct streams always route through the backend proxy.
+        # AniWatch CDN (MegaCloud/bunnycdn) rejects segment requests without a
+        # Referer header. If the watch payload didn't include headers, inject a
+        # safe default so shouldKeepHlsProxied() returns true in the player.
+        raw_headers = dict(source.get("headers") or {})
+        if not raw_headers:
+            raw_headers = {"Referer": "https://megacloud.blog/"}
+
         return [
             _stream_source(
                 source_id=f"anime-resolved-{kwargs.get('anime_id') or 'candidate'}-{kwargs.get('episode_number', 1)}",
-                label=str(resolved.get("selectedServer") or resolved.get("provider") or "HiAnime"),
-                provider=str(resolved.get("provider") or "HiAnime"),
+                label=str(resolved.get("selectedServer") or resolved.get("provider") or "AniWatch"),
+                provider=str(resolved.get("provider") or "AniWatch"),
                 kind=str(source.get("kind") or "direct"),
                 url=url,
                 description=str(resolved.get("strategy") or "Resolved anime source"),
@@ -722,7 +735,7 @@ class AnimeResolvedProviderAdapter(BaseProviderAdapter):
                 external_url=url,
                 can_extract=False,
                 subtitles=subtitles,
-                request_headers=dict(source.get("headers") or {}),
+                request_headers=raw_headers,
             )
         ]
 
@@ -809,6 +822,10 @@ class ConsumetAnimeProviderAdapter(BaseProviderAdapter):
             audio=audio,
         )
         headers = dict(payload.get("headers") or {})
+        # AniWatch CDN segments require a Referer header. If the sidecar didn't
+        # return one, inject a safe default so the player proxy is always used.
+        if not headers:
+            headers = {"Referer": "https://megacloud.blog/"}
         mapped: list[dict[str, Any]] = []
         for index, source in enumerate(payload.get("sources") or []):
             if not isinstance(source, dict) or not source.get("url"):

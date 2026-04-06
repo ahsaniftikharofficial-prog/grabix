@@ -1274,9 +1274,9 @@ def _convert_hianime_source_payload(payload: dict, server: str, tried: list[dict
         return _normalize_resolved_source(
             source_url=url,
             kind=kind,
-            provider="HiAnime",
+            provider="AniWatch",
             selected_server=server,
-            strategy="hianime-direct",
+            strategy="aniwatch-direct",
             headers=headers,
             subtitles=subtitles,
             tried=tried,
@@ -1329,9 +1329,9 @@ def _capture_hianime_stream_via_edge(embed_url: str, watch_url: str, server: str
                 return _normalize_resolved_source(
                     source_url=url,
                     kind="hls" if ".m3u8" in url.lower() else "direct",
-                    provider="HiAnime",
+                    provider="AniWatch",
                     selected_server=server,
-                    strategy="hianime-browser-capture",
+                    strategy="aniwatch-browser-capture",
                     headers={"Referer": watch_url or embed_url},
                     subtitles=[],
                     tried=tried,
@@ -1415,18 +1415,29 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
         )
         sources = watch_payload.get("sources")
         if sources and isinstance(sources, list):
-            target_source = sources[0]
-            kind = "hls" if target_source.get("isM3U8") else ("embed" if target_source.get("isEmbed") else "direct")
+            # Only use hls or direct sources — embed kind means MegaCloud/VidStreaming
+            # iframes that show "We're Sorry" pages and are not playable.
+            playable = [s for s in sources if isinstance(s, dict) and str(s.get("kind") or "").lower() in {"hls", "direct"}]
+            if not playable:
+                raise ValueError("AniWatch returned only embed sources — falling back.")
+            target_source = playable[0]
+            kind = str(target_source.get("kind") or "hls")
+            # Ensure anime HLS streams always use the backend proxy.
+            # AniWatch CDN segments 403 without a Referer; if the sidecar
+            # didn't include one, inject a safe default.
+            raw_headers = dict(watch_payload.get("headers") or {})
+            if not raw_headers:
+                raw_headers = {"Referer": "https://megacloud.blog/"}
             resolution = {
                 "source": {
                     "url": target_source.get("url"),
                     "kind": kind,
-                    "headers": watch_payload.get("headers") or {}
+                    "headers": raw_headers,
                 },
                 "subtitles": watch_payload.get("subtitles") or [],
-                "provider": "HiAnime",
+                "provider": "AniWatch",
                 "selectedServer": target_source.get("quality", payload.server),
-                "strategy": "HiAnime Direct Resolution",
+                "strategy": "AniWatch Direct Resolution",
             }
             _set_cached_anime_resolution(payload, resolution)
             return resolution
@@ -1435,7 +1446,7 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
             {
                 "server": payload.server,
                 "stage": "anime-primary",
-                "detail": f"Direct HiAnime sidecar resolution failed {exc}. Using built-in fallback chain.",
+                "detail": f"Direct AniWatch sidecar resolution failed {exc}. Using built-in fallback chain.",
             }
         )
 
@@ -5948,12 +5959,25 @@ async def health_services() -> dict:
         True,
     )
 
+    # ── AniWatch (local consumet-local Node sidecar) ──────────────────────────
+    try:
+        from app.services.aniwatch import get_health as _get_aniwatch_health
+        _aw_health = await asyncio.wait_for(_get_aniwatch_health(), timeout=2.5)
+        aw_status = "online" if _aw_health.get("healthy") else "degraded"
+        aw_msg = "AniWatch local server is healthy." if _aw_health.get("healthy") else "AniWatch local server is warming up — anime fallback active."
+    except Exception:
+        aw_status = "degraded"
+        aw_msg = "AniWatch local server is starting up."
+    _health_log_write("aniwatch", aw_status)
+    aniwatch = _service_payload("aniwatch", aw_status, aw_msg, True)
+
     services = {
         "backend":   _service_payload("backend", "online", "Backend is responding.", False),
         "database":  database,
         "downloads": downloads_health,
         "ffmpeg":    ffmpeg,
         "consumet":  consumet,
+        "aniwatch":  aniwatch,
         "moviebox":  moviebox,
         "anime":     anime,
         "manga":     manga,
@@ -5981,7 +6005,7 @@ async def health_capabilities() -> dict:
         "can_browse_tv": True,
         "can_use_moviebox": services["moviebox"]["status"] in {"online", "slow"},
         "can_play_anime": True,
-        "can_play_anime_primary": services["consumet"]["status"] in {"online", "slow"},
+        "can_play_anime_primary": services["consumet"]["status"] in {"online", "slow"} or services["aniwatch"]["status"] in {"online", "slow"},
         "can_play_anime_fallback": True,
         "can_read_manga": services["manga"]["status"] in {"online", "slow"},
     }

@@ -583,6 +583,18 @@ export default function VidSrcPlayer({
       return;
     }
 
+    // For proxied sources (e.g. AniWatch streams with requestHeaders), skip
+    // variant pre-selection entirely. The backend proxy already rewrites the
+    // master m3u8 segment URLs, and hls.js auto-selects the best quality
+    // internally. Pre-selecting a variant here would set resolvedPlaybackUrl,
+    // which is in the HLS loading effect's dependency array — causing hls.js
+    // to be destroyed and restarted just as it finishes buffering, resetting
+    // the 60-second startup timer and causing the "source took too long" error.
+    if (shouldKeepHlsProxied(activeSource)) {
+      setResolvedPlaybackUrl("");
+      return;
+    }
+
     let cancelled = false;
     setResolvedPlaybackUrl("");
 
@@ -643,11 +655,16 @@ export default function VidSrcPlayer({
     setCurrentTime(0);
     setDuration(0);
     let sourceReady = false;
+    // Proxied HLS (anime) fetches segments through the local Python backend,
+    // which adds latency per segment. Give it extra time before giving up.
+    const startupTimeoutMs = activeSource.kind === "hls" && shouldKeepHlsProxied(activeSource)
+      ? 120_000
+      : 60_000;
     const startupTimeout = window.setTimeout(() => {
       if (!sourceReady) {
         goToNextSource("timeout");
       }
-    }, 60000);
+    }, startupTimeoutMs);
 
     const handleCanPlay = () => {
       sourceReady = true;
@@ -689,9 +706,14 @@ export default function VidSrcPlayer({
         : activeSource.url;
       const playbackUrl = resolvedPlaybackUrl || defaultUrl;
       if (Hls.isSupported()) {
+        const isProxied = shouldKeepHlsProxied(activeSource);
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
+          // For proxied streams (anime via backend proxy), reduce the minimum
+          // buffer required before canplay fires so playback starts faster.
+          maxBufferLength: isProxied ? 10 : 30,
+          maxMaxBufferLength: isProxied ? 30 : 600,
           backBufferLength: 90,
           startFragPrefetch: true,
         });

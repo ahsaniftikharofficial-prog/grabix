@@ -1423,7 +1423,12 @@ async def fetch_anime_watch(
         )
         for result in results:
             if isinstance(result, dict) and result.get("sources"):
-                return result
+                # Drop embed-kind sources — they are unplayable MegaCloud/VidStreaming
+                # iframes that show "We're Sorry" when loaded in the player.
+                playable = [s for s in result["sources"] if s.get("kind") in {"hls", "direct"}]
+                if playable:
+                    result["sources"] = playable
+                    return result
         raise _http_error("Hianime did not return any playable anime sources.")
 
     if provider == "zoro":
