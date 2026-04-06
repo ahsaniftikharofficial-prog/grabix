@@ -421,9 +421,29 @@ async function fetchWatch(episodeId, server, category) {
   const requestedServer = mapServer(server);
   const requestedCategory = mapCategory(category);
 
-  const fallback = await fetchServerPayload(episodeId, requestedServer, requestedCategory);
-  const link = String(fallback?.link || "").trim();
-  const tracks = Array.isArray(fallback?.tracks) ? fallback.tracks : [];
+  // PRIMARY: aniwatch library's own extraction — most reliable, try first
+  try {
+    const direct = await scraper.getEpisodeSources(episodeId, requestedServer.request, requestedCategory);
+    const directSources = Array.isArray(direct?.sources) ? direct.sources : [];
+    const directTracks = Array.isArray(direct?.subtitles) ? direct.subtitles : Array.isArray(direct?.tracks) ? direct.tracks : [];
+    if (directSources.length > 0) {
+      return {
+        headers: direct?.headers || {},
+        sources: directSources,
+        subtitles: directTracks,
+        download: direct?.download || "",
+      };
+    }
+  } catch {}
+
+  // SECONDARY: manual AJAX fetch + MegaCloud extraction
+  let link = "";
+  let tracks = [];
+  try {
+    const fallback = await fetchServerPayload(episodeId, requestedServer, requestedCategory);
+    link = String(fallback?.link || "").trim();
+    tracks = Array.isArray(fallback?.tracks) ? fallback.tracks : [];
+  } catch {}
 
   if (!link) {
     throw new Error("Hianime did not return a playable link.");
@@ -438,20 +458,6 @@ async function fetchWatch(episodeId, server, category) {
         }
         return extracted;
       }
-    }
-  } catch {}
-
-  try {
-    const direct = await scraper.getEpisodeSources(episodeId, requestedServer.request, requestedCategory);
-    const directSources = Array.isArray(direct?.sources) ? direct.sources : [];
-    const directTracks = Array.isArray(direct?.subtitles) ? direct.subtitles : Array.isArray(direct?.tracks) ? direct.tracks : [];
-    if (directSources.length > 0) {
-      return {
-        headers: direct?.headers || {},
-        sources: directSources,
-        subtitles: directTracks,
-        download: direct?.download || "",
-      };
     }
   } catch {}
 
