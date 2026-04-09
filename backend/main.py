@@ -271,7 +271,7 @@ EDGE_BINARY_PATH = next(
     ),
     "",
 )
-ANIME_RESOLVE_CACHE_TTL_SECONDS = 300
+ANIME_RESOLVE_CACHE_TTL_SECONDS = 7200
 anime_resolve_cache: dict[str, tuple[float, dict]] = runtime_state.anime_resolve_cache
 CONSUMET_HEALTH_CACHE_TTL_SECONDS = 15
 consumet_health_cache: tuple[float, dict] | None = None
@@ -1449,6 +1449,91 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
                 "detail": f"Direct AniWatch sidecar resolution failed {exc}. Using built-in fallback chain.",
             }
         )
+
+    # ── Fallback providers: AnimeKai → KickAssAnime → AnimePahe ──────────────
+    # Only runs when HiAnime failed and we have a title to search by.
+    if payload.title:
+        from app.services.consumet import search_domain, fetch_anime_watch, _fetch_consumet_json
+        FALLBACK_PROVIDERS = ["animekai", "kickassanime", "animepahe"]
+        for fb_provider in FALLBACK_PROVIDERS:
+            try:
+                # Step 1 — search by title to get this provider's anime ID
+                search_result = await search_domain(
+                    "anime", payload.title, provider=fb_provider, page=1
+                )
+                items = search_result.get("items") or []
+                if not items:
+                    tried.append({"server": payload.server, "stage": f"{fb_provider}-search", "detail": "no results"})
+                    continue
+                fb_anime_id = str(items[0].get("id") or "").strip()
+                if not fb_anime_id:
+                    continue
+
+                # Step 2 — fetch episode list for this anime
+                if fb_provider == "animepahe":
+                    info_payload = await _fetch_consumet_json(
+                        f"/anime/{fb_provider}/info/{fb_anime_id}", ttl_seconds=300
+                    )
+                else:
+                    info_payload = await _fetch_consumet_json(
+                        f"/anime/{fb_provider}/info",
+                        params={"id": fb_anime_id},
+                        ttl_seconds=300,
+                    )
+                episodes = info_payload.get("episodes") or []
+                if not episodes:
+                    tried.append({"server": payload.server, "stage": f"{fb_provider}-info", "detail": "no episodes"})
+                    continue
+
+                # Step 3 — match episode by number, fall back to first episode
+                target_ep = next(
+                    (e for e in episodes if int(e.get("number") or 0) == payload.episodeNumber),
+                    episodes[0],
+                )
+                fb_episode_id = str(target_ep.get("id") or "").strip()
+                if not fb_episode_id:
+                    continue
+
+                # Step 4 — fetch the stream from this provider
+                watch_data = await fetch_anime_watch(
+                    provider=fb_provider,
+                    episode_id=fb_episode_id,
+                    server=payload.server,
+                    audio=payload.audio,
+                )
+                sources = watch_data.get("sources") or []
+                playable = [
+                    s for s in sources
+                    if isinstance(s, dict) and str(s.get("kind") or "").lower() in {"hls", "direct"}
+                ]
+                if not playable:
+                    tried.append({"server": payload.server, "stage": f"{fb_provider}-watch", "detail": "no playable sources"})
+                    continue
+
+                target_source = playable[0]
+                raw_headers = dict(watch_data.get("headers") or {})
+                resolution = {
+                    "source": {
+                        "url": target_source.get("url"),
+                        "kind": str(target_source.get("kind") or "hls"),
+                        "headers": raw_headers,
+                    },
+                    "subtitles": watch_data.get("subtitles") or [],
+                    "provider": fb_provider,
+                    "selectedServer": target_source.get("quality", payload.server),
+                    "strategy": f"{fb_provider} Fallback Resolution",
+                }
+                tried.append({"server": payload.server, "stage": f"{fb_provider}-fallback", "detail": "success"})
+                _set_cached_anime_resolution(payload, resolution)
+                return resolution
+
+            except Exception as fb_exc:
+                tried.append({
+                    "server": payload.server,
+                    "stage": f"{fb_provider}-fallback",
+                    "detail": str(fb_exc),
+                })
+                continue
 
     fallback_result = await asyncio.to_thread(
         _resolve_fallback_provider,
@@ -5911,7 +5996,7 @@ async def health_services() -> dict:
     else:
         t0 = time.monotonic()
         try:
-            consumet_health = await asyncio.wait_for(get_consumet_health_status(), timeout=2.5)
+            consumet_health = await asyncio.wait_for(get_consumet_health_status(), timeout=10.0)
             latency_ms = (time.monotonic() - t0) * 1000
             if consumet_health.get("healthy"):
                 consumet_raw_status = _health_cb_record_success("consumet", latency_ms)
@@ -5962,7 +6047,7 @@ async def health_services() -> dict:
     # ── AniWatch (local consumet-local Node sidecar) ──────────────────────────
     try:
         from app.services.aniwatch import get_health as _get_aniwatch_health
-        _aw_health = await asyncio.wait_for(_get_aniwatch_health(), timeout=2.5)
+        _aw_health = await asyncio.wait_for(_get_aniwatch_health(), timeout=10.0)
         aw_status = "online" if _aw_health.get("healthy") else "degraded"
         aw_msg = "AniWatch local server is healthy." if _aw_health.get("healthy") else "AniWatch local server is warming up — anime fallback active."
     except Exception:

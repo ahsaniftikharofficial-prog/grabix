@@ -26,8 +26,8 @@ from app.services.security import DEFAULT_APPROVED_MEDIA_HOSTS
 CONSUMET_API_BASE_ENV = "CONSUMET_API_BASE"
 DEFAULT_AUDIO_PRIORITY = ["en", "original", "hi"]
 DEFAULT_SUBTITLE_PRIORITY = ["en", "hi"]
-HTTP_TIMEOUT = 45.0
-HEALTH_TIMEOUT = 0.9
+HTTP_TIMEOUT = 10.0
+HEALTH_TIMEOUT = 8.0
 JIKAN_API_BASE = "https://api.jikan.moe/v4"
 TMDB_API_BASE = "https://api.themoviedb.org/3"
 _CACHE: dict[str, tuple[float, Any]] = {}
@@ -1453,6 +1453,28 @@ async def fetch_anime_watch(
         if last_error2:
             raise last_error2
         raise _http_error("Consumet did not return any playable anime sources.")
+
+    if provider == "animepahe":
+        payload = await _fetch_consumet_json(
+            "/anime/animepahe/watch",
+            params={"episodeId": episode_id},
+            ttl_seconds=180,
+        )
+        normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio, server=server)
+        if not normalized["sources"]:
+            raise _http_error("AnimePahe did not return any playable sources.")
+        return normalized
+
+    if provider == "kickassanime":
+        payload = await _fetch_consumet_json(
+            "/anime/kickassanime/watch",
+            params={"episodeId": episode_id},
+            ttl_seconds=180,
+        )
+        normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio, server=server)
+        if not normalized["sources"]:
+            raise _http_error("KickAssAnime did not return any playable sources.")
+        return normalized
 
     payload = await _fetch_consumet_json(
         f"/anime/{provider}/watch/{quote(episode_id)}",

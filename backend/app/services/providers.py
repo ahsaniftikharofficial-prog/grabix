@@ -665,7 +665,7 @@ class AnimeResolvedProviderAdapter(BaseProviderAdapter):
         super().__init__(
             name="anime-resolved",
             family="anime-resolved",
-            policy=ProviderPolicy(timeout_seconds=50.0, retries=1, cooldown_seconds=18.0, circuit_breaker_threshold=3),
+            policy=ProviderPolicy(timeout_seconds=12.0, retries=0, cooldown_seconds=8.0, circuit_breaker_threshold=5),
         )
 
     async def health(self, **kwargs) -> Any:
@@ -752,7 +752,7 @@ class ConsumetAnimeProviderAdapter(BaseProviderAdapter):
         super().__init__(
             name="consumet-watch",
             family="consumet-watch",
-            policy=ProviderPolicy(timeout_seconds=50.0, retries=1, cooldown_seconds=16.0, circuit_breaker_threshold=3),
+            policy=ProviderPolicy(timeout_seconds=12.0, retries=0, cooldown_seconds=8.0, circuit_breaker_threshold=5),
         )
 
     async def health(self, **kwargs) -> Any:
@@ -770,7 +770,7 @@ class ConsumetAnimeProviderAdapter(BaseProviderAdapter):
 
     async def details(self, **kwargs) -> Any:
         media_id = str(kwargs.get("media_id") or "").strip()
-        provider = str(kwargs.get("provider") or "zoro").strip() or "zoro"
+        provider = str(kwargs.get("provider") or "hianime").strip() or "hianime"
         if not media_id:
             raise ProviderServiceError(
                 code="anime_id_required",
@@ -783,7 +783,7 @@ class ConsumetAnimeProviderAdapter(BaseProviderAdapter):
         return await fetch_anime_episodes(provider=provider, media_id=media_id)
 
     async def sources(self, **kwargs) -> Any:
-        provider = str(kwargs.get("provider") or "zoro").strip() or "zoro"
+        provider = str(kwargs.get("provider") or "hianime").strip() or "hianime"
         media_id = str(kwargs.get("media_id") or "").strip()
         episode_id = str(kwargs.get("episode_id") or "").strip()
         episode_number = int(kwargs.get("episode_number", 1) or 1)
@@ -1222,7 +1222,7 @@ async def resolve_anime_playback(
         )
 
     for candidate in candidate_items:
-        provider_name = str(candidate.get("provider") or "zoro").strip() or "zoro"
+        provider_name = str(candidate.get("provider") or "hianime").strip() or "hianime"
         anime_id = str(candidate.get("anime_id") or candidate.get("animeId") or candidate.get("id") or "").strip()
         if not anime_id:
             continue
@@ -1306,7 +1306,7 @@ async def resolve_anime_playback(
             )
 
     for candidate in candidate_items:
-        provider_name = str(candidate.get("provider") or "zoro").strip() or "zoro"
+        provider_name = str(candidate.get("provider") or "hianime").strip() or "hianime"
         anime_id = str(candidate.get("anime_id") or candidate.get("animeId") or candidate.get("id") or "").strip()
         if not anime_id:
             continue

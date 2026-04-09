@@ -2,6 +2,12 @@ const http = require("http");
 const axios = require("axios");
 const cheerio = require("cheerio");
 const { HiAnime } = require("aniwatch");
+const { ANIME } = require("@consumet/extensions");
+
+// Fallback anime provider scrapers (used when HiAnime fails)
+const animeKai = new ANIME.AnimeKai();
+const kickAss = new ANIME.KickAssAnime();
+const animePahe = new ANIME.AnimePahe();
 
 function readOption(flag) {
   const directPrefix = `${flag}=`;
@@ -661,6 +667,92 @@ async function route(pathname, searchParams) {
         hasNextPage: Boolean(data?.hasNextPage),
         totalPages: data?.totalPages || 1,
         results: Array.isArray(data?.animes) ? data.animes.map(normalizeSearchResult) : [],
+      },
+    };
+  }
+
+  // ── AnimeKai routes ────────────────────────────────────────────────────────
+
+  if (pathname === "/anime/animekai/info") {
+    const id = String(searchParams.get("id") || "").trim();
+    if (!id) return { status: 400, body: { detail: "id is required" } };
+    const data = await animeKai.fetchAnimeInfo(id);
+    return { status: 200, body: data };
+  }
+
+  if (pathname.startsWith("/anime/animekai/watch/")) {
+    const episodeId = decodeURIComponent(pathname.slice("/anime/animekai/watch/".length));
+    const server = searchParams.get("server") || undefined;
+    const data = await animeKai.fetchEpisodeSources(episodeId, server);
+    return { status: 200, body: data };
+  }
+
+  if (pathname.startsWith("/anime/animekai/")) {
+    const query = decodeURIComponent(pathname.slice("/anime/animekai/".length));
+    const data = await animeKai.search(query, parsePage(searchParams.get("page")));
+    return {
+      status: 200,
+      body: {
+        currentPage: data?.currentPage || 1,
+        hasNextPage: Boolean(data?.hasNextPage),
+        results: Array.isArray(data?.results) ? data.results : [],
+      },
+    };
+  }
+
+  // ── KickAssAnime routes ────────────────────────────────────────────────────
+
+  if (pathname === "/anime/kickassanime/info") {
+    const id = String(searchParams.get("id") || "").trim();
+    if (!id) return { status: 400, body: { detail: "id is required" } };
+    const data = await kickAss.fetchAnimeInfo(id);
+    return { status: 200, body: data };
+  }
+
+  if (pathname === "/anime/kickassanime/watch") {
+    const episodeId = String(searchParams.get("episodeId") || "").trim();
+    if (!episodeId) return { status: 400, body: { detail: "episodeId is required" } };
+    const server = searchParams.get("server") || undefined;
+    const data = await kickAss.fetchEpisodeSources(episodeId, server);
+    return { status: 200, body: data };
+  }
+
+  if (pathname.startsWith("/anime/kickassanime/")) {
+    const query = decodeURIComponent(pathname.slice("/anime/kickassanime/".length));
+    const data = await kickAss.search(query, parsePage(searchParams.get("page")));
+    return {
+      status: 200,
+      body: {
+        currentPage: data?.currentPage || 1,
+        hasNextPage: Boolean(data?.hasNextPage),
+        results: Array.isArray(data?.results) ? data.results : [],
+      },
+    };
+  }
+
+  // ── AnimePahe routes ───────────────────────────────────────────────────────
+
+  if (pathname.startsWith("/anime/animepahe/info/")) {
+    const id = decodeURIComponent(pathname.slice("/anime/animepahe/info/".length));
+    if (!id) return { status: 400, body: { detail: "id is required" } };
+    const data = await animePahe.fetchAnimeInfo(id);
+    return { status: 200, body: data };
+  }
+
+  if (pathname === "/anime/animepahe/watch") {
+    const episodeId = String(searchParams.get("episodeId") || "").trim();
+    if (!episodeId) return { status: 400, body: { detail: "episodeId is required" } };
+    const data = await animePahe.fetchEpisodeSources(episodeId);
+    return { status: 200, body: data };
+  }
+
+  if (pathname.startsWith("/anime/animepahe/")) {
+    const query = decodeURIComponent(pathname.slice("/anime/animepahe/".length));
+    const data = await animePahe.search(query);
+    return {
+      status: 200,
+      body: {
+        results: Array.isArray(data?.results) ? data.results : [],
       },
     };
   }

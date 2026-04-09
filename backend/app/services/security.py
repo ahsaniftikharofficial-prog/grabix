@@ -39,6 +39,7 @@ DEFAULT_APPROVED_MEDIA_HOSTS = (
     "vsembed",
     "hianime",
     "aniwatch",
+    "aniwatchtv.to",
     "mangadex",
     "comick",
     "opensubtitles",
@@ -48,6 +49,18 @@ DEFAULT_APPROVED_MEDIA_HOSTS = (
     "megacloud",
     "rabbitstream",
     "dokicloud",
+    # Anime image CDNs — required for posters to load
+    "flawlessfiles",       # HiAnime primary poster CDN
+    "noitatnemucod",       # HiAnime secondary CDN
+    "anilist.co",          # AniList cover images
+    "myanimelist.net",     # MyAnimeList / Jikan images
+    "kitsu.io",            # Kitsu cover images
+    "image.tmdb.org",      # TMDB posters
+    "media.kitsu.io",      # Kitsu media CDN
+    "img1.ak.crunchyroll", # Crunchyroll thumbnails
+    "animepahe",           # AnimePahe images
+    "animekai",            # AnimeKai images
+    "kickassanime",        # KickAssAnime images
 )
 
 
