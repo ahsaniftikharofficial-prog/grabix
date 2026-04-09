@@ -665,7 +665,7 @@ class AnimeResolvedProviderAdapter(BaseProviderAdapter):
         super().__init__(
             name="anime-resolved",
             family="anime-resolved",
-            policy=ProviderPolicy(timeout_seconds=12.0, retries=0, cooldown_seconds=8.0, circuit_breaker_threshold=5),
+            policy=ProviderPolicy(timeout_seconds=30.0, retries=0, cooldown_seconds=8.0, circuit_breaker_threshold=5),
         )
 
     async def health(self, **kwargs) -> Any:
@@ -752,7 +752,7 @@ class ConsumetAnimeProviderAdapter(BaseProviderAdapter):
         super().__init__(
             name="consumet-watch",
             family="consumet-watch",
-            policy=ProviderPolicy(timeout_seconds=12.0, retries=0, cooldown_seconds=8.0, circuit_breaker_threshold=5),
+            policy=ProviderPolicy(timeout_seconds=30.0, retries=0, cooldown_seconds=8.0, circuit_breaker_threshold=5),
         )
 
     async def health(self, **kwargs) -> Any:

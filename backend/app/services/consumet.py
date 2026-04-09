@@ -26,7 +26,7 @@ from app.services.security import DEFAULT_APPROVED_MEDIA_HOSTS
 CONSUMET_API_BASE_ENV = "CONSUMET_API_BASE"
 DEFAULT_AUDIO_PRIORITY = ["en", "original", "hi"]
 DEFAULT_SUBTITLE_PRIORITY = ["en", "hi"]
-HTTP_TIMEOUT = 10.0
+HTTP_TIMEOUT = 25.0
 HEALTH_TIMEOUT = 8.0
 JIKAN_API_BASE = "https://api.jikan.moe/v4"
 TMDB_API_BASE = "https://api.themoviedb.org/3"

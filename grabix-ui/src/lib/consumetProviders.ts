@@ -382,24 +382,16 @@ export async function fetchConsumetMetaInfo(id: string, type: "movie" | "tv"): P
 }
 
 export async function searchConsumetAnime(query: string, page = 1): Promise<ConsumetMediaSummary[]> {
-  // animekai/kickassanime/animepahe are not in the local sidecar, so they
-  // fall back to Jikan (MAL) results — broader search without breaking anything.
-  const [hianime, animekai, kickassanime, animepahe] = await Promise.allSettled([
+  const [hianime] = await Promise.allSettled([
     searchConsumetDomain("anime", query, "hianime", page),
-    searchConsumetDomain("anime", query, "animekai", page),
-    searchConsumetDomain("anime", query, "kickassanime", page),
-    searchConsumetDomain("anime", query, "animepahe", page),
   ]);
 
   const combined = [
     ...(hianime.status === "fulfilled" ? hianime.value : []),
-    ...(animekai.status === "fulfilled" ? animekai.value : []),
-    ...(kickassanime.status === "fulfilled" ? kickassanime.value : []),
-    ...(animepahe.status === "fulfilled" ? animepahe.value : []),
   ];
 
   if (!combined.length) {
-    const reason = [hianime, animekai, kickassanime, animepahe]
+    const reason = [hianime]
       .filter((result): result is PromiseRejectedResult => result.status === "rejected")
       .map((result) => normalizeError(result.reason).message)[0];
     if (reason) throw new Error(reason);
