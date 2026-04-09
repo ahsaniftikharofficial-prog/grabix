@@ -1065,7 +1065,13 @@ function AnimeDetail({
     purpose: "play" | "download" = "play",
     overrides?: { audio?: AudioPreference; server?: AnimeServerOption }
   ): Promise<StreamSource | null> => {
-    const normalizedAudio = normalizeAudioPreference(overrides?.audio ?? audio);
+    const rawNormalizedAudio = normalizeAudioPreference(overrides?.audio ?? audio);
+    // If user wants Hindi but this anime has no Hindi track, fall back to sub
+    // so hianime is tried instead of jumping straight to MovieBox.
+    const animeLanguages: string[] = anime.languages ?? [];
+    const normalizedAudio = (rawNormalizedAudio === "hi" && !animeLanguages.includes("hi"))
+      ? "sub"
+      : rawNormalizedAudio;
     if (normalizedAudio === "hi") return null;
     const requestedServer = overrides?.server ?? server;
     const cacheKey = `${purpose}:${normalizedAudio}:${requestedServer}:${targetEpisode}`;
@@ -1092,6 +1098,7 @@ function AnimeDetail({
           candidates: getWatchCandidates().map((candidate) => ({
             provider: candidate.provider,
             animeId: candidate.id,
+            episodeId: (candidate as any).episode_id || (candidate as any).episodeId || undefined,
             title: candidate.title,
             altTitle: candidate.alt_title || "",
           })),
@@ -1258,6 +1265,7 @@ function AnimeDetail({
       candidates: getWatchCandidates().map((candidate) => ({
         provider: candidate.provider,
         animeId: candidate.id,
+        episodeId: (candidate as any).episode_id || (candidate as any).episodeId || undefined,
         title: candidate.title,
         altTitle: candidate.alt_title || "",
       })),
