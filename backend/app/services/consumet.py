@@ -58,7 +58,7 @@ def _cache_set(key: str, value: Any, ttl_seconds: int) -> Any:
 
 
 def get_consumet_api_base() -> str:
-    return os.getenv(CONSUMET_API_BASE_ENV, "").strip().rstrip("/")
+    return (os.getenv(CONSUMET_API_BASE_ENV, "").strip().rstrip("/")) or "http://127.0.0.1:3000"
 
 
 def is_consumet_configured() -> bool:
