@@ -46,7 +46,8 @@ def _fetch_json(url: str, *, headers: dict[str, str] | None = None, timeout: int
 
 
 def _normalize_request_headers(headers: dict[str, str] | None = None) -> dict[str, str]:
-    normalized: dict[str, str] = {"User-Agent": "Mozilla/5.0"}
+    from urllib.parse import urlparse as _urlparse
+    normalized: dict[str, str] = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"}
     if headers:
         normalized.update(
             {
@@ -55,6 +56,11 @@ def _normalize_request_headers(headers: dict[str, str] | None = None) -> dict[st
                 if value is not None and str(value).strip()
             }
         )
+    # Derive Origin from Referer so CDNs that check both (e.g. windytrail24.online) accept the request
+    if "Referer" in normalized and "Origin" not in normalized:
+        _p = _urlparse(normalized["Referer"])
+        if _p.scheme and _p.netloc:
+            normalized["Origin"] = f"{_p.scheme}://{_p.netloc}"
     return normalized
 
 

@@ -831,7 +831,7 @@ function AnimeDetail({
 
     Promise.allSettled([
       findTmdbId(anime.title, anime.alt_title),
-      anime.provider === "jikan" && consumetHealthy
+      anime.provider !== "hianime" && consumetHealthy
         ? searchConsumetAnime(anime.title)
         : Promise.resolve([] as ConsumetMediaSummary[]),
       fetchJikanEpisodeCount(anime.mal_id),
@@ -843,7 +843,7 @@ function AnimeDetail({
         setKnownEpisodeCount(jikanResult.value);
       }
 
-      const nextCandidates = anime.provider === "jikan"
+      const nextCandidates = anime.provider !== "hianime"
         ? dedupeItems([anime, ...(searchResult.status === "fulfilled" ? searchResult.value.map(toCardItem) : [])])
         : dedupeItems([anime]);
       setCandidateAnimes(nextCandidates);

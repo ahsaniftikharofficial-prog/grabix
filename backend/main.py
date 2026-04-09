@@ -271,7 +271,7 @@ EDGE_BINARY_PATH = next(
     ),
     "",
 )
-ANIME_RESOLVE_CACHE_TTL_SECONDS = 7200
+ANIME_RESOLVE_CACHE_TTL_SECONDS = 1500
 anime_resolve_cache: dict[str, tuple[float, dict]] = runtime_state.anime_resolve_cache
 CONSUMET_HEALTH_CACHE_TTL_SECONDS = 15
 consumet_health_cache: tuple[float, dict] | None = None
