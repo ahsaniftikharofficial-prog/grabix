@@ -28,6 +28,7 @@ DEFAULT_AUDIO_PRIORITY = ["en", "original", "hi"]
 DEFAULT_SUBTITLE_PRIORITY = ["en", "hi"]
 HTTP_TIMEOUT = 25.0
 HEALTH_TIMEOUT = 8.0
+ANIME_WATCH_TIMEOUT = 10.0
 JIKAN_API_BASE = "https://api.jikan.moe/v4"
 TMDB_API_BASE = "https://api.themoviedb.org/3"
 _CACHE: dict[str, tuple[float, Any]] = {}
@@ -1280,7 +1281,7 @@ async def fetch_domain_info(domain: str, provider: str, media_id: str) -> dict[s
         detail["item"]["episodes"] = episodes.get("items") or []
         return detail
 
-    if domain == "anime" and provider in {"zoro", "hianime"}:
+    if domain == "anime" and provider in {"zoro", "hianime", "animekai", "kickassanime"}:
         try:
             path = f"/anime/{provider}/info"
             payload = await _fetch_consumet_json(path, params={"id": media_id}, ttl_seconds=1800)
@@ -1402,6 +1403,7 @@ async def fetch_anime_watch(
                     f"/anime/{provider}/watch/{quote(episode_id)}",
                     params={"server": server_name, "category": category},
                     ttl_seconds=180,
+                    timeout=ANIME_WATCH_TIMEOUT,
                 )
                 normalized = normalize_watch_payload(
                     payload,
@@ -1442,6 +1444,7 @@ async def fetch_anime_watch(
                         f"/anime/{provider}/watch/{quote(episode_id)}",
                         params={"server": server_name, "category": category},
                         ttl_seconds=180,
+                        timeout=ANIME_WATCH_TIMEOUT,
                     )
                     normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio if category == "dub" else "original", server=server_name)
                     if normalized["sources"]:
@@ -1459,6 +1462,7 @@ async def fetch_anime_watch(
             "/anime/animepahe/watch",
             params={"episodeId": episode_id},
             ttl_seconds=180,
+            timeout=ANIME_WATCH_TIMEOUT,
         )
         normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio, server=server)
         if not normalized["sources"]:
@@ -1470,6 +1474,7 @@ async def fetch_anime_watch(
             "/anime/kickassanime/watch",
             params={"episodeId": episode_id},
             ttl_seconds=180,
+            timeout=ANIME_WATCH_TIMEOUT,
         )
         normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio, server=server)
         if not normalized["sources"]:
@@ -1479,6 +1484,7 @@ async def fetch_anime_watch(
     payload = await _fetch_consumet_json(
         f"/anime/{provider}/watch/{quote(episode_id)}",
         ttl_seconds=180,
+        timeout=ANIME_WATCH_TIMEOUT,
     )
     normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio, server=server)
     if not normalized["sources"]:

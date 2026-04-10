@@ -11,6 +11,7 @@ import { RuntimeHealthProvider } from "./context/RuntimeHealthContext";
 import Sidebar, { type Page } from "./components/Sidebar";
 import {
   BACKEND_API,
+  backendJson,
   deriveRuntimeState,
   fetchBackendPing,
   fetchRuntimeHealth,
@@ -82,21 +83,6 @@ function Inner() {
       }
     };
 
-    const syncDownloads = async () => {
-      try {
-        const response = await fetch(`${BACKEND_API}/downloads`);
-        if (!response.ok) return;
-        const downloads = (await response.json()) as Array<{ status?: string }>;
-        setActiveDownloads(
-          downloads.filter((item) =>
-            ["queued", "downloading", "processing", "paused"].includes(item.status ?? "")
-          ).length
-        );
-      } catch {
-        setActiveDownloads(0);
-      }
-    };
-
     const bootstrapBackend = async () => {
       const coreReady = await waitForBackendCoreReady(75000, 500);
       if (cancelled) return;
@@ -147,10 +133,8 @@ function Inner() {
         setStartupDiagnostics(payload);
       }
     });
-    void syncDownloads();
     const interval = window.setInterval(() => {
       void syncRuntimeHealth();
-      void syncDownloads();
       void fetchStartupDiagnostics().then((payload) => {
         if (!cancelled && payload) setStartupDiagnostics(payload);
       });
@@ -164,6 +148,44 @@ function Inner() {
       window.removeEventListener("grabix:navigate", handleNavigate as EventListener);
     };
   }, []);
+
+  useEffect(() => {
+    if (!backendCoreReady) {
+      setActiveDownloads(0);
+      return;
+    }
+    if (page !== "downloader" && activeDownloads <= 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const syncDownloads = async () => {
+      try {
+        const downloads = await backendJson<Array<{ status?: string }>>("/downloads");
+        if (cancelled) return;
+        setActiveDownloads(
+          downloads.filter((item) =>
+            ["queued", "downloading", "processing", "paused"].includes(item.status ?? "")
+          ).length
+        );
+      } catch {
+        if (!cancelled) {
+          setActiveDownloads(0);
+        }
+      }
+    };
+
+    void syncDownloads();
+    const interval = window.setInterval(() => {
+      void syncDownloads();
+    }, 4000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [backendCoreReady, page, activeDownloads]);
 
   useEffect(() => {
     setRuntimeState(

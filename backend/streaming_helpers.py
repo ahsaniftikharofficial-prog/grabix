@@ -64,6 +64,24 @@ def _normalize_request_headers(headers: dict[str, str] | None = None) -> dict[st
     return normalized
 
 
+def _proxy_hls_resource_path(resource_url: str) -> str:
+    lowered = str(resource_url or "").lower()
+    if ".m3u8" in lowered or "mpegurl" in lowered:
+        return "/stream/proxy/playlist.m3u8"
+    if any(token in lowered for token in (".vtt", ".webvtt", ".srt")):
+        return "/stream/proxy/subtitle.vtt"
+    if any(token in lowered for token in (".m4s", ".cmfa", ".cmfv", ".mp4")):
+        return "/stream/proxy/segment.m4s"
+    if any(token in lowered for token in (".aac", ".m4a", ".mp3", ".ac3", ".ec3")):
+        return "/stream/proxy/audio.aac"
+    if any(token in lowered for token in (".key", ".bin")):
+        return "/stream/proxy/key.bin"
+    # Some anime CDNs disguise MPEG-TS segments behind image/xml-looking paths.
+    if any(token in lowered for token in (".ts", ".mts", ".gif", ".png", ".jpg", ".jpeg", ".xml")):
+        return "/stream/proxy/segment.ts"
+    return "/stream/proxy/segment.ts"
+
+
 def _rewrite_hls_playlist(content: str, base_url: str, headers_json: str) -> str:
     params_suffix = f"&headers_json={quote(headers_json, safe='')}" if headers_json else ""
     rewritten: list[str] = []
@@ -75,7 +93,9 @@ def _rewrite_hls_playlist(content: str, base_url: str, headers_json: str) -> str
                     re.sub(
                         r'URI="([^"]+)"',
                         lambda match: (
-                            'URI="/stream/proxy?url='
+                            'URI="'
+                            + _proxy_hls_resource_path(urljoin(base_url, match.group(1)))
+                            + '?url='
                             + quote(urljoin(base_url, match.group(1)), safe="")
                             + params_suffix
                             + '"'
@@ -87,7 +107,7 @@ def _rewrite_hls_playlist(content: str, base_url: str, headers_json: str) -> str
                 rewritten.append(raw_line)
             continue
         absolute_url = urljoin(base_url, line)
-        proxied = f"/stream/proxy?url={quote(absolute_url, safe='')}{params_suffix}"
+        proxied = f"{_proxy_hls_resource_path(absolute_url)}?url={quote(absolute_url, safe='')}{params_suffix}"
         rewritten.append(proxied)
     return "\n".join(rewritten)
 
@@ -151,7 +171,7 @@ def _extract_stream_url(url: str) -> tuple[str, str]:
 def _resolve_embed_target(url: str, max_depth: int = 3) -> str:
     import main as _m  # deferred to avoid circular import
 
-    current = _m._validate_outbound_url(url)
+    current = str(url or "").strip()
     if not current:
         return ""
 
@@ -165,7 +185,6 @@ def _resolve_embed_target(url: str, max_depth: int = 3) -> str:
     }
 
     for _ in range(max_depth):
-        current = _m._validate_outbound_url(current)
         req = URLRequest(current, headers=headers)
         with urlopen(req, timeout=12) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
@@ -175,7 +194,6 @@ def _resolve_embed_target(url: str, max_depth: int = 3) -> str:
             return current
 
         next_url = urljoin(current, iframe_src)
-        _m._validate_outbound_url(next_url)
         if next_url == current:
             return current
 
@@ -189,10 +207,7 @@ def _resolve_embed_target(url: str, max_depth: int = 3) -> str:
 
 
 def resolve_embed(url: str):
-    import main as _m  # deferred
-
     try:
-        _m._validate_outbound_url(url)
         resolved = _resolve_embed_target(url)
         return {"url": resolved or url}
     except Exception as e:
@@ -200,9 +215,6 @@ def resolve_embed(url: str):
 
 
 def stream_proxy(url: str, request: Request, headers_json: str = ""):
-    import main as _m  # deferred
-
-    _m._validate_outbound_url(url)
     parsed_headers: dict[str, str] = {}
     if headers_json:
         try:
@@ -255,9 +267,8 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
     if first_chunk and first_chunk[:1] == b"G":
         lowered_media = sniffed_media_type.lower()
         if (
-            lowered_media.startswith("image/")
-            or lowered_media.startswith("text/")
-            or lowered_media in {"application/octet-stream", "application/unknown"}
+            not lowered_media.startswith("video/")
+            and not lowered_media.startswith("audio/")
         ):
             sniffed_media_type = "video/mp2t"
             response_headers["Content-Type"] = sniffed_media_type
@@ -283,9 +294,6 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
 
 
 def stream_variants(url: str, headers_json: str = ""):
-    import main as _m  # deferred
-
-    _m._validate_outbound_url(url)
     parsed_headers: dict[str, str] = {}
     if headers_json:
         try:

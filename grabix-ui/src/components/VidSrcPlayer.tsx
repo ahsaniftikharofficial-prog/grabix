@@ -213,19 +213,22 @@ function writePlaybackCache<T>(key: string, value: T, ttlMs: number) {
 function buildStreamProxyUrl(api: string, url: string, headers?: Record<string, string>): string {
   if (!url) return url;
   if (url.startsWith(`${api}/stream/proxy?`)) return url;
+  if (url.startsWith(`${api}/stream/proxy/`)) return url;
   if (url.startsWith("/stream/proxy?")) return `${api}${url}`;
+  if (url.startsWith("/stream/proxy/")) return `${api}${url}`;
 
   const params = new URLSearchParams({ url });
   if (headers && Object.keys(headers).length > 0) {
     params.set("headers_json", JSON.stringify(headers));
   }
-  return `${api}/stream/proxy?${params.toString()}`;
+  return `${api}/stream/proxy/playlist.m3u8?${params.toString()}`;
 }
 
 function shouldKeepHlsProxied(source: StreamSource): boolean {
   return (
     Boolean(source.requestHeaders && Object.keys(source.requestHeaders).length > 0) ||
     source.url.includes("/stream/proxy?")
+    || source.url.includes("/stream/proxy/")
   );
 }
 
@@ -655,6 +658,9 @@ export default function VidSrcPlayer({
     setCurrentTime(0);
     setDuration(0);
     let sourceReady = false;
+    let shouldRestoreAudioAfterStart = false;
+    const originalMuted = video.muted;
+    const originalVolume = video.volume;
     // Proxied HLS (anime) fetches segments through the local Python backend,
     // which adds latency per segment. Give it extra time before giving up.
     const startupTimeoutMs = activeSource.kind === "hls" && shouldKeepHlsProxied(activeSource)
@@ -666,11 +672,39 @@ export default function VidSrcPlayer({
       }
     }, startupTimeoutMs);
 
-    const handleCanPlay = () => {
+    const markSourceReady = (nextStatus = "Ready") => {
       sourceReady = true;
       setIsLoading(false);
-      setStatusText("Ready");
+      setStatusText(nextStatus);
       setErrorText("");
+    };
+    const attemptPlayback = async () => {
+      try {
+        await video.play();
+      } catch {
+        if (!video.muted) {
+          try {
+            shouldRestoreAudioAfterStart = !originalMuted;
+            video.muted = true;
+            video.volume = 0;
+            await video.play();
+            return;
+          } catch {
+            // Fall through to the ready notice below.
+          }
+        }
+        markSourceReady("Ready");
+        setFallbackNotice("Stream is ready. Press play if it does not start automatically.");
+      }
+    };
+    const handleCanPlay = () => {
+      markSourceReady("Ready");
+    };
+    const handleLoadedMetadata = () => {
+      markSourceReady("Ready");
+    };
+    const handleLoadedData = () => {
+      markSourceReady("Ready");
     };
     const handleError = () => {
       sourceReady = true;
@@ -684,6 +718,13 @@ export default function VidSrcPlayer({
     };
     const handlePlaying = () => {
       sourceReady = true;
+      if (shouldRestoreAudioAfterStart) {
+        video.muted = originalMuted;
+        if (!originalMuted) {
+          video.volume = originalVolume || 1;
+        }
+        shouldRestoreAudioAfterStart = false;
+      }
       setIsLoading(false);
       setStatusText("Playing");
       setIsPlaying(true);
@@ -693,6 +734,8 @@ export default function VidSrcPlayer({
     const handleDurationChange = () => setDuration(video.duration || 0);
 
     video.addEventListener("canplay", handleCanPlay);
+    video.addEventListener("loadedmetadata", handleLoadedMetadata);
+    video.addEventListener("loadeddata", handleLoadedData);
     video.addEventListener("error", handleError);
     video.addEventListener("waiting", handleWaiting);
     video.addEventListener("playing", handlePlaying);
@@ -723,26 +766,43 @@ export default function VidSrcPlayer({
           hls.loadSource(playbackUrl);
         });
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          if (isProxied && hls.levels.length > 1) {
+            const lowestLevelIndex = hls.levels.reduce((bestIndex, level, index, levels) => {
+              const bestBandwidth = Number(levels[bestIndex]?.bitrate || Number.MAX_SAFE_INTEGER);
+              const nextBandwidth = Number(level?.bitrate || Number.MAX_SAFE_INTEGER);
+              return nextBandwidth < bestBandwidth ? index : bestIndex;
+            }, 0);
+            hls.startLevel = lowestLevelIndex;
+            hls.nextLevel = lowestLevelIndex;
+            hls.loadLevel = lowestLevelIndex;
+          }
           setStatusText("Buffering");
-          void video.play().catch(() => {});
+          void attemptPlayback();
+        });
+        hls.on(Hls.Events.FRAG_BUFFERED, () => {
+          if (!sourceReady) {
+            markSourceReady("Buffering");
+          }
         });
         hls.on(Hls.Events.ERROR, (_, data) => {
           if (data.fatal) goToNextSource("media_error");
         });
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
         video.src = playbackUrl;
-        void video.play().catch(() => {});
+        void attemptPlayback();
       } else {
         goToNextSource("unsupported_source");
       }
     } else {
       video.src = activeSource.url;
-      void video.play().catch(() => {});
+      void attemptPlayback();
     }
 
     return () => {
       window.clearTimeout(startupTimeout);
       video.removeEventListener("canplay", handleCanPlay);
+      video.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      video.removeEventListener("loadeddata", handleLoadedData);
       video.removeEventListener("error", handleError);
       video.removeEventListener("waiting", handleWaiting);
       video.removeEventListener("playing", handlePlaying);

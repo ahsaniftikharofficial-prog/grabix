@@ -319,6 +319,119 @@ def _unique_titles(values: list[str]) -> list[str]:
     return results
 
 
+def _normalize_title_for_match(value: str) -> str:
+    lowered = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())
+    lowered = re.sub(r"\bseason\s+\d+\b", " ", lowered)
+    lowered = re.sub(r"\s+", " ", lowered).strip()
+    return lowered
+
+
+def _anime_title_match_score(candidate_title: str, query_titles: list[str]) -> float:
+    candidate = _normalize_title_for_match(candidate_title)
+    if not candidate:
+        return 0.0
+
+    best = 0.0
+    candidate_tokens = set(candidate.split())
+    for query_title in query_titles:
+        query = _normalize_title_for_match(query_title)
+        if not query:
+            continue
+        score = 0.0
+        if candidate == query:
+            score += 10.0
+        if candidate.startswith(query) or query.startswith(candidate):
+            score += 4.0
+        if query in candidate or candidate in query:
+            score += 3.0
+        query_tokens = set(query.split())
+        if query_tokens:
+            score += (len(candidate_tokens & query_tokens) / len(query_tokens)) * 3.0
+        best = max(best, score)
+    return best
+
+
+async def _discover_anime_candidates_by_title(
+    *,
+    titles: list[str],
+    existing_candidates: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    from app.services.consumet import search_domain
+
+    title_candidates = _unique_titles(titles)[:4]
+    if not title_candidates:
+        return list(existing_candidates or [])
+
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for candidate in existing_candidates or []:
+        provider_name = str(candidate.get("provider") or "hianime").strip() or "hianime"
+        anime_id = str(candidate.get("anime_id") or candidate.get("animeId") or candidate.get("id") or "").strip()
+        if not anime_id:
+            continue
+        key = f"{provider_name}:{anime_id}"
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(candidate)
+
+    fallback_providers = ("animekai", "kickassanime", "animepahe")
+    search_results = await asyncio.gather(
+        *[
+            search_domain("anime", title, provider=provider_name, page=1)
+            for provider_name in fallback_providers
+            for title in title_candidates
+        ],
+        return_exceptions=True,
+    )
+
+    result_index = 0
+    for provider_name in fallback_providers:
+        added_for_provider = 0
+        for _title in title_candidates:
+            result = search_results[result_index]
+            result_index += 1
+            if isinstance(result, Exception):
+                continue
+            ranked_items = sorted(
+                list(result.get("items") or []),
+                key=lambda item: _anime_title_match_score(
+                    str(item.get("title") or item.get("alt_title") or ""),
+                    title_candidates,
+                ),
+                reverse=True,
+            )
+            for item in ranked_items:
+                anime_id = str(item.get("id") or "").strip()
+                if not anime_id:
+                    continue
+                if _anime_title_match_score(
+                    str(item.get("title") or item.get("alt_title") or ""),
+                    title_candidates,
+                ) < 1.5:
+                    continue
+                key = f"{provider_name}:{anime_id}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(
+                    {
+                        "provider": provider_name,
+                        "anime_id": anime_id,
+                        "title": str(item.get("title") or "").strip(),
+                        "alt_title": str(item.get("alt_title") or "").strip(),
+                    }
+                )
+                added_for_provider += 1
+                if added_for_provider >= 2:
+                    break
+            if added_for_provider >= 2:
+                break
+
+    return merged
+
+
 def _infer_stream_kind(url: str, mime_type: str | None = None) -> str:
     lowered = (url or "").lower()
     mime = (mime_type or "").lower()
@@ -432,6 +545,72 @@ def _resolution_payload(
         "attempts": attempts,
         "error": None,
     }
+
+
+def _map_consumet_watch_payload(provider: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    headers = dict(payload.get("headers") or {})
+    if not headers:
+        headers = {"Referer": "https://megacloud.blog/"}
+
+    mapped: list[dict[str, Any]] = []
+    for index, source in enumerate(payload.get("sources") or []):
+        if not isinstance(source, dict) or not source.get("url"):
+            continue
+        mapped.append(
+            _stream_source(
+                source_id=str(source.get("id") or f"{provider}-watch-{index}"),
+                label=str(source.get("label") or source.get("quality") or f"Source {index + 1}"),
+                provider=str(source.get("provider") or f"Consumet {provider}"),
+                kind=str(source.get("kind") or _infer_stream_kind(str(source.get("url") or ""), str(source.get("mimeType") or ""))),
+                url=str(source.get("url") or ""),
+                description=str(source.get("description") or f"{provider} source"),
+                quality=str(source.get("quality") or "Auto"),
+                mime_type=str(source.get("mimeType") or ""),
+                external_url=str(source.get("externalUrl") or source.get("url") or ""),
+                can_extract=bool(source.get("canExtract", False)),
+                subtitles=list(source.get("subtitles") or []),
+                request_headers=headers,
+                language=str(source.get("language") or ""),
+            )
+        )
+    return mapped
+
+
+async def _resolve_direct_anime_provider_sources(
+    *,
+    provider_name: str,
+    anime_id: str,
+    episode_id: str,
+    episode_number: int,
+    audio: str,
+    server: str,
+) -> tuple[list[dict[str, Any]], str]:
+    resolved_episode_id = episode_id
+    if not resolved_episode_id:
+        details = await fetch_anime_episodes(provider=provider_name, media_id=anime_id)
+        items = list(details.get("items") or [])
+        selected = None
+        for item in items:
+            try:
+                if int(item.get("number") or 0) == episode_number:
+                    selected = item
+                    break
+            except Exception:
+                continue
+        if selected is None and items:
+            selected = items[0]
+        resolved_episode_id = str((selected or {}).get("id") or "").strip()
+
+    if not resolved_episode_id:
+        raise HTTPException(status_code=404, detail=f"No episode metadata was found for episode {episode_number}.")
+
+    payload = await fetch_anime_watch(
+        provider=provider_name,
+        episode_id=resolved_episode_id,
+        server=None if server == "auto" else server,
+        audio=audio,
+    )
+    return _map_consumet_watch_payload(provider_name, payload), resolved_episode_id
 
 
 EMBED_PROVIDERS: list[dict[str, Any]] = [
@@ -665,19 +844,19 @@ class AnimeResolvedProviderAdapter(BaseProviderAdapter):
         super().__init__(
             name="anime-resolved",
             family="anime-resolved",
-            policy=ProviderPolicy(timeout_seconds=30.0, retries=0, cooldown_seconds=8.0, circuit_breaker_threshold=5),
+            policy=ProviderPolicy(timeout_seconds=12.0, retries=0, cooldown_seconds=8.0, circuit_breaker_threshold=5),
         )
 
     async def health(self, **kwargs) -> Any:
         consumet = await get_health_status()
         if consumet.get("healthy"):
-            return {"status": "online", "message": "AniWatch primary resolver is healthy."}
+            return {"status": "online", "message": "HiAnime primary resolver is healthy."}
         raise ProviderServiceError(
             code="anime_primary_degraded",
             message=str(consumet.get("message") or "Anime primary resolver is degraded."),
             retryable=True,
             provider=self.name,
-            user_action="Use Movie Box or embed fallback sources.",
+            user_action="Retry the anime provider chain in a moment.",
             status_code=503,
         )
 
@@ -716,7 +895,7 @@ class AnimeResolvedProviderAdapter(BaseProviderAdapter):
             if isinstance(track, dict) and track.get("url")
         ]
         # Ensure anime HLS/direct streams always route through the backend proxy.
-        # AniWatch CDN (MegaCloud/bunnycdn) rejects segment requests without a
+        # HiAnime CDN (MegaCloud/bunnycdn) rejects segment requests without a
         # Referer header. If the watch payload didn't include headers, inject a
         # safe default so shouldKeepHlsProxied() returns true in the player.
         raw_headers = dict(source.get("headers") or {})
@@ -726,8 +905,8 @@ class AnimeResolvedProviderAdapter(BaseProviderAdapter):
         return [
             _stream_source(
                 source_id=f"anime-resolved-{kwargs.get('anime_id') or 'candidate'}-{kwargs.get('episode_number', 1)}",
-                label=str(resolved.get("selectedServer") or resolved.get("provider") or "AniWatch"),
-                provider=str(resolved.get("provider") or "AniWatch"),
+                label=str(resolved.get("selectedServer") or resolved.get("provider") or "HiAnime"),
+                provider=str(resolved.get("provider") or "HiAnime"),
                 kind=str(source.get("kind") or "direct"),
                 url=url,
                 description=str(resolved.get("strategy") or "Resolved anime source"),
@@ -752,7 +931,7 @@ class ConsumetAnimeProviderAdapter(BaseProviderAdapter):
         super().__init__(
             name="consumet-watch",
             family="consumet-watch",
-            policy=ProviderPolicy(timeout_seconds=30.0, retries=0, cooldown_seconds=8.0, circuit_breaker_threshold=5),
+            policy=ProviderPolicy(timeout_seconds=12.0, retries=0, cooldown_seconds=8.0, circuit_breaker_threshold=5),
         )
 
     async def health(self, **kwargs) -> Any:
@@ -821,33 +1000,7 @@ class ConsumetAnimeProviderAdapter(BaseProviderAdapter):
             server=None if server == "auto" else server,
             audio=audio,
         )
-        headers = dict(payload.get("headers") or {})
-        # AniWatch CDN segments require a Referer header. If the sidecar didn't
-        # return one, inject a safe default so the player proxy is always used.
-        if not headers:
-            headers = {"Referer": "https://megacloud.blog/"}
-        mapped: list[dict[str, Any]] = []
-        for index, source in enumerate(payload.get("sources") or []):
-            if not isinstance(source, dict) or not source.get("url"):
-                continue
-            mapped.append(
-                _stream_source(
-                    source_id=str(source.get("id") or f"{provider}-watch-{index}"),
-                    label=str(source.get("label") or source.get("quality") or f"Source {index + 1}"),
-                    provider=str(source.get("provider") or f"Consumet {provider}"),
-                    kind=str(source.get("kind") or _infer_stream_kind(str(source.get("url") or ""), str(source.get("mimeType") or ""))),
-                    url=str(source.get("url") or ""),
-                    description=str(source.get("description") or f"{provider} source"),
-                    quality=str(source.get("quality") or "Auto"),
-                    mime_type=str(source.get("mimeType") or ""),
-                    external_url=str(source.get("externalUrl") or source.get("url") or ""),
-                    can_extract=bool(source.get("canExtract", False)),
-                    subtitles=list(source.get("subtitles") or []),
-                    request_headers=headers,
-                    language=str(source.get("language") or ""),
-                )
-            )
-        return mapped
+        return _map_consumet_watch_payload(provider, payload)
 
     async def download_options(self, **kwargs) -> Any:
         return await self.sources(**kwargs)
@@ -1186,8 +1339,10 @@ async def resolve_anime_playback(
     groups: list[dict[str, Any]] = []
     normalized_audio = (audio or "original").strip().lower() or "original"
     title_candidates = _unique_titles([title, alt_title, *(alt_titles or [])])
-    candidate_items = candidates or []
+    candidate_items = list(candidates or [])
     resolved_episode_ids: dict[str, str] = {}
+    collect_all_sources = purpose == "play"
+    successful_watch_providers: set[str] = set()
 
     if normalized_audio == "hi":
         hindi_sources = await _resolve_moviebox_sources_by_title(
@@ -1221,8 +1376,15 @@ async def resolve_anime_playback(
             status_code=422,
         )
 
+    candidate_items = await _discover_anime_candidates_by_title(
+        titles=title_candidates,
+        existing_candidates=candidate_items,
+    )
+
     for candidate in candidate_items:
         provider_name = str(candidate.get("provider") or "hianime").strip() or "hianime"
+        if provider_name in successful_watch_providers:
+            continue
         anime_id = str(candidate.get("anime_id") or candidate.get("animeId") or candidate.get("id") or "").strip()
         if not anime_id:
             continue
@@ -1230,152 +1392,163 @@ async def resolve_anime_playback(
         candidate_key = f"{provider_name}:{anime_id}:{episode_number}"
         if not episode_id:
             episode_id = resolved_episode_ids.get(candidate_key, "")
-        if not episode_id:
-            try:
-                episode_payload = await registry.execute(
-                    "consumet-watch",
-                    "details",
-                    correlation_id=correlation_id,
-                    fallback_used=False,
-                    provider=provider_name,
-                    media_id=anime_id,
-                )
-                selected = None
-                for item in episode_payload.get("items") or []:
-                    try:
-                        if int(item.get("number") or 0) == episode_number:
-                            selected = item
-                            break
-                    except Exception:
-                        continue
-                if selected is None:
-                    items = list(episode_payload.get("items") or [])
-                    selected = items[0] if items else None
-                episode_id = str((selected or {}).get("id") or "").strip()
-            except ProviderServiceError as error:
-                attempts.append(
-                    _attempt_payload(
-                        provider="consumet-watch",
-                        operation="details",
-                        success=False,
-                        message=error.message,
-                        fallback_used=False,
-                        retryable=error.retryable,
-                    )
-                )
-                episode_id = ""
-
-        if episode_id:
-            resolved_episode_ids[candidate_key] = episode_id
 
         try:
-            watch_sources = await registry.execute(
-                "consumet-watch",
-                "sources",
-                correlation_id=correlation_id,
-                fallback_used=not bool(groups),
-                provider=provider_name,
-                media_id=anime_id,
-                episode_number=episode_number,
-                episode_id=episode_id,
-                audio=normalized_audio,
-                server=server,
-            )
+            if provider_name == "hianime":
+                watch_sources = await registry.execute(
+                    "consumet-watch",
+                    "sources",
+                    correlation_id=correlation_id,
+                    fallback_used=not bool(groups),
+                    provider=provider_name,
+                    media_id=anime_id,
+                    episode_number=episode_number,
+                    episode_id=episode_id,
+                    audio=normalized_audio,
+                    server=server,
+                )
+            else:
+                watch_sources, episode_id = await _resolve_direct_anime_provider_sources(
+                    provider_name=provider_name,
+                    anime_id=anime_id,
+                    episode_id=episode_id,
+                    episode_number=episode_number,
+                    audio=normalized_audio,
+                    server=server,
+                )
+            if episode_id:
+                resolved_episode_ids[candidate_key] = episode_id
             if watch_sources:
                 attempts.append(
                     _attempt_payload(
-                        provider="consumet-watch",
+                        provider="consumet-watch" if provider_name == "hianime" else provider_name,
                         operation="sources",
                         success=True,
                         message=f"Prepared {len(watch_sources)} consumet fallback sources via {provider_name}.",
                         fallback_used=not bool(groups),
                     )
                 )
+                successful_watch_providers.add(provider_name)
                 groups.append({"id": f"consumet-{provider_name}", "label": f"{provider_name} watch fallback", "sources": watch_sources})
-                break
-        except ProviderServiceError as error:
+                if not collect_all_sources:
+                    break
+        except Exception as error:
+            normalized_error = _provider_error_from_exception(
+                error,
+                provider="consumet-watch" if provider_name == "hianime" else provider_name,
+                correlation_id=correlation_id,
+                fallback_used=not bool(groups),
+            )
             attempts.append(
                 _attempt_payload(
-                    provider="consumet-watch",
+                    provider="consumet-watch" if provider_name == "hianime" else provider_name,
                     operation="sources",
                     success=False,
-                    message=error.message,
+                    message=normalized_error.message,
                     fallback_used=not bool(groups),
-                    retryable=error.retryable,
+                    retryable=normalized_error.retryable,
                 )
             )
 
-    for candidate in candidate_items:
-        provider_name = str(candidate.get("provider") or "hianime").strip() or "hianime"
-        anime_id = str(candidate.get("anime_id") or candidate.get("animeId") or candidate.get("id") or "").strip()
-        if not anime_id:
-            continue
-        candidate_key = f"{provider_name}:{anime_id}:{episode_number}"
-        episode_id = resolved_episode_ids.get(candidate_key, "")
-        if not episode_id:
-            continue
+    if not groups:
+        for candidate in candidate_items:
+            provider_name = str(candidate.get("provider") or "hianime").strip() or "hianime"
+            if provider_name != "hianime":
+                continue
 
-        try:
-            resolved_sources = await registry.execute(
-                "anime-resolved",
-                "sources",
-                correlation_id=correlation_id,
-                fallback_used=not bool(groups),
-                episode_id=episode_id,
-                anime_id=anime_id,
-                title=title,
-                alt_title=alt_title,
-                episode_number=episode_number,
-                audio=normalized_audio,
-                server=server,
-                is_movie=is_movie,
-                tmdb_id=tmdb_id,
-                purpose=purpose,
-            )
-            if resolved_sources:
+            anime_id = str(candidate.get("anime_id") or candidate.get("animeId") or candidate.get("id") or "").strip()
+            if not anime_id:
+                continue
+
+            candidate_key = f"{provider_name}:{anime_id}:{episode_number}"
+            episode_id = str(candidate.get("episode_id") or candidate.get("episodeId") or "").strip()
+            if not episode_id:
+                episode_id = resolved_episode_ids.get(candidate_key, "")
+
+            if not episode_id:
+                try:
+                    episode_payload = await registry.execute(
+                        "consumet-watch",
+                        "details",
+                        correlation_id=correlation_id,
+                        fallback_used=True,
+                        provider=provider_name,
+                        media_id=anime_id,
+                    )
+                    selected = None
+                    for item in episode_payload.get("items") or []:
+                        try:
+                            if int(item.get("number") or 0) == episode_number:
+                                selected = item
+                                break
+                        except Exception:
+                            continue
+                    if selected is None:
+                        items = list(episode_payload.get("items") or [])
+                        selected = items[0] if items else None
+                    episode_id = str((selected or {}).get("id") or "").strip()
+                    if episode_id:
+                        resolved_episode_ids[candidate_key] = episode_id
+                except ProviderServiceError as error:
+                    attempts.append(
+                        _attempt_payload(
+                            provider="consumet-watch",
+                            operation="details",
+                            success=False,
+                            message=error.message,
+                            fallback_used=True,
+                            retryable=error.retryable,
+                        )
+                    )
+                    episode_id = ""
+
+            if not episode_id:
+                continue
+
+            try:
+                resolved_sources = await registry.execute(
+                    "anime-resolved",
+                    "sources",
+                    correlation_id=correlation_id,
+                    fallback_used=True,
+                    episode_id=episode_id,
+                    anime_id=anime_id,
+                    title=title,
+                    alt_title=alt_title,
+                    episode_number=episode_number,
+                    audio=normalized_audio,
+                    server=server,
+                    is_movie=is_movie,
+                    tmdb_id=tmdb_id,
+                    purpose=purpose,
+                )
+                if resolved_sources:
+                    attempts.append(
+                        _attempt_payload(
+                            provider="anime-resolved",
+                            operation="sources",
+                            success=True,
+                            message=f"Resolved fallback anime sources via {provider_name}.",
+                            fallback_used=True,
+                        )
+                    )
+                    groups.append({"id": "anime-resolved", "label": "Backend resolved fallback", "sources": resolved_sources})
+                    break
+            except ProviderServiceError as error:
                 attempts.append(
                     _attempt_payload(
                         provider="anime-resolved",
                         operation="sources",
-                        success=True,
-                        message=f"Resolved fallback anime sources via {provider_name}.",
-                        fallback_used=not bool(groups),
+                        success=False,
+                        message=error.message,
+                        fallback_used=True,
+                        retryable=error.retryable,
                     )
                 )
-                groups.append({"id": "anime-resolved", "label": "Backend resolved fallback", "sources": resolved_sources})
-                break
-        except ProviderServiceError as error:
-            attempts.append(
-                _attempt_payload(
-                    provider="anime-resolved",
-                    operation="sources",
-                    success=False,
-                    message=error.message,
-                    fallback_used=not bool(groups),
-                    retryable=error.retryable,
-                )
-            )
 
-    # ── Only fall back to MovieBox / embed if HiAnime completely failed ───────
-    if not groups:
-        moviebox_sources = await _resolve_moviebox_sources_by_title(
-            registry=registry,
-            correlation_id=correlation_id,
-            titles=title_candidates,
-            media_type="movie" if is_movie else "anime",
-            season=max(1, fallback_season),
-            episode=max(1, fallback_episode or episode_number),
-            prefer_hindi=False,
-            anime_only=not is_movie,
-            attempts=attempts,
-            fallback_used=True,
-        )
-        if moviebox_sources:
-            groups.append({"id": "moviebox", "label": "Movie Box last-resort fallback", "sources": moviebox_sources})
-
-    # Embed (VidSrc) fallback intentionally removed for anime — VidSrc does not
-    # reliably host anime content and always shows "We're Sorry / file not found".
-    # If HiAnime and MovieBox both fail, return whatever groups were collected.
+    # Non-Hindi anime playback is intentionally limited to anime providers only:
+    # HiAnime primary, then AnimeKai / KickAssAnime / AnimePahe fallbacks.
+    # MovieBox remains reserved for the Hindi-only path above.
 
     payload = _resolution_payload(
         correlation_id=correlation_id,

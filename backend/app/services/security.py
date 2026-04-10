@@ -46,7 +46,10 @@ DEFAULT_APPROVED_MEDIA_HOSTS = (
     "subdl",
     "stormshade",
     "crimsonstorm",
+    "haildrop",
     "megacloud",
+    "megaup",
+    "net22lab",
     "rabbitstream",
     "dokicloud",
     # Anime image CDNs — required for posters to load
@@ -96,7 +99,10 @@ def normalize_download_target(
         self_parsed.port or (443 if self_parsed.scheme == "https" else 80)
     )
 
-    if same_host and same_port and parsed.path in {"/stream/proxy", "/moviebox/proxy-stream", "/moviebox/subtitle"}:
+    if same_host and same_port and (
+        parsed.path.startswith("/stream/proxy")
+        or parsed.path in {"/moviebox/proxy-stream", "/moviebox/subtitle"}
+    ):
         query = parse_qs(parsed.query)
         nested_url = (query.get("url") or [""])[0].strip()
         nested_headers_json = headers_json or (query.get("headers_json") or [""])[0].strip()

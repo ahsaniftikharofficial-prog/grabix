@@ -11,7 +11,8 @@ def resolve_embed(url: str):
 
 
 @router.get("/stream/proxy")
-def stream_proxy(url: str, request: Request, headers_json: str = ""):
+@router.get("/stream/proxy/{path_hint:path}")
+def stream_proxy(url: str, request: Request, headers_json: str = "", path_hint: str = ""):
     return get_route_handler("streaming", "stream_proxy")(url, request, headers_json)
 
 

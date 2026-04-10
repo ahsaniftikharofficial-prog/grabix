@@ -14,6 +14,7 @@ import {
   fetchConsumetDomainInfo,
   fetchConsumetHealth,
   normalizeAudioPreference,
+  searchConsumetDomain,
   searchConsumetAnime,
   type AudioPreference,
   type ConsumetEpisode,
@@ -52,8 +53,8 @@ const AUDIO_BUTTONS: Array<{ id: AnimeAudioOption; label: string; help: string }
 ];
 const SERVER_BUTTONS: Array<{ id: AnimeServerOption; label: string; help: string }> = [
   { id: "auto", label: "Auto", help: "Fastest available source" },
-  { id: "hd-1", label: "HD-1", help: "AniWatch primary" },
-  { id: "hd-2", label: "HD-2", help: "AniWatch backup" },
+  { id: "hd-1", label: "HD-1", help: "HiAnime primary" },
+  { id: "hd-2", label: "HD-2", help: "HiAnime backup" },
 ];
 
 interface LegacyAnime {
@@ -205,6 +206,35 @@ function expandAnimeTitles(...titles: Array<string | undefined>): string[] {
   return [...values].filter(Boolean);
 }
 
+const ANIME_FALLBACK_PROVIDERS = ["animekai", "kickassanime", "animepahe"] as const;
+
+async function searchAnimeFallbackCandidates(...titles: Array<string | undefined>): Promise<AnimeCardItem[]> {
+  const titleCandidates = expandAnimeTitles(...titles).slice(0, 4);
+  if (titleCandidates.length === 0) return [];
+
+  const providerMatches = new Map<string, AnimeCardItem[]>();
+  const requests = titleCandidates.flatMap((title) =>
+    ANIME_FALLBACK_PROVIDERS.map((provider) =>
+      searchConsumetDomain("anime", title, provider, 1).then((items) => ({ provider, items }))
+    )
+  );
+  const settled = await Promise.allSettled(requests);
+
+  for (const result of settled) {
+    if (result.status !== "fulfilled") continue;
+    const current = providerMatches.get(result.value.provider) ?? [];
+    const nextItems = result.value.items
+      .map(toCardItem)
+      .filter((item) => Boolean(item.id))
+      .slice(0, Math.max(0, 2 - current.length));
+    if (nextItems.length > 0) {
+      providerMatches.set(result.value.provider, [...current, ...nextItems]);
+    }
+  }
+
+  return dedupeItems([...providerMatches.values()].flat());
+}
+
 async function searchTmdbTv(query: string): Promise<number | null> {
   const data = (await searchTmdbMedia("tv", query, 1)) as { results?: Array<{ id?: number; name?: string; original_name?: string }> };
   return data.results?.[0]?.id ?? null;
@@ -321,13 +351,13 @@ export default function AnimePage() {
     setLoading(true);
     setBrowseError("");
     try {
-      // AniWatch is PRIMARY — fast 8s timeout, aniwatchtv.to mirror
+      // HiAnime is primary here — local sidecar, fail fast, then Jikan fallback
       const result = await fetchAniwatchDiscover(nextTab as AniwatchSection, nextPage, nextPeriod);
       const nextItems = (result.items ?? []).map(toCardItem);
       setHasMore(result.has_next || nextItems.length > 0);
       setItems((prev) => (nextPage === 1 ? nextItems : dedupeItems([...prev, ...nextItems])));
     } catch {
-      // Fallback to Jikan if AniWatch is down
+      // Fallback to Jikan if HiAnime is down
       try {
         const fallbackItems = await fetchJikanDiscover(nextTab, nextPage);
         setHasMore(fallbackItems.length > 0);
@@ -346,7 +376,7 @@ export default function AnimePage() {
     setLoading(true);
     setBrowseError("");
     try {
-      // AniWatch PRIMARY search
+      // HiAnime primary search
       const result = await searchAniwatch(nextQuery, nextPage);
       const nextItems = (result.items ?? []).map(toCardItem);
       setHasMore(result.has_next || nextItems.length > 0);
@@ -503,10 +533,10 @@ export default function AnimePage() {
   }, [items.length, loading, page, query, tab, trendingPeriod]);
 
   const helperText = health?.healthy
-    ? "AniWatch-first anime with dub/sub/Hindi playback and Consumet/Jikan backups"
+    ? "HiAnime-first anime with dub/sub playback and anime-provider fallbacks"
     : health && !health.configured
-      ? "Anime browsing ready with AniWatch as primary source"
-      : "AniWatch primary with Jikan fallback — fastest anime data available";
+      ? "Anime browsing ready with HiAnime as the primary source"
+      : "HiAnime primary with Jikan fallback for browsing";
 
   const handleScroll = () => {
     const node = scrollRef.current;
@@ -765,7 +795,11 @@ function AnimeDetail({
   const [resolvedAnime, setResolvedAnime] = useState<AnimeCardItem | null>(anime);
   const [episodes, setEpisodes] = useState<ConsumetEpisode[]>([]);
   const [episode, setEpisode] = useState(1);
-  const [dubEpisodeCount, setDubEpisodeCount] = useState<number | null>(null);
+  const [dubEpisodeCount, setDubEpisodeCount] = useState<number | null>(
+    anime.provider === "hianime" && typeof anime.dub_episode_count === "number"
+      ? anime.dub_episode_count
+      : null
+  );
   const hasDub = dubEpisodeCount === null ? false : (dubEpisodeCount === 0 ? false : episode <= dubEpisodeCount);
   const [audio, setAudio] = useState<AudioPreference>("original");
   const [server, setServer] = useState<AnimeServerOption>("auto");
@@ -788,9 +822,11 @@ function AnimeDetail({
   const [downloadDialogLoading, setDownloadDialogLoading] = useState(false);
   const [downloadDialogError, setDownloadDialogError] = useState("");
   const resolvedSourceCacheRef = useRef<Record<string, StreamSource>>({});
+  const resolvedPlayableSourcesCacheRef = useRef<Record<string, StreamSource[]>>({});
   const episodeCacheRef = useRef<Record<string, ConsumetEpisode[]>>({});
   const episodeRequestCacheRef = useRef<Record<string, Promise<ConsumetEpisode[]>>>({});
   const resolvedSourcePromiseCacheRef = useRef<Record<string, Promise<StreamSource | null>>>({});
+  const resolvedPlayableSourcesPromiseCacheRef = useRef<Record<string, Promise<StreamSource[]>>>({});
   const { isFav, toggle } = useFavorites();
   const title = anime.title;
   const fav = isFav(`anime-${anime.mal_id ?? `${anime.provider}-${anime.id}`}`);
@@ -815,10 +851,18 @@ function AnimeDetail({
     setFinding(true);
     setEpisodes([]);
     setEpisode(1);
-    setDubEpisodeCount(null);
+    setDubEpisodeCount(
+      anime.provider === "hianime" && typeof anime.dub_episode_count === "number"
+        ? anime.dub_episode_count
+        : null
+    );
     setAudio("original");
     setServer("auto");
-    setDetailHint("");
+    setDetailHint(
+      consumetHealthy
+        ? `Preparing playback via ${String(anime.provider || "anime").toUpperCase()}...`
+        : "Preparing playback with GRABIX fallback providers..."
+    );
     setResolvedAnime(anime);
     setCandidateAnimes([anime]);
     setKnownEpisodeCount(anime.episodes_count ?? null);
@@ -826,16 +870,20 @@ function AnimeDetail({
     setHasHindiFallback(false);
     setTrailerUrl(anime.trailer_url || "");
     resolvedSourceCacheRef.current = {};
+    resolvedPlayableSourcesCacheRef.current = {};
     episodeRequestCacheRef.current = {};
     resolvedSourcePromiseCacheRef.current = {};
+    resolvedPlayableSourcesPromiseCacheRef.current = {};
+    setFinding(false);
 
     Promise.allSettled([
       findTmdbId(anime.title, anime.alt_title),
       anime.provider !== "hianime" && consumetHealthy
         ? searchConsumetAnime(anime.title)
         : Promise.resolve([] as ConsumetMediaSummary[]),
+      searchAnimeFallbackCandidates(anime.title, anime.alt_title),
       fetchJikanEpisodeCount(anime.mal_id),
-    ]).then(async ([tmdbResult, searchResult, jikanResult]) => {
+    ]).then(async ([tmdbResult, searchResult, fallbackSearchResult, jikanResult]) => {
       if (cancelled) return;
 
       setTmdbId(tmdbResult.status === "fulfilled" ? tmdbResult.value : null);
@@ -843,13 +891,14 @@ function AnimeDetail({
         setKnownEpisodeCount(jikanResult.value);
       }
 
+      const fallbackCandidates = fallbackSearchResult.status === "fulfilled" ? fallbackSearchResult.value : [];
       const nextCandidates = anime.provider !== "hianime"
-        ? dedupeItems([anime, ...(searchResult.status === "fulfilled" ? searchResult.value.map(toCardItem) : [])])
-        : dedupeItems([anime]);
+        ? dedupeItems([anime, ...(searchResult.status === "fulfilled" ? searchResult.value.map(toCardItem) : []), ...fallbackCandidates])
+        : dedupeItems([anime, ...fallbackCandidates]);
       setCandidateAnimes(nextCandidates);
 
-      // ── Fast dub detection for AniWatch items ────────────────────────────
-      // AniWatch search/discover results already carry dub_episode_count;
+      // ── Fast dub detection for HiAnime items ─────────────────────────────
+      // HiAnime search/discover results already carry dub_episode_count;
       // use it immediately so the Dub button appears without the slow round-trip.
       if (anime.provider === "hianime" && typeof anime.dub_episode_count === "number") {
         setDubEpisodeCount(anime.dub_episode_count);
@@ -879,13 +928,12 @@ function AnimeDetail({
       });
 
       setResolvedAnime(nextCandidates[0] ?? anime);
-      setFinding(false);
       if (!consumetHealthy) {
-        setDetailHint("Consumet is in fallback mode. GRABIX will use Jikan, Movie Box, and embed backups.");
+        setDetailHint("HiAnime is degraded. GRABIX will try AnimeKai, KickAssAnime, and AnimePahe.");
       } else if (nextCandidates.length > 0) {
         setDetailHint(`Ready to play. Using ${nextCandidates[0].provider.toUpperCase()} first.`);
       } else {
-        setDetailHint("Ready to play with GRABIX fallback providers.");
+        setDetailHint("Ready to play with anime fallback providers.");
       }
 
       void (async () => {
@@ -1007,10 +1055,6 @@ function AnimeDetail({
           });
         }
         if (!source) {
-          const movieBoxSources = await resolveMovieBoxAnimeSources(episode);
-          source = movieBoxSources[0] ?? null;
-        }
-        if (!source) {
           setDownloadQualityOptions([]);
           setDownloadSubtitleTracks([]);
           setDownloadIncludeSubtitle(false);
@@ -1060,6 +1104,26 @@ function AnimeDetail({
       : candidateAnimes
   );
 
+  const getCachedEpisodesForCandidate = (candidate: AnimeCardItem): ConsumetEpisode[] => {
+    const cacheKey = `${candidate.provider}-${candidate.id}`;
+    const cachedEpisodes = episodeCacheRef.current[cacheKey];
+    if (Array.isArray(cachedEpisodes) && cachedEpisodes.length > 0) {
+      return cachedEpisodes;
+    }
+    if (resolvedAnime && `${resolvedAnime.provider}-${resolvedAnime.id}` === cacheKey && episodes.length > 0) {
+      return episodes;
+    }
+    return [];
+  };
+
+  const getCandidateEpisodeId = (candidate: AnimeCardItem, targetEpisode = episode): string | undefined => {
+    const cachedEpisodes = getCachedEpisodesForCandidate(candidate);
+    const exactEpisode = cachedEpisodes.find((item) => Number(item.number) === Number(targetEpisode));
+    const fallbackEpisode = exactEpisode ?? cachedEpisodes[0];
+    const episodeId = String(fallbackEpisode?.id || "").trim();
+    return episodeId || undefined;
+  };
+
   const resolveAnimeSourceViaBackend = async (
     targetEpisode = episode,
     purpose: "play" | "download" = "play",
@@ -1098,7 +1162,7 @@ function AnimeDetail({
           candidates: getWatchCandidates().map((candidate) => ({
             provider: candidate.provider,
             animeId: candidate.id,
-            episodeId: (candidate as any).episode_id || (candidate as any).episodeId || undefined,
+            episodeId: getCandidateEpisodeId(candidate, targetEpisode),
             title: candidate.title,
             altTitle: candidate.alt_title || "",
           })),
@@ -1123,6 +1187,55 @@ function AnimeDetail({
       return await request;
     } finally {
       delete resolvedSourcePromiseCacheRef.current[cacheKey];
+    }
+  };
+
+  const resolveAnimePlaybackSourcesViaBackend = async (
+    targetEpisode = episode,
+    overrides?: { audio?: AudioPreference; server?: AnimeServerOption }
+  ): Promise<StreamSource[]> => {
+    const requestedAudio = normalizeAudioPreference(overrides?.audio ?? audio);
+    const requestedServer = overrides?.server ?? server;
+    const cacheKey = `play:${requestedAudio}:${requestedServer}:${targetEpisode}`;
+    const cached = resolvedPlayableSourcesCacheRef.current[cacheKey];
+    if (cached) return cached;
+    const pending = resolvedPlayableSourcesPromiseCacheRef.current[cacheKey];
+    if (pending) return pending;
+
+    const request = (async () => {
+      const tmdbEpisode = await resolveTmdbEpisodeNumber(tmdbId, targetEpisode);
+      const sources = await resolveAnimePlaybackSources({
+        title: anime.title,
+        altTitle: anime.alt_title || "",
+        altTitles: expandAnimeTitles(anime.title, anime.alt_title).slice(1),
+        tmdbId,
+        fallbackSeason: tmdbEpisode?.season ?? 1,
+        fallbackEpisode: tmdbEpisode?.episode ?? targetEpisode,
+        episodeNumber: targetEpisode,
+        audio: requestedAudio,
+        server: requestedServer,
+        isMovie,
+        purpose: "play",
+        candidates: getWatchCandidates().map((candidate) => ({
+          provider: candidate.provider,
+          animeId: candidate.id,
+          episodeId: getCandidateEpisodeId(candidate, targetEpisode),
+          title: candidate.title,
+          altTitle: candidate.alt_title || "",
+        })),
+      });
+      resolvedPlayableSourcesCacheRef.current[cacheKey] = sources;
+      if (sources[0]) {
+        resolvedSourceCacheRef.current[cacheKey] = sources[0];
+      }
+      return sources;
+    })();
+
+    resolvedPlayableSourcesPromiseCacheRef.current[cacheKey] = request;
+    try {
+      return await request;
+    } finally {
+      delete resolvedPlayableSourcesPromiseCacheRef.current[cacheKey];
     }
   };
 
@@ -1207,69 +1320,23 @@ function AnimeDetail({
   const resolveHindiMovieBoxSources = async (targetEpisode = episode): Promise<StreamSource[]> =>
     resolveMovieBoxAnimeSources(targetEpisode, { preferHindi: true });
 
-  const isHiAnimePrimarySource = (source: StreamSource): boolean => {
+  const isMovieBoxSource = (source: StreamSource): boolean => {
     const provider = `${source.provider || ""} ${source.description || ""}`.toLowerCase();
-    // hianime/aniwatch IS our primary source — MovieBox is the supplement
     return provider.includes("moviebox") || provider.includes("movie box");
   };
 
   const mergeAnimeFallbackSources = async (
     primarySources: StreamSource[],
-    targetEpisode = episode
+    _targetEpisode = episode
   ): Promise<StreamSource[]> => {
-    const normalizedAudio = normalizeAudioPreference(audio);
-    if (normalizedAudio === "hi") {
+    if (normalizeAudioPreference(audio) === "hi") {
       return primarySources;
     }
-
-    const movieBoxSources = await resolveMovieBoxAnimeSources(targetEpisode);
-    if (movieBoxSources.length === 0) {
-      return primarySources;
-    }
-
-    if (primarySources.length === 0) {
-      return movieBoxSources;
-    }
-
-    const primaryLooksFragile = primarySources.every(isHiAnimePrimarySource);
-    if (!primaryLooksFragile) {
-      return primarySources;
-    }
-
-    const merged: StreamSource[] = [];
-    const seen = new Set<string>();
-    for (const source of [...movieBoxSources, ...primarySources]) {
-      const key = `${source.provider}|${source.url}|${source.language || ""}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      merged.push(source);
-    }
-    return merged;
+    return primarySources.filter((source) => !isMovieBoxSource(source));
   };
 
   const resolvePlayableSources = async (targetEpisode = episode): Promise<StreamSource[]> => {
-    const normalizedAudio = normalizeAudioPreference(audio);
-    const tmdbEpisode = await resolveTmdbEpisodeNumber(tmdbId, targetEpisode);
-    return await resolveAnimePlaybackSources({
-      title: anime.title,
-      altTitle: anime.alt_title || "",
-      altTitles: expandAnimeTitles(anime.title, anime.alt_title).slice(1),
-      tmdbId,
-      fallbackSeason: tmdbEpisode?.season ?? 1,
-      fallbackEpisode: tmdbEpisode?.episode ?? targetEpisode,
-      episodeNumber: targetEpisode,
-      audio: normalizedAudio,
-      server,
-      isMovie,
-      purpose: "play",
-      candidates: getWatchCandidates().map((candidate) => ({
-        provider: candidate.provider,
-        animeId: candidate.id,
-        episodeId: (candidate as any).episode_id || (candidate as any).episodeId || undefined,
-        title: candidate.title,
-        altTitle: candidate.alt_title || "",
-      })),
-    });
+    return await resolveAnimePlaybackSourcesViaBackend(targetEpisode);
   };
 
   const buildSubtitleText = (targetEpisode = episode) => {
@@ -1285,26 +1352,26 @@ function AnimeDetail({
   const playerServerOptions = (() => {
     const normalizedAudio = normalizeAudioPreference(audio);
     const subOptions = [
-      { id: "hd-1:original", label: "AniWatch SUB" },
-      { id: "hd-2:original", label: "AniWatch SUB-2" },
+      { id: "hd-1:original", label: "HiAnime SUB" },
+      { id: "hd-2:original", label: "HiAnime SUB-2" },
     ];
     const dubOptions = hasDub
-      ? [{ id: "hd-1:en", label: "AniWatch DUB" }, { id: "hd-2:en", label: "AniWatch DUB-2" }]
+      ? [{ id: "hd-1:en", label: "HiAnime DUB" }, { id: "hd-2:en", label: "HiAnime DUB-2" }]
       : [];
     return normalizedAudio === "en" ? [...dubOptions, ...subOptions] : [...subOptions, ...dubOptions];
   })();
 
   const resolvePlayerServerOption = async (optionId: string, targetEpisode = episode) => {
     const [requestedServer, requestedAudio] = optionId.split(":") as [AnimeServerOption, AudioPreference];
-    const source = await resolveAnimeSourceViaBackend(targetEpisode, "play", {
+    const sources = await resolveAnimePlaybackSourcesViaBackend(targetEpisode, {
       audio: requestedAudio,
       server: requestedServer,
     });
-    if (!source) {
+    if (sources.length === 0) {
       throw new Error(`No playable source was found for ${optionId.replace(":", " ").toUpperCase()}.`);
     }
     return {
-      sources: [source],
+      sources,
       subtitle: requestedAudio === "en"
         ? `Anime playback with English dub - ${selectionLabel} ${targetEpisode}`
         : `Anime playback with subtitles - ${selectionLabel} ${targetEpisode}`,
@@ -1314,9 +1381,9 @@ function AnimeDetail({
 
   const buildInstantPlayableSources = (targetEpisode = episode): StreamSource[] => {
     const normalizedAudio = normalizeAudioPreference(audio);
-    const cachedResolved = resolvedSourceCacheRef.current[`play:${normalizedAudio}:${server}:${targetEpisode}`];
-    if (cachedResolved) {
-      return [cachedResolved];
+    const cachedResolved = resolvedPlayableSourcesCacheRef.current[`play:${normalizedAudio}:${server}:${targetEpisode}`];
+    if (cachedResolved?.length) {
+      return cachedResolved;
     }
     return [];
   };
@@ -1330,16 +1397,16 @@ function AnimeDetail({
       try {
         const preferredServers: AnimeServerOption[] = server === "auto" ? ["hd-1", "hd-2"] : [server];
         await Promise.allSettled([
-          resolveAnimeSourceViaBackend(episode, "play"),
+          resolveAnimePlaybackSourcesViaBackend(episode),
           ...preferredServers.map((preferredServer) =>
-            resolveAnimeSourceViaBackend(episode, "play", {
+            resolveAnimePlaybackSourcesViaBackend(episode, {
               audio: normalizedAudio,
               server: preferredServer,
             })
           ),
         ]);
         if (!cancelled && totalEpisodes > episode) {
-          await resolveAnimeSourceViaBackend(episode + 1, "play", {
+          await resolveAnimePlaybackSourcesViaBackend(episode + 1, {
             audio: normalizedAudio,
             server,
           });
@@ -1359,20 +1426,10 @@ function AnimeDetail({
     const sources = await mergeAnimeFallbackSources(await resolvePlayableSources(targetEpisode), targetEpisode);
     const normalizedAudio = normalizeAudioPreference(audio);
     if (sources.length === 0) {
-      if (normalizedAudio !== "hi") {
-        const fallbackSources = await resolveMovieBoxAnimeSources(targetEpisode);
-        if (fallbackSources.length > 0) {
-          return {
-            sources: fallbackSources,
-            subtitle: buildSubtitleText(targetEpisode),
-            subtitleSearchTitle: buildSubtitleSearchTitle(targetEpisode),
-          };
-        }
-      }
       throw new Error(
         normalizedAudio === "hi"
           ? "No Hindi sources were found for this title."
-          : `No playable anime sources were found for ${selectionLabel.toLowerCase()} ${targetEpisode}.`
+          : `No playable anime sources were found from HiAnime or the anime fallback providers for ${selectionLabel.toLowerCase()} ${targetEpisode}.`
       );
     }
 
@@ -1747,10 +1804,10 @@ function AnimeDetail({
   );
 }
 
-function LoadingGrid() {
+function LoadingGrid({ count = 16 }: { count?: number }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 }}>
-      {Array.from({ length: 16 }).map((_, index) => (
+      {Array.from({ length: count }).map((_, index) => (
         <div key={index} className="card" style={{ overflow: "hidden" }}>
           <div style={{ width: "100%", height: 210, background: "var(--bg-surface2)" }} />
           <div style={{ padding: "8px 10px" }}>

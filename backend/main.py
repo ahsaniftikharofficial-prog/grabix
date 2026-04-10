@@ -1274,13 +1274,62 @@ def _convert_hianime_source_payload(payload: dict, server: str, tried: list[dict
         return _normalize_resolved_source(
             source_url=url,
             kind=kind,
-            provider="AniWatch",
+            provider="HiAnime",
             selected_server=server,
-            strategy="aniwatch-direct",
+            strategy="hianime-direct",
             headers=headers,
             subtitles=subtitles,
             tried=tried,
         )
+    return None
+
+
+def _extract_hianime_embed_source(
+    payload: dict,
+    episode_id: str,
+    server: str,
+    tried: list[dict],
+) -> dict | None:
+    sources = payload.get("sources") or []
+    subtitles = payload.get("subtitles") or []
+    for item in sources:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or item.get("file") or item.get("src") or "").strip()
+        if not url:
+            continue
+        kind = "hls" if item.get("isM3U8") or ".m3u8" in url.lower() else ("embed" if item.get("isEmbed") else "direct")
+        if kind != "embed":
+            continue
+
+        try:
+            resolved_url = _resolve_embed_target(url)
+            direct_url, extracted_kind = _extract_stream_url(resolved_url)
+            return _normalize_resolved_source(
+                source_url=direct_url,
+                kind=extracted_kind,
+                provider="HiAnime",
+                selected_server=server,
+                strategy="hianime-embed-extract",
+                headers={"Referer": resolved_url},
+                subtitles=subtitles,
+                tried=tried,
+            )
+        except Exception as exc:
+            tried.append({"server": server, "stage": "hianime-embed-extract", "detail": str(exc)})
+
+        try:
+            captured = _capture_hianime_stream_via_edge(url, episode_id, server, tried)
+            if captured:
+                captured["provider"] = "HiAnime"
+                captured["selectedServer"] = server
+                captured["strategy"] = "hianime-browser-capture"
+                if not captured.get("subtitles"):
+                    captured["subtitles"] = subtitles
+                return captured
+        except Exception as exc:
+            tried.append({"server": server, "stage": "hianime-browser-capture", "detail": str(exc)})
+
     return None
 
 
@@ -1329,9 +1378,9 @@ def _capture_hianime_stream_via_edge(embed_url: str, watch_url: str, server: str
                 return _normalize_resolved_source(
                     source_url=url,
                     kind="hls" if ".m3u8" in url.lower() else "direct",
-                    provider="AniWatch",
+                    provider="HiAnime",
                     selected_server=server,
-                    strategy="aniwatch-browser-capture",
+                    strategy="hianime-browser-capture",
                     headers={"Referer": watch_url or embed_url},
                     subtitles=[],
                     tried=tried,
@@ -1435,9 +1484,9 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
                     "headers": raw_headers,
                 },
                 "subtitles": watch_payload.get("subtitles") or [],
-                "provider": "AniWatch",
+                "provider": "HiAnime",
                 "selectedServer": target_source.get("quality", payload.server),
-                "strategy": "AniWatch Direct Resolution",
+                "strategy": "HiAnime Direct Resolution",
             }
             _set_cached_anime_resolution(payload, resolution)
             return resolution
@@ -1446,7 +1495,35 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
             {
                 "server": payload.server,
                 "stage": "anime-primary",
-                "detail": f"Direct AniWatch sidecar resolution failed {exc}. Using built-in fallback chain.",
+                "detail": f"Direct HiAnime sidecar resolution failed {exc}. Trying embed extraction and fallback providers.",
+            }
+        )
+
+    try:
+        from app.services.consumet import _fetch_consumet_json
+        category = _map_audio_category(payload.audio)
+        for server_name in _anime_server_order(payload.server):
+            raw_payload = await _fetch_consumet_json(
+                f"/anime/hianime/watch/{quote(episode_id)}",
+                params={"server": server_name, "category": category},
+                ttl_seconds=180,
+                timeout=10.0,
+            )
+            direct_resolution = _convert_hianime_source_payload(raw_payload, server_name, tried)
+            if direct_resolution:
+                _set_cached_anime_resolution(payload, direct_resolution)
+                return direct_resolution
+
+            embed_resolution = _extract_hianime_embed_source(raw_payload, episode_id, server_name, tried)
+            if embed_resolution:
+                _set_cached_anime_resolution(payload, embed_resolution)
+                return embed_resolution
+    except Exception as exc:
+        tried.append(
+            {
+                "server": payload.server,
+                "stage": "hianime-raw-watch",
+                "detail": f"HiAnime embed extraction failed: {exc}",
             }
         )
 
@@ -1535,21 +1612,10 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
                 })
                 continue
 
-    fallback_result = await asyncio.to_thread(
-        _resolve_fallback_provider,
-        payload.tmdbId,
-        1,
-        max(1, payload.episodeNumber),
-        tried,
-    )
-    if fallback_result:
-        _set_cached_anime_resolution(payload, fallback_result)
-        return fallback_result
-
     raise HTTPException(
         status_code=422,
         detail={
-            "message": "Stream unavailable - HiAnime protected source could not be resolved.",
+            "message": "Stream unavailable - no playable anime provider responded.",
             "tried": tried,
         },
     )
