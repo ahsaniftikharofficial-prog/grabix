@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 import time
@@ -1418,19 +1417,22 @@ async def fetch_anime_watch(
                 pass
             return None
 
-        combos = [(cat, srv) for cat in categories for srv in servers]
-        results = await asyncio.gather(
-            *[_try_hianime(cat, srv) for cat, srv in combos],
-            return_exceptions=True,
-        )
-        for result in results:
-            if isinstance(result, dict) and result.get("sources"):
+        embed_fallback: dict[str, Any] | None = None
+        for category in categories:
+            for server_name in servers:
+                result = await _try_hianime(category, server_name)
+                if not isinstance(result, dict) or not result.get("sources"):
+                    continue
                 # Drop embed-kind sources — they are unplayable MegaCloud/VidStreaming
                 # iframes that show "We're Sorry" when loaded in the player.
                 playable = [s for s in result["sources"] if s.get("kind") in {"hls", "direct"}]
                 if playable:
                     result["sources"] = playable
                     return result
+                if embed_fallback is None:
+                    embed_fallback = result
+        if embed_fallback:
+            return embed_fallback
         raise _http_error("Hianime did not return any playable anime sources.")
 
     if provider == "zoro":

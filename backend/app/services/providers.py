@@ -1395,17 +1395,42 @@ async def resolve_anime_playback(
 
         try:
             if provider_name == "hianime":
+                if not episode_id:
+                    episode_payload = await registry.execute(
+                        "consumet-watch",
+                        "details",
+                        correlation_id=correlation_id,
+                        fallback_used=not bool(groups),
+                        provider=provider_name,
+                        media_id=anime_id,
+                    )
+                    selected = None
+                    for item in episode_payload.get("items") or []:
+                        try:
+                            if int(item.get("number") or 0) == episode_number:
+                                selected = item
+                                break
+                        except Exception:
+                            continue
+                    if selected is None:
+                        items = list(episode_payload.get("items") or [])
+                        selected = items[0] if items else None
+                    episode_id = str((selected or {}).get("id") or "").strip()
                 watch_sources = await registry.execute(
-                    "consumet-watch",
+                    "anime-resolved",
                     "sources",
                     correlation_id=correlation_id,
                     fallback_used=not bool(groups),
-                    provider=provider_name,
-                    media_id=anime_id,
                     episode_number=episode_number,
                     episode_id=episode_id,
+                    anime_id=anime_id,
+                    title=title,
+                    alt_title=alt_title,
                     audio=normalized_audio,
                     server=server,
+                    is_movie=is_movie,
+                    tmdb_id=tmdb_id,
+                    purpose=purpose,
                 )
             else:
                 watch_sources, episode_id = await _resolve_direct_anime_provider_sources(
@@ -1421,27 +1446,27 @@ async def resolve_anime_playback(
             if watch_sources:
                 attempts.append(
                     _attempt_payload(
-                        provider="consumet-watch" if provider_name == "hianime" else provider_name,
+                        provider="anime-resolved" if provider_name == "hianime" else provider_name,
                         operation="sources",
                         success=True,
-                        message=f"Prepared {len(watch_sources)} consumet fallback sources via {provider_name}.",
+                        message=f"Prepared {len(watch_sources)} playable anime sources via {provider_name}.",
                         fallback_used=not bool(groups),
                     )
                 )
                 successful_watch_providers.add(provider_name)
-                groups.append({"id": f"consumet-{provider_name}", "label": f"{provider_name} watch fallback", "sources": watch_sources})
+                groups.append({"id": f"resolved-{provider_name}", "label": f"{provider_name} resolved playback", "sources": watch_sources})
                 if not collect_all_sources:
                     break
         except Exception as error:
             normalized_error = _provider_error_from_exception(
                 error,
-                provider="consumet-watch" if provider_name == "hianime" else provider_name,
+                provider="anime-resolved" if provider_name == "hianime" else provider_name,
                 correlation_id=correlation_id,
                 fallback_used=not bool(groups),
             )
             attempts.append(
                 _attempt_payload(
-                    provider="consumet-watch" if provider_name == "hianime" else provider_name,
+                    provider="anime-resolved" if provider_name == "hianime" else provider_name,
                     operation="sources",
                     success=False,
                     message=normalized_error.message,

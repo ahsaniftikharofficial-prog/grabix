@@ -78,10 +78,15 @@ if not exist "%FRONTEND%\node_modules" (
     echo  [SETUP] Frontend packages installed.
 )
 
-if not exist "%CONSUMET%\node_modules" (
-    echo  [SETUP] Installing HiAnime packages ^(first time only^)...
+if not exist "%CONSUMET%\node_modules\axios" (
+    echo  [SETUP] Installing HiAnime packages ^(first time only^)... 
     cd /d "%CONSUMET%"
     npm.cmd install --silent
+    if errorlevel 1 (
+        echo  [ERROR] HiAnime package install failed.
+        pause
+        exit /b 1
+    )
     echo  [SETUP] HiAnime packages installed.
 )
 

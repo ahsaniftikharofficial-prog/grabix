@@ -1391,35 +1391,19 @@ function AnimeDetail({
   useEffect(() => {
     const normalizedAudio = normalizeAudioPreference(audio);
     if (normalizedAudio === "hi") return;
-    let cancelled = false;
 
     const warm = async () => {
       try {
-        const preferredServers: AnimeServerOption[] = server === "auto" ? ["hd-1", "hd-2"] : [server];
-        await Promise.allSettled([
-          resolveAnimePlaybackSourcesViaBackend(episode),
-          ...preferredServers.map((preferredServer) =>
-            resolveAnimePlaybackSourcesViaBackend(episode, {
-              audio: normalizedAudio,
-              server: preferredServer,
-            })
-          ),
-        ]);
-        if (!cancelled && totalEpisodes > episode) {
-          await resolveAnimePlaybackSourcesViaBackend(episode + 1, {
-            audio: normalizedAudio,
-            server,
-          });
-        }
+        await resolveAnimePlaybackSourcesViaBackend(episode, {
+          audio: normalizedAudio,
+          server,
+        });
       } catch {
         // Warm the cache quietly; handle real errors on user action.
       }
     };
 
     void warm();
-    return () => {
-      cancelled = true;
-    };
   }, [audio, server, episode, totalEpisodes, resolvedAnime, candidateAnimes]);
 
   const buildPlayerPayload = async (targetEpisode = episode) => {
