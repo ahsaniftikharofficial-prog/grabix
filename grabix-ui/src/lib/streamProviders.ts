@@ -282,18 +282,35 @@ async function resolveProviderPlayback(
   path: string,
   payload: Record<string, unknown>
 ): Promise<StreamSource[]> {
-  const response = await fetch(`${BACKEND_API}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  // 30-second hard timeout — prevents "loading forever" when the backend
+  // provider chain is slow (e.g. MegaCloud extraction taking 25+ seconds).
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 30_000);
 
-  if (!response.ok) {
-    throw new Error(await readProviderResolutionError(response));
+  try {
+    const response = await fetch(`${BACKEND_API}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(await readProviderResolutionError(response));
+    }
+
+    const data = (await response.json()) as ProviderResolutionResponse;
+    return data.sources ?? [];
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(
+        "Stream sources took too long to load. The anime provider may be slow — please try again."
+      );
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
   }
-
-  const data = (await response.json()) as ProviderResolutionResponse;
-  return data.sources ?? [];
 }
 
 function mapMovieBoxSource(
