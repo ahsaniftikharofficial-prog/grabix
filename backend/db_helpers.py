@@ -14,6 +14,8 @@ import json
 import os
 import re
 import shutil
+import atexit
+import threading
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -35,15 +37,68 @@ backend_logger   = get_logger("backend")
 downloads_logger = get_logger("downloads")
 library_logger   = get_logger("library")
 
+_thread_local = threading.local()
+_pooled_connections: list[sqlite3.Connection] = []
+_pooled_connections_lock = threading.Lock()
+
+
+class _PooledConnection(sqlite3.Connection):
+    """Connection object whose public close() is a no-op for thread-local reuse."""
+
+    def close(self) -> None:  # type: ignore[override]
+        return None
+
+    def really_close(self) -> None:
+        super().close()
+
 # ── DB connection ─────────────────────────────────────────────────────────────
 
 def get_db_connection() -> sqlite3.Connection:
-    """Return a new sqlite3 connection with WAL mode, timeout, and row_factory set."""
-    con = sqlite3.connect(DB_PATH, timeout=30)
+    """Return a reusable thread-local sqlite3 connection configured once."""
+    con = getattr(_thread_local, "connection", None)
+    if con is not None:
+        try:
+            con.execute("SELECT 1").fetchone()
+            return con
+        except sqlite3.DatabaseError:
+            try:
+                con.really_close()
+            except Exception:
+                pass
+            _thread_local.connection = None
+
+    con = sqlite3.connect(
+        DB_PATH,
+        timeout=30,
+        check_same_thread=False,
+        factory=_PooledConnection,
+    )
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
+    con.execute("PRAGMA cache_size=-8000")
+    con.execute("PRAGMA temp_store=MEMORY")
+    _thread_local.connection = con
+    with _pooled_connections_lock:
+        _pooled_connections.append(con)
     return con
+
+
+def _close_pooled_connections() -> None:
+    with _pooled_connections_lock:
+        connections = list(_pooled_connections)
+        _pooled_connections.clear()
+    for con in connections:
+        try:
+            if isinstance(con, _PooledConnection):
+                con.really_close()
+            else:
+                con.close()
+        except Exception:
+            pass
+
+
+atexit.register(_close_pooled_connections)
 
 
 # ── History / download job helpers ───────────────────────────────────────────

@@ -253,7 +253,6 @@ download_controls: dict = runtime_state.download_controls
 FFMPEG_PATH = shutil.which("ffmpeg")
 ARIA2_PATH = shutil.which("aria2c")
 SELF_BASE_URL = public_base_url()
-SELF_BASE_URL = public_base_url()
 STREAM_EXTRACT_CACHE_TTL_SECONDS = 900
 stream_extract_cache: dict[str, tuple[float, dict]] = runtime_state.stream_extract_cache
 ADULT_UNLOCK_WINDOW_SECONDS = 300
@@ -287,6 +286,7 @@ RUNTIME_BOOTSTRAP_STATE = {
 }
 _network_monitor_started = False
 _auto_retry_failed_started = False
+_app_event_loop: asyncio.AbstractEventLoop | None = None
 
 
 # --- LAZY YT_DLP LOADER ---
@@ -544,41 +544,42 @@ def _infer_library_display_layout(url: str, title: str, dl_type: str, category: 
     return "grid"
 
 
+_CATEGORY_LABEL_MAP: dict[str, str] = {
+    "movie": "Movies",
+    "movies": "Movies",
+    "film": "Movies",
+    "tv": "TV Series",
+    "show": "TV Series",
+    "series": "TV Series",
+    "tv series": "TV Series",
+    "anime": "Anime",
+    "manga": "Manga",
+    "youtube": "YouTube",
+    "yt": "YouTube",
+    "book": "Books",
+    "books": "Books",
+    "comic": "Comics",
+    "comics": "Comics",
+    "light novel": "Light Novels",
+    "light novels": "Light Novels",
+    "subtitle": "Subtitles",
+    "subtitles": "Subtitles",
+    "audio": "Audio",
+    "music": "Audio",
+}
+
+
 def _normalize_category_label(value: str) -> str:
-    cleaned = re.sub(r"\s+", " ", str(value or "").strip())
+    cleaned = " ".join(str(value or "").split())
     if not cleaned:
         return ""
-    lowered = cleaned.lower()
-    mapping = {
-        "movie": "Movies",
-        "movies": "Movies",
-        "film": "Movies",
-        "tv": "TV Series",
-        "show": "TV Series",
-        "series": "TV Series",
-        "tv series": "TV Series",
-        "anime": "Anime",
-        "manga": "Manga",
-        "youtube": "YouTube",
-        "yt": "YouTube",
-        "book": "Books",
-        "books": "Books",
-        "comic": "Comics",
-        "comics": "Comics",
-        "light novel": "Light Novels",
-        "light novels": "Light Novels",
-        "subtitle": "Subtitles",
-        "subtitles": "Subtitles",
-        "audio": "Audio",
-        "music": "Audio",
-    }
-    return mapping.get(lowered, cleaned.title())
+    return _CATEGORY_LABEL_MAP.get(cleaned.lower(), cleaned.title())
 
 
 def _normalize_tags_csv(tags_csv: str = "", category: str = "", dl_type: str = "") -> str:
     tokens: list[str] = []
     for raw in str(tags_csv or "").split(","):
-        cleaned = re.sub(r"\s+", " ", raw).strip()
+        cleaned = " ".join(raw.split())
         if cleaned:
             tokens.append(cleaned)
     if category:
@@ -947,6 +948,10 @@ _CACHE_MAX_BYTES = 50 * 1024 * 1024
 # Background refresh tasks that are currently running (deduplicated by key)
 _cache_bg_refresh_keys: set[str] = set()
 _cache_bg_refresh_lock = threading.Lock()
+_cache_access_log: dict[str, float] = {}
+_cache_access_lock = threading.Lock()
+_CACHE_ACCESS_FLUSH_INTERVAL = 60.0
+_cache_access_flusher_started = False
 
 
 def _sqlite_cache_get(key: str) -> tuple[object | None, bool]:
@@ -970,12 +975,8 @@ def _sqlite_cache_get(key: str) -> tuple[object | None, bool]:
         content_type = row["content_type"] or "generic"
         ttl = _CACHE_TTL.get(content_type, _CACHE_TTL["generic"])
         stale_deadline = expires_at + ttl * (_CACHE_STALE_GRACE - 1.0)
-        # Update last_accessed for LRU tracking (best-effort)
-        try:
-            con.execute("UPDATE content_cache SET last_accessed=? WHERE key=?", (now, key))
-            con.commit()
-        except Exception:
-            pass
+        with _cache_access_lock:
+            _cache_access_log[key] = now
         con.close()
         value = json.loads(row["value"])
         if now <= expires_at:
@@ -987,6 +988,38 @@ def _sqlite_cache_get(key: str) -> tuple[object | None, bool]:
     except Exception as exc:
         log_event(backend_logger, logging.DEBUG, event="cache_get_error", message="SQLite cache get failed.", details={"key": key, "error": str(exc)})
         return None, False
+
+
+def _flush_cache_access_log() -> None:
+    with _cache_access_lock:
+        if not _cache_access_log:
+            return
+        snapshot = list(_cache_access_log.items())
+        _cache_access_log.clear()
+    try:
+        con = get_db_connection()
+        con.executemany(
+            "UPDATE content_cache SET last_accessed=? WHERE key=?",
+            [(ts, cache_key) for cache_key, ts in snapshot],
+        )
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+
+def _start_cache_access_flusher() -> None:
+    global _cache_access_flusher_started
+    if _cache_access_flusher_started:
+        return
+    _cache_access_flusher_started = True
+
+    def _worker() -> None:
+        while True:
+            time.sleep(_CACHE_ACCESS_FLUSH_INTERVAL)
+            _flush_cache_access_log()
+
+    threading.Thread(target=_worker, daemon=True, name="cache-access-flusher").start()
 
 
 def _sqlite_cache_set(key: str, value: object, content_type: str = "generic") -> object:
@@ -1091,6 +1124,10 @@ def _cache_trigger_bg_refresh(key: str, refresh_coro_factory) -> None:
             with _cache_bg_refresh_lock:
                 _cache_bg_refresh_keys.discard(key)
 
+    if _app_event_loop and _app_event_loop.is_running():
+        asyncio.run_coroutine_threadsafe(_run(), _app_event_loop)
+        return
+
     def _thread_target():
         import asyncio as _asyncio
         loop = _asyncio.new_event_loop()
@@ -1125,6 +1162,8 @@ class _HealthCBState:
 # One circuit-breaker state per logical service name
 _health_cb: dict[str, _HealthCBState] = {}
 _health_cb_lock = threading.Lock()
+_health_log_prune_counter = 0
+_HEALTH_LOG_PRUNE_EVERY = 100
 
 def _get_health_cb(service: str) -> _HealthCBState:
     with _health_cb_lock:
@@ -1176,15 +1215,18 @@ def _health_cb_is_open(service: str) -> bool:
 
 def _health_log_write(service: str, status: str, latency_ms: float | None = None, error: str = "") -> None:
     """Persist a health event to SQLite health_log. Best-effort."""
+    global _health_log_prune_counter
     try:
         con = get_db_connection()
         con.execute(
             "INSERT INTO health_log (service, status, latency_ms, error, recorded_at) VALUES (?, ?, ?, ?, ?)",
             (service, status, latency_ms, error or "", time.time()),
         )
-        # Prune entries older than 24 h to keep table small
-        cutoff = time.time() - 86400
-        con.execute("DELETE FROM health_log WHERE recorded_at < ?", (cutoff,))
+        _health_log_prune_counter += 1
+        if _health_log_prune_counter >= _HEALTH_LOG_PRUNE_EVERY:
+            _health_log_prune_counter = 0
+            cutoff = time.time() - 86400
+            con.execute("DELETE FROM health_log WHERE recorded_at < ?", (cutoff,))
         con.commit()
         con.close()
     except Exception:
@@ -4092,7 +4134,7 @@ def _persist_download_record(dl_id: str, force: bool = False):
         "download_engine": item.get("download_engine") or _effective_download_engine(params),
         "download_engine_requested": item.get("download_engine_requested") or _requested_download_engine(params),
         "engine_note": item.get("engine_note", ""),
-        "params_json": json.dumps(params),
+        "params_json": item.get("_params_json_cache") or json.dumps(params),
     }
     db_upsert_download_job(row)
 
@@ -4110,6 +4152,7 @@ def _create_download_controls() -> dict:
 def _create_download_record(dl_id: str, title: str = "", params: dict | None = None) -> dict:
     pause_supported = bool((params or {}).get("can_pause", False))
     estimated_total_bytes = int((params or {}).get("estimated_total_bytes") or 0)
+    params_json_cache = json.dumps(params or {})
     downloads[dl_id] = {
         "id": dl_id,
         "status": "queued",
@@ -4125,6 +4168,7 @@ def _create_download_record(dl_id: str, title: str = "", params: dict | None = N
         "folder": DOWNLOAD_DIR,
         "created_at": datetime.now().isoformat(),
         "params": params or {},
+        "_params_json_cache": params_json_cache,
         "can_pause": pause_supported,
         "retry_count": 0,
         "failure_code": "",
@@ -4510,6 +4554,7 @@ def ensure_runtime_bootstrap() -> None:
             ("start_moviebox_retry", _start_moviebox_bg_retry),
             ("start_network_monitor", _start_network_monitor),
             ("start_auto_retry", _start_auto_retry_failed_worker),
+            ("start_cache_access_flusher", _start_cache_access_flusher),
         ]
 
         for step_name, action in steps:
@@ -4546,6 +4591,8 @@ def ensure_runtime_bootstrap() -> None:
 
 @app.on_event("startup")
 async def _runtime_startup_event():
+    global _app_event_loop
+    _app_event_loop = asyncio.get_running_loop()
     ensure_runtime_bootstrap()
 
 
@@ -5356,7 +5403,6 @@ def get_storage_stats():
         migrate_db()
         con = get_db_connection()
         rows = con.execute("SELECT dl_type, file_path, file_size FROM history").fetchall()
-        con.close()
 
         by_type: dict[str, int] = {"video": 0, "audio": 0, "thumbnail": 0, "subtitle": 0, "other": 0}
         tracked_files: set[str] = set()
@@ -5376,29 +5422,24 @@ def get_storage_stats():
             by_type[t] += size
             total_bytes += size
 
-        # Scan for untracked files in DOWNLOAD_DIR
+        # Scan DOWNLOAD_DIR once for total size and untracked files.
         untracked_bytes = 0
         untracked_count = 0
-        try:
-            for f in Path(DOWNLOAD_DIR).iterdir():
-                if f.is_file() and not _is_internal_managed_file(f) and str(f) not in tracked_files:
-                    sz = f.stat().st_size
-                    untracked_bytes += sz
-                    untracked_count += 1
-        except Exception:
-            pass
-
-        # Disk usage of the whole DOWNLOAD_DIR
         folder_total = 0
         try:
             for f in Path(DOWNLOAD_DIR).rglob("*"):
                 if f.is_file() and not _is_internal_managed_file(f):
                     try:
-                        folder_total += f.stat().st_size
+                        file_size = f.stat().st_size
+                        folder_total += file_size
+                        if str(f) not in tracked_files:
+                            untracked_bytes += file_size
+                            untracked_count += 1
                     except Exception:
                         pass
         except Exception:
             pass
+        con.close()
 
         return {
             "total_bytes": total_bytes,

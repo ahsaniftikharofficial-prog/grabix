@@ -46,6 +46,9 @@ type AnimeServerOption = "auto" | "hd-1" | "hd-2";
 type TrendingPeriod = "daily" | "weekly" | "monthly";
 
 const tmdbSeasonCache = new Map<number, Array<{ season: number; count: number }>>();
+const TMDB_SEASON_CACHE_MAX = 200;
+const NORMALIZED_IMAGE_URL_CACHE_MAX = 2000;
+const normalizedImageUrlCache = new Map<string, string>();
 const AUDIO_BUTTONS: Array<{ id: AnimeAudioOption; label: string; help: string }> = [
   { id: "en", label: "Dub", help: "English audio first" },
   { id: "original", label: "Sub", help: "Original audio first" },
@@ -94,10 +97,34 @@ function normalizeAnimeImageUrl(value?: string | null): string {
   return normalized;
 }
 
+function setBoundedCacheEntry<K, V>(cache: Map<K, V>, key: K, value: V, maxSize: number) {
+  if (cache.has(key)) {
+    cache.delete(key);
+  }
+  cache.set(key, value);
+  while (cache.size > maxSize) {
+    const oldestKey = cache.keys().next().value as K | undefined;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+}
+
+function normalizeAnimeImageUrlMemo(value?: string | null): string {
+  const raw = (value ?? "").trim();
+  if (!raw) return "";
+  const cached = normalizedImageUrlCache.get(raw);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const normalized = normalizeAnimeImageUrl(raw);
+  setBoundedCacheEntry(normalizedImageUrlCache, raw, normalized, NORMALIZED_IMAGE_URL_CACHE_MAX);
+  return normalized;
+}
+
 function toCardItem(item: ConsumetMediaSummary): AnimeCardItem {
   return {
     ...item,
-    image: normalizeAnimeImageUrl(item.image),
+    image: normalizeAnimeImageUrlMemo(item.image),
     episodes_count: item.episodes_count,
   };
 }
@@ -109,7 +136,7 @@ function mapLegacyAnime(item: LegacyAnime): AnimeCardItem {
     type: "anime",
     title: item.title_english ?? item.title,
     alt_title: item.title,
-    image: normalizeAnimeImageUrl(item.images.jpg.large_image_url ?? item.images.jpg.image_url),
+    image: normalizeAnimeImageUrlMemo(item.images.jpg.large_image_url ?? item.images.jpg.image_url),
     description: item.synopsis,
     year: item.year,
     rating: item.score ?? null,
@@ -266,7 +293,7 @@ async function fetchTmdbSeasonMap(tmdbId: number): Promise<Array<{ season: numbe
   if (cached) return cached;
 
   const seasons = await fetchTmdbSeasonMapFromBackend(tmdbId);
-  tmdbSeasonCache.set(tmdbId, seasons);
+  setBoundedCacheEntry(tmdbSeasonCache, tmdbId, seasons, TMDB_SEASON_CACHE_MAX);
   return seasons;
 }
 

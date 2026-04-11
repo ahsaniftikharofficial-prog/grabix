@@ -8,6 +8,20 @@ interface CacheRecord<T> {
 const memoryCache = new Map<string, CacheRecord<unknown>>();
 const pendingRequests = new Map<string, Promise<unknown>>();
 const CACHE_PREFIX = "grabix:cache:";
+const EVICTION_INTERVAL_MS = 5 * 60 * 1000;
+
+function evictExpiredEntries() {
+  const now = Date.now();
+  for (const [key, record] of memoryCache) {
+    if (now >= record.expiresAt) {
+      memoryCache.delete(key);
+    }
+  }
+}
+
+if (typeof window !== "undefined") {
+  window.setInterval(evictExpiredEntries, EVICTION_INTERVAL_MS);
+}
 
 function getStorage(scope: CacheScope): Storage | null {
   if (typeof window === "undefined") return null;
@@ -114,4 +128,9 @@ export function clearCachedValue(key: string, scope: CacheScope = "memory") {
   }
   const storage = getStorage(scope);
   storage?.removeItem(`${CACHE_PREFIX}${key}`);
+}
+
+export function clearAllCachedValues() {
+  memoryCache.clear();
+  pendingRequests.clear();
 }
