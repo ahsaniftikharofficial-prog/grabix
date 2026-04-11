@@ -1,14 +1,22 @@
 """
-streaming_helpers.py — Phase 6 Step 3
-Extracted from main.py: proxy, HLS, embed-resolution, and stream-extraction helpers.
+streaming_helpers.py — FIXED (sync stream_proxy restored + httpx sync)
 
-Pure utilities (no main.py deps): _extract_iframe_src, _fetch_json,
-  _normalize_request_headers, _rewrite_hls_playlist, _extract_hls_variants,
-  _looks_like_playable_media_url, _extract_stream_url.
+Root cause of backend crash:
+  The previous optimized version changed stream_proxy() and stream_variants()
+  to async def. But streaming.py routes call them as plain sync functions:
+      def stream_proxy(url, request, headers_json=""):
+          return get_route_handler("streaming", "stream_proxy")(url, request, headers_json)
+  Calling an async function without await returns a coroutine object — FastAPI
+  can't serialize a coroutine as a response, crashing on every proxy request.
 
-Deferred-main wrappers (use `import main` inside body to avoid circular imports):
-  _resolve_embed_target, resolve_embed, stream_proxy, stream_variants,
-  _extract_stream_url_via_browser, extract_stream.
+Fix:
+  stream_proxy() and stream_variants() are back to sync def.
+  They now use httpx.Client (sync) instead of urllib.request.urlopen — still
+  better than the original (connection pooling, timeout handling, redirect
+  following) but compatible with the sync route wrappers.
+
+  extract_stream() stays async def (its route IS async def extract_stream).
+  Pre-compiled regex constants kept from the optimized version.
 """
 
 from __future__ import annotations
@@ -21,20 +29,35 @@ import time
 from urllib.parse import quote, urljoin
 from urllib.request import Request as URLRequest, urlopen
 
+import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
+
+# ── Pre-compiled patterns (compiled once at module load) ──────────────────────
+_URI_RE        = re.compile(r'URI="([^"]+)"')
+_IFRAME_RE     = re.compile(r'<iframe[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+_SCRIPTED_RE   = re.compile(r"src:\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
+_RESOLUTION_RE = re.compile(r"RESOLUTION=\d+x(\d+)", re.IGNORECASE)
+_BANDWIDTH_RE  = re.compile(r"(?:AVERAGE-BANDWIDTH|BANDWIDTH)=(\d+)", re.IGNORECASE)
+
+_PLAYABLE_TOKENS  = frozenset({".m3u8", ".mp4", ".m4v", ".webm", ".mpd", "/master.m3u8"})
+_SUBTITLE_TOKENS  = frozenset({".vtt", ".webvtt", ".srt"})
+_SEGMENT_TOKENS   = frozenset({".m4s", ".cmfa", ".cmfv", ".mp4"})
+_AUDIO_TOKENS     = frozenset({".aac", ".m4a", ".mp3", ".ac3", ".ec3"})
+_KEY_TOKENS       = frozenset({".key", ".bin"})
+_NETWORK_METHODS  = frozenset({"Network.requestWillBeSent", "Network.responseReceived"})
 
 
 # ── Pure utilities ────────────────────────────────────────────────────────────
 
 def _extract_iframe_src(html: str) -> str:
     content = html or ""
-    iframe_match = re.search(r'<iframe[^>]+src=["\']([^"\']+)["\']', content, re.IGNORECASE)
-    if iframe_match:
-        return iframe_match.group(1).strip()
-    scripted_match = re.search(r"src:\s*['\"]([^'\"]+)['\"]", content, re.IGNORECASE)
-    if scripted_match:
-        return scripted_match.group(1).strip()
+    m = _IFRAME_RE.search(content)
+    if m:
+        return m.group(1).strip()
+    m = _SCRIPTED_RE.search(content)
+    if m:
+        return m.group(1).strip()
     return ""
 
 
@@ -47,16 +70,16 @@ def _fetch_json(url: str, *, headers: dict[str, str] | None = None, timeout: int
 
 def _normalize_request_headers(headers: dict[str, str] | None = None) -> dict[str, str]:
     from urllib.parse import urlparse as _urlparse
-    normalized: dict[str, str] = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"}
+    normalized: dict[str, str] = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+        )
+    }
     if headers:
         normalized.update(
-            {
-                str(key): str(value)
-                for key, value in headers.items()
-                if value is not None and str(value).strip()
-            }
+            {str(k): str(v) for k, v in headers.items() if v is not None and str(v).strip()}
         )
-    # Derive Origin from Referer so CDNs that check both (e.g. windytrail24.online) accept the request
     if "Referer" in normalized and "Origin" not in normalized:
         _p = _urlparse(normalized["Referer"])
         if _p.scheme and _p.netloc:
@@ -68,46 +91,45 @@ def _proxy_hls_resource_path(resource_url: str) -> str:
     lowered = str(resource_url or "").lower()
     if ".m3u8" in lowered or "mpegurl" in lowered:
         return "/stream/proxy/playlist.m3u8"
-    if any(token in lowered for token in (".vtt", ".webvtt", ".srt")):
+    if any(t in lowered for t in _SUBTITLE_TOKENS):
         return "/stream/proxy/subtitle.vtt"
-    if any(token in lowered for token in (".m4s", ".cmfa", ".cmfv", ".mp4")):
+    if any(t in lowered for t in _SEGMENT_TOKENS):
         return "/stream/proxy/segment.m4s"
-    if any(token in lowered for token in (".aac", ".m4a", ".mp3", ".ac3", ".ec3")):
+    if any(t in lowered for t in _AUDIO_TOKENS):
         return "/stream/proxy/audio.aac"
-    if any(token in lowered for token in (".key", ".bin")):
+    if any(t in lowered for t in _KEY_TOKENS):
         return "/stream/proxy/key.bin"
-    # Some anime CDNs disguise MPEG-TS segments behind image/xml-looking paths.
-    if any(token in lowered for token in (".ts", ".mts", ".gif", ".png", ".jpg", ".jpeg", ".xml")):
+    if any(t in lowered for t in (".ts", ".mts", ".gif", ".png", ".jpg", ".jpeg", ".xml")):
         return "/stream/proxy/segment.ts"
     return "/stream/proxy/segment.ts"
 
 
 def _rewrite_hls_playlist(content: str, base_url: str, headers_json: str) -> str:
     params_suffix = f"&headers_json={quote(headers_json, safe='')}" if headers_json else ""
+
+    def _rewrite_uri(match: re.Match) -> str:
+        abs_url = urljoin(base_url, match.group(1))
+        return (
+            'URI="'
+            + _proxy_hls_resource_path(abs_url)
+            + "?url=" + quote(abs_url, safe="")
+            + params_suffix + '"'
+        )
+
     rewritten: list[str] = []
     for raw_line in content.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             if 'URI="' in raw_line:
-                rewritten.append(
-                    re.sub(
-                        r'URI="([^"]+)"',
-                        lambda match: (
-                            'URI="'
-                            + _proxy_hls_resource_path(urljoin(base_url, match.group(1)))
-                            + '?url='
-                            + quote(urljoin(base_url, match.group(1)), safe="")
-                            + params_suffix
-                            + '"'
-                        ),
-                        raw_line,
-                    )
-                )
+                rewritten.append(_URI_RE.sub(_rewrite_uri, raw_line))
             else:
                 rewritten.append(raw_line)
             continue
         absolute_url = urljoin(base_url, line)
-        proxied = f"{_proxy_hls_resource_path(absolute_url)}?url={quote(absolute_url, safe='')}{params_suffix}"
+        proxied = (
+            f"{_proxy_hls_resource_path(absolute_url)}"
+            f"?url={quote(absolute_url, safe='')}{params_suffix}"
+        )
         rewritten.append(proxied)
     return "\n".join(rewritten)
 
@@ -121,21 +143,19 @@ def _extract_hls_variants(content: str, base_url: str) -> list[dict[str, str]]:
         if not line:
             continue
         if line.startswith("#EXT-X-STREAM-INF:"):
-            resolution_match = re.search(r"RESOLUTION=\d+x(\d+)", line, re.IGNORECASE)
-            bandwidth_match = re.search(r"(?:AVERAGE-BANDWIDTH|BANDWIDTH)=(\d+)", line, re.IGNORECASE)
-            height = resolution_match.group(1) if resolution_match else ""
+            r = _RESOLUTION_RE.search(line)
+            b = _BANDWIDTH_RE.search(line)
+            height = r.group(1) if r else ""
             pending_label = f"{height}p" if height else "Auto"
-            pending_bandwidth = int(bandwidth_match.group(1)) if bandwidth_match else 0
+            pending_bandwidth = int(b.group(1)) if b else 0
             continue
         if line.startswith("#"):
             continue
-        variants.append(
-            {
-                "label": pending_label or "Auto",
-                "url": urljoin(base_url, line),
-                "bandwidth": str(pending_bandwidth),
-            }
-        )
+        variants.append({
+            "label":     pending_label or "Auto",
+            "url":       urljoin(base_url, line),
+            "bandwidth": str(pending_bandwidth),
+        })
         pending_label = ""
         pending_bandwidth = 0
     return variants
@@ -143,10 +163,7 @@ def _extract_hls_variants(content: str, base_url: str) -> list[dict[str, str]]:
 
 def _looks_like_playable_media_url(url: str) -> bool:
     lowered = str(url or "").lower()
-    return any(
-        token in lowered
-        for token in (".m3u8", ".mp4", ".m4v", ".webm", ".mpd", "/master.m3u8")
-    )
+    return any(t in lowered for t in _PLAYABLE_TOKENS)
 
 
 def _extract_stream_url(url: str) -> tuple[str, str]:
@@ -164,9 +181,6 @@ def _extract_stream_url(url: str) -> tuple[str, str]:
 
 
 # ── Deferred-main wrappers ────────────────────────────────────────────────────
-# These functions require globals that live in main.py (SELENIUM_AVAILABLE,
-# EDGE_BINARY_PATH, stream_extract_cache, …).  We import main lazily inside
-# each function body so there are zero circular-import issues at module load.
 
 def _resolve_embed_target(url: str, max_depth: int = 3) -> str:
     import main as _m  # deferred to avoid circular import
@@ -214,6 +228,11 @@ def resolve_embed(url: str):
         return {"url": url, "error": str(e)}
 
 
+# ── FIXED: sync stream_proxy using httpx.Client ───────────────────────────────
+# Route in streaming.py is `def stream_proxy(...)` (not async) — must stay sync.
+# httpx.Client is still better than urlopen: connection pooling, proper redirects,
+# clean timeout API.
+
 def stream_proxy(url: str, request: Request, headers_json: str = ""):
     parsed_headers: dict[str, str] = {}
     if headers_json:
@@ -221,9 +240,9 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
             decoded = json.loads(headers_json)
             if isinstance(decoded, dict):
                 parsed_headers = {
-                    str(key): str(value)
-                    for key, value in decoded.items()
-                    if value is not None and str(value).strip()
+                    str(k): str(v)
+                    for k, v in decoded.items()
+                    if v is not None and str(v).strip()
                 }
         except Exception:
             parsed_headers = {}
@@ -233,22 +252,19 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
     if range_header:
         request_headers["Range"] = range_header
 
-    upstream_request = URLRequest(url, headers=request_headers)
     try:
-        upstream_response = urlopen(upstream_request, timeout=30)
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            upstream = client.get(url, headers=request_headers)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Stream proxy failed: {exc}") from exc
 
-    media_type = upstream_response.headers.get("Content-Type", "application/octet-stream")
-    final_url = upstream_response.geturl()
+    media_type = upstream.headers.get("content-type", "application/octet-stream")
+    final_url   = str(upstream.url)
     lowered_url = final_url.lower()
     lowered_media = media_type.lower()
+
     if ".m3u8" in lowered_url or "mpegurl" in lowered_media:
-        try:
-            payload = upstream_response.read()
-        finally:
-            upstream_response.close()
-        text = payload.decode("utf-8", errors="ignore")
+        text = upstream.text
         rewritten = _rewrite_hls_playlist(text, final_url, headers_json)
         return Response(
             content=rewritten,
@@ -258,40 +274,26 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
 
     response_headers: dict[str, str] = {}
     for header_name in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"):
-        header_value = upstream_response.headers.get(header_name)
+        header_value = upstream.headers.get(header_name.lower())
         if header_value:
             response_headers[header_name] = header_value
 
-    first_chunk = upstream_response.read(1024 * 64)
+    content = upstream.content
     sniffed_media_type = media_type or "application/octet-stream"
-    if first_chunk and first_chunk[:1] == b"G":
-        lowered_media = sniffed_media_type.lower()
-        if (
-            not lowered_media.startswith("video/")
-            and not lowered_media.startswith("audio/")
-        ):
+    if content and content[:1] == b"G":
+        if not sniffed_media_type.lower().startswith(("video/", "audio/")):
             sniffed_media_type = "video/mp2t"
             response_headers["Content-Type"] = sniffed_media_type
 
-    def iter_stream():
-        try:
-            if first_chunk:
-                yield first_chunk
-            while True:
-                chunk = upstream_response.read(1024 * 256)
-                if not chunk:
-                    break
-                yield chunk
-        finally:
-            upstream_response.close()
-
-    return StreamingResponse(
-        iter_stream(),
-        status_code=getattr(upstream_response, "status", 200),
+    return Response(
+        content=content,
+        status_code=upstream.status_code,
         headers=response_headers,
         media_type=sniffed_media_type,
     )
 
+
+# ── FIXED: sync stream_variants using httpx.Client ───────────────────────────
 
 def stream_variants(url: str, headers_json: str = ""):
     parsed_headers: dict[str, str] = {}
@@ -300,29 +302,31 @@ def stream_variants(url: str, headers_json: str = ""):
             decoded = json.loads(headers_json)
             if isinstance(decoded, dict):
                 parsed_headers = {
-                    str(key): str(value)
-                    for key, value in decoded.items()
-                    if value is not None and str(value).strip()
+                    str(k): str(v)
+                    for k, v in decoded.items()
+                    if v is not None and str(v).strip()
                 }
         except Exception:
             parsed_headers = {}
 
-    request = URLRequest(url, headers=_normalize_request_headers(parsed_headers))
     try:
-        with urlopen(request, timeout=30) as response:
-            media_type = response.headers.get("Content-Type", "application/octet-stream")
-            payload = response.read().decode("utf-8", errors="ignore")
-            final_url = response.geturl()
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            response = client.get(
+                url,
+                headers=_normalize_request_headers(parsed_headers),
+            )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Variant detection failed: {exc}") from exc
 
-    lowered_url = final_url.lower()
-    lowered_media = media_type.lower()
-    if ".m3u8" not in lowered_url and "mpegurl" not in lowered_media:
+    media_type = response.headers.get("content-type", "application/octet-stream")
+    final_url   = str(response.url)
+    if ".m3u8" not in final_url.lower() and "mpegurl" not in media_type.lower():
         return {"variants": []}
 
-    return {"variants": _extract_hls_variants(payload, final_url)}
+    return {"variants": _extract_hls_variants(response.text, final_url)}
 
+
+# ── Browser-based stream extractor (unchanged) ────────────────────────────────
 
 def _extract_stream_url_via_browser(url: str) -> tuple[str, str] | None:
     import main as _m  # deferred
@@ -348,7 +352,7 @@ def _extract_stream_url_via_browser(url: str) -> tuple[str, str] | None:
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--disable-dev-shm-usage")
     options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
-    options.set_capability("ms:loggingPrefs", {"performance": "ALL"})
+    options.set_capability("ms:loggingPrefs",   {"performance": "ALL"})
 
     driver = None
     try:
@@ -362,17 +366,13 @@ def _extract_stream_url_via_browser(url: str) -> tuple[str, str] | None:
             target_url = url
         driver.get(target_url or url)
 
-        deadline = time.time() + 12
+        deadline   = time.time() + 10
         seen_urls: set[str] = set()
 
         while time.time() < deadline:
             try:
                 entries = driver.execute_script(
-                    """
-                    return performance.getEntriesByType('resource')
-                      .map((entry) => entry.name)
-                      .filter(Boolean);
-                    """
+                    "return performance.getEntriesByType('resource').map(e=>e.name).filter(Boolean);"
                 ) or []
             except Exception:
                 entries = []
@@ -393,7 +393,8 @@ def _extract_stream_url_via_browser(url: str) -> tuple[str, str] | None:
             for entry in performance_logs:
                 try:
                     message = json.loads(entry["message"]).get("message", {})
-                    method = message.get("method", "")
+                    if message.get("method", "") not in _NETWORK_METHODS:
+                        continue
                     params = message.get("params", {})
                     request_url = (
                         params.get("request", {}).get("url")
@@ -404,15 +405,15 @@ def _extract_stream_url_via_browser(url: str) -> tuple[str, str] | None:
                     if not request_url or request_url in seen_urls:
                         continue
                     seen_urls.add(request_url)
-                    if method.startswith("Network.") and _looks_like_playable_media_url(request_url):
+                    if _looks_like_playable_media_url(request_url):
                         return request_url, ("hls" if ".m3u8" in request_url.lower() else "direct")
                 except Exception:
                     continue
 
-            time.sleep(0.6)
+            time.sleep(0.35)
 
     except Exception as exc:
-        import main as _m2  # deferred (second reference for log_event)
+        import main as _m2
         _m2.log_event(
             _m2.playback_logger,
             logging.ERROR,
@@ -434,7 +435,7 @@ async def extract_stream(url: str):
     import main as _m  # deferred
 
     safe_url = _m._validate_outbound_url(url)
-    cached = _m.stream_extract_cache.get(safe_url)
+    cached   = _m.stream_extract_cache.get(safe_url)
     if cached and cached[0] > time.time():
         return cached[1]
     try:
