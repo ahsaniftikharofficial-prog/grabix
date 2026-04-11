@@ -256,6 +256,10 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
     request_headers.setdefault("Accept-Language", "en-US,en;q=0.9")
     request_headers.setdefault("Sec-Fetch-Mode", "cors")
     request_headers.setdefault("Sec-Fetch-Site", "cross-site")
+    # Force fresh response from CDN — prevents 304 "Not Modified" which
+    # causes HLS.js to hang waiting for a cached playlist it doesn't have.
+    request_headers["Cache-Control"] = "no-cache"
+    request_headers["Pragma"] = "no-cache"
 
     range_header = request.headers.get("range")
     if range_header:
@@ -273,8 +277,11 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
     # error status and triggers its fatal-error handler immediately, rather than
     # silently retrying for the entire 120-second startup window.
     if upstream.status_code not in (200, 206):
+        # Always return 502 (not the upstream code) so HLS.js treats it as a
+        # fatal network error and immediately tries the next source, rather
+        # than misinterpreting e.g. 304 as a cached-content response and hanging.
         raise HTTPException(
-            status_code=upstream.status_code,
+            status_code=502,
             detail=f"CDN returned {upstream.status_code} for proxied resource",
         )
 

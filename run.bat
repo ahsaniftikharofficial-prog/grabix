@@ -90,10 +90,9 @@ if not exist "%CONSUMET%\node_modules\axios" (
     echo  [SETUP] HiAnime packages installed.
 )
 
-echo  [UPDATE] Updating aniwatch package ^(MegaCloud streaming fix^)...
+echo  [UPDATE] Updating aniwatch in background ^(MegaCloud streaming fix^)...
 cd /d "%CONSUMET%"
-npm.cmd update aniwatch --silent
-echo  [UPDATE] aniwatch updated.
+start "" /b cmd /c npm.cmd update aniwatch --silent
 
 set "BACKEND_BASE=http://127.0.0.1:%BACKEND_PORT%"
 set "FRONTEND_BASE=http://127.0.0.1:%FRONTEND_PORT%"
