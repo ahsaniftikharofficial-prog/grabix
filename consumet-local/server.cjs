@@ -241,97 +241,92 @@ async function getMegaCloudClientKey(sourceId) {
   );
 }
 
-async function extractMegaCloud(link) {
-  const embedUrl = new URL(link);
-  const sourceIdMatch = /\/([^/?]+)\?/.exec(embedUrl.href);
-  const sourceId = sourceIdMatch?.[1];
-  if (!sourceId) {
-    throw new Error("Unable to extract MegaCloud source id");
-  }
-
-  const clientKey = await getMegaCloudClientKey(sourceId);
-  const { data } = await axios.get(
-    `https://megacloud.blog/embed-2/v3/e-1/getSources?id=${sourceId}&_k=${encodeURIComponent(clientKey)}`,
-    {
-      timeout: 20000,
-      headers: {
-        Referer: `${embedUrl.origin}/`,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "X-Requested-With": "XMLHttpRequest",
-        "Accept": "application/json, text/plain, */*",
-      },
-    }
-  );
-
-  let decryptedSources = data?.sources;
-
-  if (data?.encrypted) {
-    // The sources field is an encrypted base64 string.
-    // Fetch the megacloudKey from the ajax endpoint (separate from the v3 embed page key).
-    let megacloudKey = "";
-    try {
-      const ajaxResp = await axios.get(
-        `https://megacloud.blog/embed-2/ajax/e-1/getSources?id=${sourceId}`,
-        {
-          timeout: 15000,
-          headers: {
-            Referer: `${embedUrl.origin}/`,
-            "User-Agent": "Mozilla/5.0",
-            "X-Requested-With": "XMLHttpRequest",
-          },
-        }
-      );
-      megacloudKey = String(ajaxResp.data?.key || "").trim();
-    } catch {}
-
-    if (megacloudKey && typeof data.sources === "string") {
-      try {
-        const rawDecrypted = decryptMegaCloudSources(data.sources, clientKey, megacloudKey);
-        decryptedSources = JSON.parse(rawDecrypted);
-      } catch (decryptErr) {
-        // decryption failed — decryptedSources stays as the encrypted string
-        decryptedSources = null;
-      }
-    } else {
-      // No megacloudKey available — cannot decrypt
-      decryptedSources = null;
-    }
-
-    if (!Array.isArray(decryptedSources) || decryptedSources.length === 0) {
-      throw new Error(
-        "MegaCloud returned encrypted sources that could not be decrypted. " +
-        "The aniwatch npm package may need to be updated: cd consumet-local && npm update aniwatch"
-      );
-    }
-  }
-
-  const sources = Array.isArray(decryptedSources)
-    ? decryptedSources
-        .map((item) => ({
-          url: item?.file || item?.url,
-          isM3U8: item?.type === "hls" || String(item?.file || item?.url || "").includes(".m3u8"),
-          type: item?.type || "auto",
-          quality: item?.label || item?.quality || "Auto",
-        }))
-        .filter((item) => Boolean(item.url))
-    : [];
-
+// Shared result builder for extractMegaCloud
+function buildMegaCloudResult(data, embedUrl) {
+  const rawSources = Array.isArray(data.sources) ? data.sources : [];
+  const sources = rawSources
+    .map((item) => ({
+      url: item?.file || item?.url,
+      isM3U8: item?.type === "hls" || String(item?.file || item?.url || "").includes(".m3u8"),
+      type: item?.type || "auto",
+      quality: item?.label || item?.quality || "Auto",
+    }))
+    .filter((s) => Boolean(s.url));
   const subtitles = Array.isArray(data?.tracks)
     ? data.tracks
-        .filter((track) => track?.kind === "captions" || track?.kind === "subtitles")
-        .map((track) => ({
-          url: track.file,
-          lang: track.label || track.kind,
-          default: Boolean(track.default),
-        }))
+        .filter((t) => t?.kind === "captions" || t?.kind === "subtitles")
+        .map((t) => ({ url: t.file, lang: t.label || t.kind, default: Boolean(t.default) }))
     : [];
+  return { headers: { Referer: `${embedUrl.origin}/` }, sources, subtitles, download: data?.download || "" };
+}
 
-  return {
-    headers: { Referer: `${embedUrl.origin}/` },
-    sources,
-    subtitles,
-    download: data?.download || "",
+async function extractMegaCloud(link) {
+  const embedUrl = new URL(link);
+  // Extract the source ID — last path segment before '?'
+  const pathParts = embedUrl.pathname.split("/").filter(Boolean);
+  const sourceId = pathParts[pathParts.length - 1];
+  if (!sourceId) throw new Error("Unable to extract MegaCloud source id from: " + link);
+
+  // Honour both megacloud.blog and megacloud.tv domains
+  const embedDomain = embedUrl.hostname.includes("megacloud.tv") ? "megacloud.tv" : "megacloud.blog";
+
+  const commonHeaders = {
+    Referer: `${siteBase}/`,
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "X-Requested-With": "XMLHttpRequest",
+    "Accept": "application/json, text/plain, */*",
   };
+
+  // ── STAGE 1: Ajax endpoint — requires NO client key ───────────────────────
+  // This is the simplest path. When sources are not encrypted it works instantly.
+  let data = null;
+  try {
+    const r = await axios.get(
+      `https://${embedDomain}/embed-2/ajax/e-1/getSources?id=${sourceId}`,
+      { headers: commonHeaders, timeout: 20000 }
+    );
+    data = r.data;
+  } catch (e) {
+    throw new Error(`MegaCloud ajax request failed: ${e.message}`);
+  }
+
+  // ── Not encrypted → sources are ready immediately ─────────────────────────
+  if (data && !data.encrypted && Array.isArray(data.sources) && data.sources.length > 0) {
+    return buildMegaCloudResult(data, embedUrl);
+  }
+
+  // ── Encrypted → attempt decryption ───────────────────────────────────────
+  if (data && data.encrypted && typeof data.sources === "string") {
+    // The ajax response sometimes includes the megacloudKey directly in `data.key`
+    const megacloudKey = String(data?.key || "").trim();
+    // We still need the clientKey from the embed HTML page
+    let clientKey = "";
+    try { clientKey = await getMegaCloudClientKey(sourceId); } catch {}
+
+    if (clientKey && megacloudKey) {
+      try {
+        const raw = decryptMegaCloudSources(data.sources, clientKey, megacloudKey);
+        const decrypted = JSON.parse(raw);
+        if (Array.isArray(decrypted) && decrypted.length > 0) {
+          data.sources = decrypted;
+          return buildMegaCloudResult(data, embedUrl);
+        }
+      } catch {}
+    }
+
+    throw new Error(
+      `MegaCloud sources are encrypted and could not be decrypted. ` +
+      `clientKey=${clientKey ? "found" : "MISSING"}, ` +
+      `megacloudKey=${megacloudKey ? "found" : "MISSING — ajax response contained no key field"}. ` +
+      `Run the debug endpoint: GET /anime/hianime/debug-watch/<episode-id> for a full diagnostic.`
+    );
+  }
+
+  throw new Error(
+    `MegaCloud returned no usable data. ` +
+    `encrypted=${data?.encrypted}, sources type=${typeof data?.sources}. ` +
+    `Run: GET /anime/hianime/debug-watch/<episode-id> for a full diagnostic.`
+  );
 }
 
 function parsePage(value, fallback = 1) {
@@ -870,6 +865,100 @@ async function route(pathname, searchParams) {
         results: Array.isArray(data?.results) ? data.results : [],
       },
     };
+  }
+
+  // ── Debug: full watch pipeline diagnostic ────────────────────────────────
+  if (pathname.startsWith("/anime/hianime/debug-watch/")) {
+    const episodeId = decodeURIComponent(pathname.slice("/anime/hianime/debug-watch/".length));
+    const epNumber = String(episodeId || "").split("?ep=")[1];
+    const debug = { episodeId, epNumber, steps: {} };
+    const debugHeaders = {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      Referer: `${siteBase}/watch/${episodeId}`,
+      "X-Requested-With": "XMLHttpRequest",
+    };
+
+    try {
+      // Step 1: server list
+      const sr = await axios.get(
+        `${ajaxBase}/episode/servers?episodeId=${encodeURIComponent(epNumber)}`,
+        { headers: debugHeaders, timeout: 15000 }
+      );
+      const payload = typeof sr.data === "string" ? JSON.parse(sr.data) : sr.data;
+      const $ = cheerio.load(payload?.html || "");
+      const servers = [];
+      $(".server-item").each((_, el) => {
+        servers.push({
+          type: $(el).attr("data-type"),
+          serverId: $(el).attr("data-server-id"),
+          id: $(el).attr("data-id"),
+          label: $(el).text().trim(),
+        });
+      });
+      debug.steps.step1_server_list = { ok: true, count: servers.length, servers };
+
+      if (servers.length === 0) {
+        debug.steps.step1_server_list.note = "No servers found in HTML — aniwatchtv.to may be blocking the request";
+        return { status: 200, body: debug };
+      }
+
+      // Step 2: get embed link for first available server
+      const first = servers[0];
+      const linkResp = await axios.get(
+        `${ajaxBase}/episode/sources?id=${encodeURIComponent(first.id)}`,
+        { headers: debugHeaders, timeout: 15000 }
+      );
+      const linkData = typeof linkResp.data === "string" ? JSON.parse(linkResp.data) : linkResp.data;
+      debug.steps.step2_embed_link = { ok: true, server: first, data: linkData };
+
+      // Step 3: MegaCloud ajax sources (if applicable)
+      const link = String(linkData?.link || "");
+      if (link.includes("megacloud")) {
+        const embedUrl = new URL(link);
+        const pathParts = embedUrl.pathname.split("/").filter(Boolean);
+        const sourceId = pathParts[pathParts.length - 1];
+        const embedDomain = link.includes("megacloud.tv") ? "megacloud.tv" : "megacloud.blog";
+
+        const mcResp = await axios.get(
+          `https://${embedDomain}/embed-2/ajax/e-1/getSources?id=${sourceId}`,
+          {
+            headers: {
+              Referer: `${siteBase}/`,
+              "User-Agent": "Mozilla/5.0",
+              "X-Requested-With": "XMLHttpRequest",
+              Accept: "application/json, text/plain, */*",
+            },
+            timeout: 15000,
+          }
+        );
+        const mcData = mcResp.data;
+        debug.steps.step3_megacloud_ajax = {
+          ok: true,
+          sourceId,
+          embedDomain,
+          encrypted: mcData?.encrypted,
+          sources_type: typeof mcData?.sources,
+          sources_is_array: Array.isArray(mcData?.sources),
+          sources_count: Array.isArray(mcData?.sources) ? mcData.sources.length : "N/A",
+          has_key_field: Boolean(mcData?.key),
+          tracks_count: Array.isArray(mcData?.tracks) ? mcData.tracks.length : 0,
+          first_source: Array.isArray(mcData?.sources) ? mcData.sources[0] : "(string — encrypted)",
+          verdict: !mcData?.encrypted && Array.isArray(mcData?.sources) && mcData.sources.length > 0
+            ? "✅ UNENCRYPTED — extractMegaCloud fix will work"
+            : mcData?.encrypted && mcData?.key
+            ? "⚠️ ENCRYPTED but key is present — decryption may work"
+            : mcData?.encrypted
+            ? "❌ ENCRYPTED and no key — decryption will fail"
+            : "❌ Unknown state",
+        };
+      } else {
+        debug.steps.step3_megacloud_ajax = { skipped: true, reason: "Link is not a MegaCloud URL", link };
+      }
+    } catch (e) {
+      debug.steps.error = { message: e.message, stack: e.stack?.split("\n").slice(0, 4) };
+    }
+
+    return { status: 200, body: debug };
   }
 
   return { status: 404, body: { detail: "Route not found." } };
