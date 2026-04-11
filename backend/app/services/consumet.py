@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import time
@@ -27,10 +28,13 @@ DEFAULT_AUDIO_PRIORITY = ["en", "original", "hi"]
 DEFAULT_SUBTITLE_PRIORITY = ["en", "hi"]
 HTTP_TIMEOUT = 25.0
 HEALTH_TIMEOUT = 8.0
-ANIME_WATCH_TIMEOUT = 10.0
+LOCAL_CONSUMET_TIMEOUT = 10.0
+ANIME_INFO_TIMEOUT = 8.0
+ANIME_WATCH_TIMEOUT = 6.0
 JIKAN_API_BASE = "https://api.jikan.moe/v4"
 TMDB_API_BASE = "https://api.themoviedb.org/3"
 _CACHE: dict[str, tuple[float, Any]] = {}
+_ASYNC_CLIENTS: dict[int, httpx.AsyncClient] = {}
 
 
 class ConsumetConfigError(RuntimeError):
@@ -73,6 +77,30 @@ def _http_error(detail: str, status_code: int = 502) -> HTTPException:
     return HTTPException(status_code=status_code, detail=detail)
 
 
+def _get_async_client() -> httpx.AsyncClient:
+    loop = asyncio.get_running_loop()
+    loop_key = id(loop)
+    client = _ASYNC_CLIENTS.get(loop_key)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(follow_redirects=True)
+        _ASYNC_CLIENTS[loop_key] = client
+    return client
+
+
+async def _http_get(
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = HTTP_TIMEOUT,
+) -> httpx.Response:
+    client = _get_async_client()
+    try:
+        return await client.get(url, params=params, headers=headers, timeout=timeout)
+    except Exception as exc:
+        raise _http_error(f"Request failed: {exc}") from exc
+
+
 async def _fetch_json_url(
     url: str,
     *,
@@ -90,11 +118,7 @@ async def _fetch_json_url(
         "Accept": "application/json, text/plain;q=0.9, */*;q=0.8",
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True, headers=headers) as client:
-            response = await client.get(url, params=filtered)
-    except Exception as exc:
-        raise _http_error(f"Consumet request failed: {exc}") from exc
+    response = await _http_get(url, params=filtered, headers=headers, timeout=HTTP_TIMEOUT)
 
     if response.status_code >= 400:
         detail = response.text.strip() or f"Consumet request failed with {response.status_code}"
@@ -125,11 +149,7 @@ async def _fetch_text_url(
         "Accept": "text/plain, application/xml;q=0.9, text/xml;q=0.9, */*;q=0.8",
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True, headers=headers) as client:
-            response = await client.get(url, params=filtered)
-    except Exception as exc:
-        raise _http_error(f"Request failed: {exc}") from exc
+    response = await _http_get(url, params=filtered, headers=headers, timeout=HTTP_TIMEOUT)
 
     if response.status_code >= 400:
         detail = response.text.strip() or f"Request failed with {response.status_code}"
@@ -153,11 +173,7 @@ async def _fetch_tmdb_json(path: str, *, params: dict[str, Any] | None = None, t
         "Authorization": f"Bearer {tmdb_bearer_token()}",
         "Content-Type": "application/json",
     }
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True, headers=headers) as client:
-            response = await client.get(f"{TMDB_API_BASE}{path}", params=filtered)
-    except Exception as exc:
-        raise _http_error(f"TMDB request failed: {exc}") from exc
+    response = await _http_get(f"{TMDB_API_BASE}{path}", params=filtered, headers=headers, timeout=HTTP_TIMEOUT)
 
     if response.status_code >= 400:
         detail = response.text.strip() or f"TMDB request failed with {response.status_code}"
@@ -179,11 +195,12 @@ async def _fetch_consumet_json(
     timeout: float | None = None,
 ) -> Any:
     base = get_consumet_api_base()
-    if timeout is None or timeout == HTTP_TIMEOUT:
+    effective_timeout = timeout if timeout is not None else LOCAL_CONSUMET_TIMEOUT
+    if effective_timeout == HTTP_TIMEOUT:
         return await _fetch_json_url(f"{base}{path}", params=params, ttl_seconds=ttl_seconds)
 
     filtered = {key: value for key, value in (params or {}).items() if value is not None and value != ""}
-    key = _cache_key("json-timeout", f"{base}{path}", filtered, timeout)
+    key = _cache_key("json-timeout", f"{base}{path}", filtered, effective_timeout)
     cached = _cache_get(key)
     if cached is not None:
         return cached
@@ -192,11 +209,7 @@ async def _fetch_consumet_json(
         "User-Agent": "GRABIX/1.0 (+https://github.com/consumet/api.consumet.org)",
         "Accept": "application/json, text/plain;q=0.9, */*;q=0.8",
     }
-    try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
-            response = await client.get(f"{base}{path}", params=filtered)
-    except Exception as exc:
-        raise _http_error(f"Consumet request failed: {exc}") from exc
+    response = await _http_get(f"{base}{path}", params=filtered, headers=headers, timeout=effective_timeout)
 
     if response.status_code >= 400:
         detail = response.text.strip() or f"Consumet request failed with {response.status_code}"
@@ -219,11 +232,7 @@ async def fetch_proxy_response(url: str) -> tuple[bytes, str | None]:
     safe_url = validated.normalized_url
 
     headers = {"User-Agent": "GRABIX/1.0"}
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True, headers=headers) as client:
-            response = await client.get(safe_url)
-    except Exception as exc:
-        raise _http_error(f"Proxy request failed: {exc}") from exc
+    response = await _http_get(safe_url, headers=headers, timeout=HTTP_TIMEOUT)
 
     if response.status_code >= 400:
         raise _http_error(
@@ -1283,7 +1292,12 @@ async def fetch_domain_info(domain: str, provider: str, media_id: str) -> dict[s
     if domain == "anime" and provider in {"zoro", "hianime", "animekai", "kickassanime"}:
         try:
             path = f"/anime/{provider}/info"
-            payload = await _fetch_consumet_json(path, params={"id": media_id}, ttl_seconds=1800)
+            payload = await _fetch_consumet_json(
+                path,
+                params={"id": media_id},
+                ttl_seconds=1800,
+                timeout=ANIME_INFO_TIMEOUT,
+            )
         except (HTTPException, ConsumetConfigError):
             detail = await _fetch_jikan_anime_full(media_id, provider)
             episodes = await _fetch_jikan_anime_episodes(media_id, provider)
@@ -1292,7 +1306,11 @@ async def fetch_domain_info(domain: str, provider: str, media_id: str) -> dict[s
     elif domain == "anime":
         try:
             path = f"/anime/{provider}/info/{quote(media_id)}"
-            payload = await _fetch_consumet_json(path, ttl_seconds=1800)
+            payload = await _fetch_consumet_json(
+                path,
+                ttl_seconds=1800,
+                timeout=ANIME_INFO_TIMEOUT,
+            )
         except (HTTPException, ConsumetConfigError):
             detail = await _fetch_jikan_anime_full(media_id, provider)
             episodes = await _fetch_jikan_anime_episodes(media_id, provider)
@@ -1417,10 +1435,15 @@ async def fetch_anime_watch(
                 pass
             return None
 
+        tasks = [
+            asyncio.create_task(_try_hianime(category, server_name))
+            for category in categories
+            for server_name in servers
+        ]
         embed_fallback: dict[str, Any] | None = None
-        for category in categories:
-            for server_name in servers:
-                result = await _try_hianime(category, server_name)
+        try:
+            for completed in asyncio.as_completed(tasks):
+                result = await completed
                 if not isinstance(result, dict) or not result.get("sources"):
                     continue
                 # Drop embed-kind sources — they are unplayable MegaCloud/VidStreaming
@@ -1431,6 +1454,12 @@ async def fetch_anime_watch(
                     return result
                 if embed_fallback is None:
                     embed_fallback = result
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
         if embed_fallback:
             return embed_fallback
         raise _http_error("Hianime did not return any playable anime sources.")

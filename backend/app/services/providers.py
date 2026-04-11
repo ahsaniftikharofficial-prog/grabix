@@ -1341,8 +1341,11 @@ async def resolve_anime_playback(
     title_candidates = _unique_titles([title, alt_title, *(alt_titles or [])])
     candidate_items = list(candidates or [])
     resolved_episode_ids: dict[str, str] = {}
-    collect_all_sources = purpose == "play"
+    # Returning the first playable provider keeps the Play action responsive.
+    # Collecting every fallback provider up front adds avoidable latency.
+    collect_all_sources = False
     successful_watch_providers: set[str] = set()
+    attempted_candidate_keys: set[str] = set()
 
     if normalized_audio == "hi":
         hindi_sources = await _resolve_moviebox_sources_by_title(
@@ -1376,63 +1379,23 @@ async def resolve_anime_playback(
             status_code=422,
         )
 
-    candidate_items = await _discover_anime_candidates_by_title(
-        titles=title_candidates,
-        existing_candidates=candidate_items,
-    )
+    async def _attempt_watch_candidates(items: list[dict[str, Any]]) -> bool:
+        for candidate in items:
+            provider_name = str(candidate.get("provider") or "hianime").strip() or "hianime"
+            anime_id = str(candidate.get("anime_id") or candidate.get("animeId") or candidate.get("id") or "").strip()
+            if not anime_id:
+                continue
 
-    for candidate in candidate_items:
-        provider_name = str(candidate.get("provider") or "hianime").strip() or "hianime"
-        if provider_name in successful_watch_providers:
-            continue
-        anime_id = str(candidate.get("anime_id") or candidate.get("animeId") or candidate.get("id") or "").strip()
-        if not anime_id:
-            continue
-        episode_id = str(candidate.get("episode_id") or candidate.get("episodeId") or "").strip()
-        candidate_key = f"{provider_name}:{anime_id}:{episode_number}"
-        if not episode_id:
-            episode_id = resolved_episode_ids.get(candidate_key, "")
+            candidate_key = f"{provider_name}:{anime_id}:{episode_number}"
+            if candidate_key in attempted_candidate_keys or provider_name in successful_watch_providers:
+                continue
+            attempted_candidate_keys.add(candidate_key)
 
-        try:
-            if provider_name == "hianime":
-                if not episode_id:
-                    episode_payload = await registry.execute(
-                        "consumet-watch",
-                        "details",
-                        correlation_id=correlation_id,
-                        fallback_used=not bool(groups),
-                        provider=provider_name,
-                        media_id=anime_id,
-                    )
-                    selected = None
-                    for item in episode_payload.get("items") or []:
-                        try:
-                            if int(item.get("number") or 0) == episode_number:
-                                selected = item
-                                break
-                        except Exception:
-                            continue
-                    if selected is None:
-                        items = list(episode_payload.get("items") or [])
-                        selected = items[0] if items else None
-                    episode_id = str((selected or {}).get("id") or "").strip()
-                watch_sources = await registry.execute(
-                    "anime-resolved",
-                    "sources",
-                    correlation_id=correlation_id,
-                    fallback_used=not bool(groups),
-                    episode_number=episode_number,
-                    episode_id=episode_id,
-                    anime_id=anime_id,
-                    title=title,
-                    alt_title=alt_title,
-                    audio=normalized_audio,
-                    server=server,
-                    is_movie=is_movie,
-                    tmdb_id=tmdb_id,
-                    purpose=purpose,
-                )
-            else:
+            episode_id = str(candidate.get("episode_id") or candidate.get("episodeId") or "").strip()
+            if not episode_id:
+                episode_id = resolved_episode_ids.get(candidate_key, "")
+
+            try:
                 watch_sources, episode_id = await _resolve_direct_anime_provider_sources(
                     provider_name=provider_name,
                     anime_id=anime_id,
@@ -1441,39 +1404,49 @@ async def resolve_anime_playback(
                     audio=normalized_audio,
                     server=server,
                 )
-            if episode_id:
-                resolved_episode_ids[candidate_key] = episode_id
-            if watch_sources:
+                if episode_id:
+                    resolved_episode_ids[candidate_key] = episode_id
+                if watch_sources:
+                    attempts.append(
+                        _attempt_payload(
+                            provider="consumet-watch" if provider_name == "hianime" else provider_name,
+                            operation="sources",
+                            success=True,
+                            message=f"Prepared {len(watch_sources)} anime sources via {provider_name}.",
+                            fallback_used=not bool(groups),
+                        )
+                    )
+                    successful_watch_providers.add(provider_name)
+                    groups.append({"id": f"consumet-{provider_name}", "label": f"{provider_name} watch fallback", "sources": watch_sources})
+                    if not collect_all_sources:
+                        return True
+            except Exception as error:
+                normalized_error = _provider_error_from_exception(
+                    error,
+                    provider="consumet-watch" if provider_name == "hianime" else provider_name,
+                    correlation_id=correlation_id,
+                    fallback_used=not bool(groups),
+                )
                 attempts.append(
                     _attempt_payload(
-                        provider="anime-resolved" if provider_name == "hianime" else provider_name,
+                        provider="consumet-watch" if provider_name == "hianime" else provider_name,
                         operation="sources",
-                        success=True,
-                        message=f"Prepared {len(watch_sources)} playable anime sources via {provider_name}.",
+                        success=False,
+                        message=normalized_error.message,
                         fallback_used=not bool(groups),
+                        retryable=normalized_error.retryable,
                     )
                 )
-                successful_watch_providers.add(provider_name)
-                groups.append({"id": f"resolved-{provider_name}", "label": f"{provider_name} resolved playback", "sources": watch_sources})
-                if not collect_all_sources:
-                    break
-        except Exception as error:
-            normalized_error = _provider_error_from_exception(
-                error,
-                provider="anime-resolved" if provider_name == "hianime" else provider_name,
-                correlation_id=correlation_id,
-                fallback_used=not bool(groups),
-            )
-            attempts.append(
-                _attempt_payload(
-                    provider="anime-resolved" if provider_name == "hianime" else provider_name,
-                    operation="sources",
-                    success=False,
-                    message=normalized_error.message,
-                    fallback_used=not bool(groups),
-                    retryable=normalized_error.retryable,
-                )
-            )
+        return False
+
+    await _attempt_watch_candidates(candidate_items)
+
+    if not groups:
+        candidate_items = await _discover_anime_candidates_by_title(
+            titles=title_candidates,
+            existing_candidates=candidate_items,
+        )
+        await _attempt_watch_candidates(candidate_items)
 
     if not groups:
         for candidate in candidate_items:

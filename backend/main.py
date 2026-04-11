@@ -1289,6 +1289,8 @@ def _extract_hianime_embed_source(
     episode_id: str,
     server: str,
     tried: list[dict],
+    *,
+    allow_browser_capture: bool = True,
 ) -> dict | None:
     sources = payload.get("sources") or []
     subtitles = payload.get("subtitles") or []
@@ -1318,17 +1320,18 @@ def _extract_hianime_embed_source(
         except Exception as exc:
             tried.append({"server": server, "stage": "hianime-embed-extract", "detail": str(exc)})
 
-        try:
-            captured = _capture_hianime_stream_via_edge(url, episode_id, server, tried)
-            if captured:
-                captured["provider"] = "HiAnime"
-                captured["selectedServer"] = server
-                captured["strategy"] = "hianime-browser-capture"
-                if not captured.get("subtitles"):
-                    captured["subtitles"] = subtitles
-                return captured
-        except Exception as exc:
-            tried.append({"server": server, "stage": "hianime-browser-capture", "detail": str(exc)})
+        if allow_browser_capture:
+            try:
+                captured = _capture_hianime_stream_via_edge(url, episode_id, server, tried)
+                if captured:
+                    captured["provider"] = "HiAnime"
+                    captured["selectedServer"] = server
+                    captured["strategy"] = "hianime-browser-capture"
+                    if not captured.get("subtitles"):
+                        captured["subtitles"] = subtitles
+                    return captured
+            except Exception as exc:
+                tried.append({"server": server, "stage": "hianime-browser-capture", "detail": str(exc)})
 
     return None
 
@@ -1502,22 +1505,39 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
     try:
         from app.services.consumet import _fetch_consumet_json
         category = _map_audio_category(payload.audio)
-        for server_name in _anime_server_order(payload.server):
+        allow_browser_capture = str(payload.purpose or "play").strip().lower() == "download"
+
+        async def _try_raw_hianime(server_name: str) -> dict | None:
             raw_payload = await _fetch_consumet_json(
                 f"/anime/hianime/watch/{quote(episode_id)}",
                 params={"server": server_name, "category": category},
                 ttl_seconds=180,
-                timeout=10.0,
+                timeout=6.0,
             )
             direct_resolution = _convert_hianime_source_payload(raw_payload, server_name, tried)
             if direct_resolution:
-                _set_cached_anime_resolution(payload, direct_resolution)
                 return direct_resolution
+            return _extract_hianime_embed_source(
+                raw_payload,
+                episode_id,
+                server_name,
+                tried,
+                allow_browser_capture=allow_browser_capture,
+            )
 
-            embed_resolution = _extract_hianime_embed_source(raw_payload, episode_id, server_name, tried)
-            if embed_resolution:
-                _set_cached_anime_resolution(payload, embed_resolution)
-                return embed_resolution
+        tasks = [asyncio.create_task(_try_raw_hianime(server_name)) for server_name in _anime_server_order(payload.server)]
+        try:
+            for completed in asyncio.as_completed(tasks):
+                resolution = await completed
+                if resolution:
+                    _set_cached_anime_resolution(payload, resolution)
+                    return resolution
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as exc:
         tried.append(
             {
