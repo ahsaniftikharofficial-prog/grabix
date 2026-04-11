@@ -171,44 +171,74 @@ async function getMegaCloudClientKey(sourceId) {
   const response = await axios.get(`https://megacloud.blog/embed-2/v3/e-1/${sourceId}`, {
     headers: {
       Referer: `${siteBase}/`,
-      "User-Agent": "Mozilla/5.0",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.5",
     },
     timeout: 20000,
   });
   const text = String(response.data || "");
-  const directMatch = text.match(/window\._xy_ws\s*=\s*["'`]([^"'`]+)["'`];/);
-  if (directMatch?.[1]) {
-    return directMatch[1];
-  }
-  const regexes = [
-    /<meta name="_gg_fb" content="[a-zA-Z0-9]+">/,
-    /<!--\s+_is_th:[0-9a-zA-Z]+\s+-->/,
-    /<script>window._lk_db\s+=\s+\{[xyz]:\s+["'`][a-zA-Z0-9]+["'`],\s+[xyz]:\s+["'`][a-zA-Z0-9]+["'`],\s+[xyz]:\s+["'`][a-zA-Z0-9]+["'`]\};<\/script>/,
-    /<div\s+data-dpi="[0-9a-zA-Z]+"\s+.*><\/div>/,
-    /<script nonce="[0-9a-zA-Z]+">/,
-    /<script>window._xy_ws = ['"`][0-9a-zA-Z]+['"`];<\/script>/,
-  ];
 
-  const keyMatch = /"[a-zA-Z0-9]+"/;
-  for (let index = 0; index < regexes.length; index += 1) {
-    const match = text.match(regexes[index]);
-    if (!match) continue;
+  // Pattern 1: direct window._xy_ws = 'key' (most common recent pattern, with or without semicolon)
+  const directMatch = text.match(/window\._xy_ws\s*=\s*["'`]([^"'`\s]{8,})["'`]/);
+  if (directMatch?.[1]) return directMatch[1];
 
-    if (index === 2) {
-      const parts = [...match[0].matchAll(/[xyz]:\s+"([a-zA-Z0-9]+)"/g)].map((item) => item[1]);
-      if (parts.length === 3) return parts.join("");
-    }
-
-    if (index === 4) {
-      const nonceMatch = match[0].match(/:[a-zA-Z0-9]+ /);
-      if (nonceMatch) return nonceMatch[0].replaceAll(":", "").replaceAll(" ", "");
-    }
-
-    const directMatch = match[0].match(keyMatch);
-    if (directMatch) return directMatch[0].replaceAll('"', "");
+  // Pattern 2: broad catch-all — any window._xxx = 'alphanumeric' assignment
+  const broadWindowMatches = [...text.matchAll(/window\._[a-zA-Z_$]{1,20}\s*=\s*["'`]([a-zA-Z0-9]{8,})["'`]/g)];
+  if (broadWindowMatches.length > 0) {
+    const combined = broadWindowMatches.map((m) => m[1]).join("");
+    if (combined.length >= 8) return combined;
   }
 
-  throw new Error("Failed extracting MegaCloud client key");
+  // Pattern 3: meta tag with key content
+  const metaMatch = text.match(/<meta\s+name=["']_gg_fb["']\s+content=["']([a-zA-Z0-9]+)["']/);
+  if (metaMatch?.[1]) return metaMatch[1];
+
+  // Pattern 4: HTML comment key
+  const commentMatch = text.match(/<!--\s+_is_th:([0-9a-zA-Z]+)\s+-->/);
+  if (commentMatch?.[1]) return commentMatch[1];
+
+  // Pattern 5: window._lk_db = {x: 'a', y: 'b', z: 'c'} — concatenate all string values
+  const lkDbMatch = text.match(/window\._lk_db\s*=\s*\{([^}]+)\}/);
+  if (lkDbMatch) {
+    const parts = [...lkDbMatch[1].matchAll(/["'`]([a-zA-Z0-9]+)["'`]/g)].map((m) => m[1]);
+    if (parts.length > 0) return parts.join("");
+  }
+
+  // Pattern 6: data-dpi attribute
+  const dpiMatch = text.match(/data-dpi=["']([a-zA-Z0-9]{8,})["']/);
+  if (dpiMatch?.[1]) return dpiMatch[1];
+
+  // Pattern 7: script nonce attribute used as key
+  const nonceMatch = text.match(/<script\s+nonce=["']([a-zA-Z0-9]{12,})["']/);
+  if (nonceMatch?.[1]) return nonceMatch[1];
+
+  // Pattern 8: double/triple underscore window variable variants
+  const deepWindowMatch = text.match(/window\.__+[a-zA-Z_$]*\s*=\s*["'`]([a-zA-Z0-9]{8,})["'`]/);
+  if (deepWindowMatch?.[1]) return deepWindowMatch[1];
+
+  // Pattern 9: scan inline script tags for any variable = 'longkey' assignment
+  const scriptTagMatches = [...text.matchAll(/<script(?:\s[^>]*)?>([^<]{10,})<\/script>/gs)];
+  for (const scriptMatch of scriptTagMatches) {
+    const content = scriptMatch[1];
+    const assignMatch = content.match(/(?:var|let|const)\s+[a-zA-Z_$][a-zA-Z0-9_$]*\s*=\s*["'`]([a-zA-Z0-9]{16,})["'`]/);
+    if (assignMatch?.[1]) return assignMatch[1];
+  }
+
+  // Pattern 10: last resort — any = 'longalphanumeric' anywhere on the page
+  const lastResortMatches = [...text.matchAll(/=\s*["'`]([a-zA-Z0-9]{16,64})["'`]/g)];
+  for (const m of lastResortMatches) {
+    const candidate = m[1];
+    // Skip obvious non-keys: pure numbers, known base64 padding patterns
+    if (/^\d+$/.test(candidate)) continue;
+    return candidate;
+  }
+
+  throw new Error(
+    "getMegaCloudClientKey: all extraction patterns exhausted — MegaCloud likely changed their key embedding. " +
+    "Please open megacloud.blog/embed-2/v3/e-1/<any-sourceId> in a browser, " +
+    "find the window._ key assignment, and add a new pattern."
+  );
 }
 
 async function extractMegaCloud(link) {
@@ -226,28 +256,69 @@ async function extractMegaCloud(link) {
       timeout: 20000,
       headers: {
         Referer: `${embedUrl.origin}/`,
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json, text/plain, */*",
       },
     }
   );
 
   let decryptedSources = data?.sources;
+
   if (data?.encrypted) {
-    throw new Error("Encrypted MegaCloud source payload is not supported by the current v3 extractor");
+    // The sources field is an encrypted base64 string.
+    // Fetch the megacloudKey from the ajax endpoint (separate from the v3 embed page key).
+    let megacloudKey = "";
+    try {
+      const ajaxResp = await axios.get(
+        `https://megacloud.blog/embed-2/ajax/e-1/getSources?id=${sourceId}`,
+        {
+          timeout: 15000,
+          headers: {
+            Referer: `${embedUrl.origin}/`,
+            "User-Agent": "Mozilla/5.0",
+            "X-Requested-With": "XMLHttpRequest",
+          },
+        }
+      );
+      megacloudKey = String(ajaxResp.data?.key || "").trim();
+    } catch {}
+
+    if (megacloudKey && typeof data.sources === "string") {
+      try {
+        const rawDecrypted = decryptMegaCloudSources(data.sources, clientKey, megacloudKey);
+        decryptedSources = JSON.parse(rawDecrypted);
+      } catch (decryptErr) {
+        // decryption failed — decryptedSources stays as the encrypted string
+        decryptedSources = null;
+      }
+    } else {
+      // No megacloudKey available — cannot decrypt
+      decryptedSources = null;
+    }
+
+    if (!Array.isArray(decryptedSources) || decryptedSources.length === 0) {
+      throw new Error(
+        "MegaCloud returned encrypted sources that could not be decrypted. " +
+        "The aniwatch npm package may need to be updated: cd consumet-local && npm update aniwatch"
+      );
+    }
   }
 
   const sources = Array.isArray(decryptedSources)
-    ? decryptedSources.map((item) => ({
-        url: item?.file,
-        isM3U8: item?.type === "hls",
-        type: item?.type || "auto",
-      })).filter((item) => Boolean(item.url))
+    ? decryptedSources
+        .map((item) => ({
+          url: item?.file || item?.url,
+          isM3U8: item?.type === "hls" || String(item?.file || item?.url || "").includes(".m3u8"),
+          type: item?.type || "auto",
+          quality: item?.label || item?.quality || "Auto",
+        }))
+        .filter((item) => Boolean(item.url))
     : [];
 
   const subtitles = Array.isArray(data?.tracks)
     ? data.tracks
-        .filter((track) => track?.kind === "captions")
+        .filter((track) => track?.kind === "captions" || track?.kind === "subtitles")
         .map((track) => ({
           url: track.file,
           lang: track.label || track.kind,
@@ -259,7 +330,7 @@ async function extractMegaCloud(link) {
     headers: { Referer: `${embedUrl.origin}/` },
     sources,
     subtitles,
-    download: "",
+    download: data?.download || "",
   };
 }
 
@@ -427,60 +498,104 @@ async function fetchWatch(episodeId, server, category) {
   const requestedServer = mapServer(server);
   const requestedCategory = mapCategory(category);
 
-  // PRIMARY: aniwatch library's own extraction — most reliable, try first
-  try {
-    const direct = await scraper.getEpisodeSources(episodeId, requestedServer.request, requestedCategory);
-    const directSources = Array.isArray(direct?.sources) ? direct.sources : [];
-    const directTracks = Array.isArray(direct?.subtitles) ? direct.subtitles : Array.isArray(direct?.tracks) ? direct.tracks : [];
-    if (directSources.length > 0) {
-      return {
-        headers: direct?.headers || {},
-        sources: directSources,
-        subtitles: directTracks,
-        download: direct?.download || "",
-      };
-    }
-  } catch {}
+  // Build the ordered list of servers to try: requested first, then the other one as fallback.
+  const fallbackServer =
+    requestedServer.request === HiAnime.Servers.VidStreaming
+      ? mapServer("vidcloud")
+      : mapServer("vidstreaming");
+  const serversToTry = [requestedServer, fallbackServer];
 
-  // SECONDARY: manual AJAX fetch + MegaCloud extraction
-  let link = "";
-  let tracks = [];
-  try {
-    const fallback = await fetchServerPayload(episodeId, requestedServer, requestedCategory);
-    link = String(fallback?.link || "").trim();
-    tracks = Array.isArray(fallback?.tracks) ? fallback.tracks : [];
-  } catch {}
-
-  if (!link) {
-    throw new Error("Hianime did not return a playable link.");
+  // PRIMARY: aniwatch library scraper — try each server until we get real HLS sources.
+  for (const tryServer of serversToTry) {
+    try {
+      const direct = await scraper.getEpisodeSources(episodeId, tryServer.request, requestedCategory);
+      const directSources = Array.isArray(direct?.sources) ? direct.sources : [];
+      const directTracks = Array.isArray(direct?.subtitles)
+        ? direct.subtitles
+        : Array.isArray(direct?.tracks)
+        ? direct.tracks
+        : [];
+      // Only accept real HLS/direct sources — reject embed or sourceless results.
+      const playable = directSources.filter(
+        (s) => s.isM3U8 || String(s.url || "").includes(".m3u8") || String(s.type || "").toLowerCase() === "hls"
+      );
+      if (playable.length > 0) {
+        return {
+          headers: direct?.headers || {},
+          sources: playable,
+          subtitles: directTracks,
+          download: direct?.download || "",
+        };
+      }
+    } catch {}
   }
 
-  try {
-    if (link.includes("megacloud.blog")) {
-      const extracted = await extractMegaCloud(link);
-      if (Array.isArray(extracted.sources) && extracted.sources.length > 0) {
-        if ((!extracted.subtitles || extracted.subtitles.length === 0) && tracks.length > 0) {
-          extracted.subtitles = tracks;
-        }
-        return extracted;
-      }
-    }
-  } catch {}
+  // SECONDARY: manual AJAX + MegaCloud extraction — try each server.
+  for (const tryServer of serversToTry) {
+    let link = "";
+    let tracks = [];
+    try {
+      const fallback = await fetchServerPayload(episodeId, tryServer, requestedCategory);
+      link = String(fallback?.link || "").trim();
+      tracks = Array.isArray(fallback?.tracks) ? fallback.tracks : [];
+    } catch {}
 
-  return {
-    headers: {},
-    sources: [
-      {
-        url: link,
-        quality: requestedServer.label,
-        isM3U8: false,
-        isEmbed: true,
-        type: "embed",
-      },
-    ],
-    subtitles: tracks,
-    download: "",
-  };
+    if (!link) continue;
+
+    if (link.includes("megacloud.blog") || link.includes("megacloud.tv")) {
+      try {
+        const extracted = await extractMegaCloud(link);
+        const playable = (extracted.sources || []).filter(
+          (s) => s.isM3U8 || String(s.url || "").includes(".m3u8")
+        );
+        if (playable.length > 0) {
+          if ((!extracted.subtitles || extracted.subtitles.length === 0) && tracks.length > 0) {
+            extracted.subtitles = tracks;
+          }
+          extracted.sources = playable;
+          return extracted;
+        }
+      } catch {}
+    }
+
+    // Non-MegaCloud link that looks like a direct HLS stream — trust it.
+    if (link.includes(".m3u8")) {
+      return {
+        headers: {},
+        sources: [{ url: link, isM3U8: true, type: "hls", quality: tryServer.label }],
+        subtitles: tracks,
+        download: "",
+      };
+    }
+  }
+
+  // TERTIARY: try the other category (dub↔sub) as a last attempt.
+  const otherCategory = requestedCategory === "sub" ? "dub" : "sub";
+  for (const tryServer of serversToTry) {
+    try {
+      const direct = await scraper.getEpisodeSources(episodeId, tryServer.request, otherCategory);
+      const directSources = Array.isArray(direct?.sources) ? direct.sources : [];
+      const playable = directSources.filter(
+        (s) => s.isM3U8 || String(s.url || "").includes(".m3u8")
+      );
+      if (playable.length > 0) {
+        return {
+          headers: direct?.headers || {},
+          sources: playable,
+          subtitles: Array.isArray(direct?.subtitles) ? direct.subtitles : [],
+          download: direct?.download || "",
+        };
+      }
+    } catch {}
+  }
+
+  // All extraction paths failed — throw a clear error instead of returning an unplayable embed URL.
+  throw new Error(
+    `fetchWatch: could not extract a playable HLS stream for episode "${episodeId}" ` +
+    `(tried: vidstreaming + vidcloud, sub + dub). ` +
+    `This usually means the aniwatch npm package is outdated or MegaCloud changed their API. ` +
+    `Run: cd consumet-local && npm update aniwatch && node server.cjs`
+  );
 }
 
 async function route(pathname, searchParams) {

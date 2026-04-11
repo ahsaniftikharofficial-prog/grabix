@@ -1409,7 +1409,12 @@ async def fetch_anime_watch(
         # Map frontend server names to consumet-local values
         _server_map = {"hd-1": "vidstreaming", "hd-2": "vidcloud", "vidstreaming": "vidstreaming", "vidcloud": "vidcloud"}
         if server and server != "auto" and server in _server_map:
-            servers = [_server_map[server]]
+            # Always try BOTH servers — requested one first, the other as automatic fallback.
+            # This is critical: if vidstreaming is down or MegaCloud key extraction fails
+            # for that server, vidcloud may still work (and vice versa).
+            primary = _server_map[server]
+            secondary = "vidcloud" if primary == "vidstreaming" else "vidstreaming"
+            servers = [primary, secondary]
         else:
             servers = ["vidstreaming", "vidcloud"]
         categories = ["dub", "sub"] if requested_audio in {"hi", "en"} else ["sub", "dub"]
@@ -1446,12 +1451,14 @@ async def fetch_anime_watch(
                 result = await completed
                 if not isinstance(result, dict) or not result.get("sources"):
                     continue
-                # Drop embed-kind sources — they are unplayable MegaCloud/VidStreaming
-                # iframes that show "We're Sorry" when loaded in the player.
+                # Prefer real HLS/direct sources — skip raw embed iframe URLs which
+                # cannot be played in the internal player.
                 playable = [s for s in result["sources"] if s.get("kind") in {"hls", "direct"}]
                 if playable:
                     result["sources"] = playable
                     return result
+                # Keep the first result that has *any* sources as a last-resort fallback.
+                # These will be embed-kind but at least we return something rather than failing.
                 if embed_fallback is None:
                     embed_fallback = result
         finally:
