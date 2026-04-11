@@ -1,9 +1,13 @@
+import logging
+
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.services.route_registry import get_route_handler
 
 router = APIRouter()
+logger = logging.getLogger("downloads.routes")
 
 
 class DownloadRequest(BaseModel):
@@ -27,6 +31,28 @@ class DownloadRequest(BaseModel):
     download_engine: str = ""
 
 
+def _safe_handler(namespace: str, name: str, fallback=None, *args, **kwargs):
+    """Call a registered route handler, returning a safe fallback on any error.
+
+    Unhandled exceptions from route handlers can escape before Starlette's
+    CORSMiddleware attaches the Access-Control-Allow-Origin header, causing
+    Chrome to report a CORS error instead of the real 500.  Wrapping every
+    handler call here ensures a JSON response is always returned so CORS
+    middleware can annotate it correctly.
+    """
+    try:
+        handler = get_route_handler(namespace, name)
+        return handler(*args, **kwargs)
+    except Exception as exc:
+        logger.error("Route handler %s.%s failed: %s", namespace, name, exc, exc_info=True)
+        if fallback is not None:
+            return fallback
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(exc), "handler": f"{namespace}.{name}"},
+        )
+
+
 @router.get("/download")
 def start_download(
     url: str,
@@ -48,8 +74,9 @@ def start_download(
     tags_csv: str = "",
     download_engine: str = "",
 ):
-    start_download_handler = get_route_handler("downloads", "start_download")
-    return start_download_handler(
+    return _safe_handler(
+        "downloads", "start_download",
+        None,
         url=url,
         title=title,
         thumbnail=thumbnail,
@@ -73,8 +100,9 @@ def start_download(
 
 @router.post("/download")
 def start_download_post(payload: DownloadRequest):
-    start_download_handler = get_route_handler("downloads", "start_download")
-    return start_download_handler(
+    return _safe_handler(
+        "downloads", "start_download",
+        None,
         url=payload.url,
         title=payload.title,
         thumbnail=payload.thumbnail,
@@ -98,49 +126,51 @@ def start_download_post(payload: DownloadRequest):
 
 @router.get("/download-status/{dl_id}")
 def download_status(dl_id: str):
-    return get_route_handler("downloads", "download_status")(dl_id)
+    return _safe_handler("downloads", "download_status", None, dl_id)
 
 
 @router.get("/progress/{dl_id}")
 def progress_alias(dl_id: str):
-    return get_route_handler("downloads", "progress_alias")(dl_id)
+    return _safe_handler("downloads", "progress_alias", None, dl_id)
 
 
 @router.get("/downloads")
 def list_downloads():
-    return get_route_handler("downloads", "list_downloads")()
+    # Returns [] on error instead of crashing — prevents CORS-breaking 500 on
+    # startup or if the downloads runtime state hasn't been initialised yet.
+    return _safe_handler("downloads", "list_downloads", [])
 
 
 @router.post("/open-download-folder")
 def open_download_folder(path: str = ""):
-    return get_route_handler("downloads", "open_download_folder")(path)
+    return _safe_handler("downloads", "open_download_folder", None, path)
 
 
 @router.post("/open-local-file")
 def open_local_file(path: str):
-    return get_route_handler("downloads", "open_local_file")(path)
+    return _safe_handler("downloads", "open_local_file", None, path)
 
 
 @router.post("/downloads/{dl_id}/action")
 def download_action(dl_id: str, action: str):
-    return get_route_handler("downloads", "download_action")(dl_id, action)
+    return _safe_handler("downloads", "download_action", None, dl_id, action)
 
 
 @router.delete("/downloads/{dl_id}")
 def delete_download(dl_id: str):
-    return get_route_handler("downloads", "delete_download")(dl_id)
+    return _safe_handler("downloads", "delete_download", None, dl_id)
 
 
 @router.post("/downloads/stop-all")
 def stop_all_downloads():
-    return get_route_handler("downloads", "stop_all_downloads")()
+    return _safe_handler("downloads", "stop_all_downloads", None)
 
 
 @router.get("/runtime/dependencies")
 def get_runtime_dependencies():
-    return get_route_handler("downloads", "get_runtime_dependencies")()
+    return _safe_handler("downloads", "get_runtime_dependencies", {"dependencies": []})
 
 
 @router.post("/runtime/dependencies/install")
 def install_runtime_dependency(dep_id: str):
-    return get_route_handler("downloads", "install_runtime_dependency")(dep_id)
+    return _safe_handler("downloads", "install_runtime_dependency", None, dep_id)

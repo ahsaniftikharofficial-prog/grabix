@@ -248,46 +248,79 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
             parsed_headers = {}
 
     request_headers = _normalize_request_headers(parsed_headers)
+
+    # Add headers that CDNs (bunny.net, MegaCloud) require or strongly prefer.
+    # Without Accept/Accept-Encoding many CDNs return 403 or serve wrong content.
+    request_headers.setdefault("Accept", "*/*")
+    request_headers.setdefault("Accept-Encoding", "gzip, deflate, br")
+    request_headers.setdefault("Accept-Language", "en-US,en;q=0.9")
+    request_headers.setdefault("Sec-Fetch-Mode", "cors")
+    request_headers.setdefault("Sec-Fetch-Site", "cross-site")
+
     range_header = request.headers.get("range")
     if range_header:
         request_headers["Range"] = range_header
 
     try:
-        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
             upstream = client.get(url, headers=request_headers)
     except Exception as exc:
+        # Raise 502 — hls.js will treat this as a fatal network error and
+        # immediately call goToNextSource() instead of retrying for 120 seconds.
         raise HTTPException(status_code=502, detail=f"Stream proxy failed: {exc}") from exc
+
+    # Fail fast on CDN errors: raise an HTTP exception so hls.js gets a proper
+    # error status and triggers its fatal-error handler immediately, rather than
+    # silently retrying for the entire 120-second startup window.
+    if upstream.status_code not in (200, 206):
+        raise HTTPException(
+            status_code=upstream.status_code,
+            detail=f"CDN returned {upstream.status_code} for proxied resource",
+        )
 
     media_type = upstream.headers.get("content-type", "application/octet-stream")
     final_url   = str(upstream.url)
     lowered_url = final_url.lower()
     lowered_media = media_type.lower()
 
-    if ".m3u8" in lowered_url or "mpegurl" in lowered_media:
-        text = upstream.text
+    # Content sniffing: some CDNs return application/octet-stream even for m3u8
+    # playlists, and after redirects the final URL may not contain ".m3u8".
+    # Check the actual body prefix — a valid HLS playlist always starts with
+    # "#EXTM3U" (possibly after a UTF-8 BOM).
+    raw_content = upstream.content
+    text_preview = raw_content[:16].lstrip(b"\xef\xbb\xbf").decode("utf-8", errors="ignore")
+    is_m3u8 = (
+        ".m3u8" in lowered_url
+        or "mpegurl" in lowered_media
+        or text_preview.startswith("#EXTM3U")
+        or text_preview.startswith("#EXT")
+    )
+
+    if is_m3u8:
+        text = raw_content.decode("utf-8", errors="replace")
         rewritten = _rewrite_hls_playlist(text, final_url, headers_json)
         return Response(
             content=rewritten,
             media_type="application/vnd.apple.mpegurl",
-            headers={"Cache-Control": "no-store"},
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )
 
-    response_headers: dict[str, str] = {}
+    response_headers: dict[str, str] = {"Access-Control-Allow-Origin": "*"}
     for header_name in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"):
         header_value = upstream.headers.get(header_name.lower())
         if header_value:
             response_headers[header_name] = header_value
 
-    content = upstream.content
     sniffed_media_type = media_type or "application/octet-stream"
-    if content and content[:1] == b"G":
+    # MPEG-TS segments start with 0x47 sync byte
+    if raw_content and raw_content[:1] == b"G":
         if not sniffed_media_type.lower().startswith(("video/", "audio/")):
             sniffed_media_type = "video/mp2t"
             response_headers["Content-Type"] = sniffed_media_type
 
     return Response(
-        content=content,
-        status_code=upstream.status_code,
+        content=raw_content,
+        status_code=200,
         headers=response_headers,
         media_type=sniffed_media_type,
     )

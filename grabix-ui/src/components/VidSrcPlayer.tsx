@@ -759,6 +759,18 @@ export default function VidSrcPlayer({
           maxMaxBufferLength: isProxied ? 30 : 600,
           backBufferLength: 90,
           startFragPrefetch: true,
+          // Fail fast on proxied anime streams: if the CDN token has expired or
+          // the proxy returns an error, we want hls.js to fire a fatal error
+          // immediately rather than silently retrying for the full 120-second
+          // startup window.  Without these limits hls.js retries with exponential
+          // backoff until the startupTimeout fires, which always shows the
+          // misleading "This source took too long to start." message.
+          manifestLoadingMaxRetry: isProxied ? 1 : 3,
+          manifestLoadingRetryDelay: 1000,
+          fragLoadingMaxRetry: isProxied ? 1 : 3,
+          fragLoadingRetryDelay: 1000,
+          levelLoadingMaxRetry: isProxied ? 1 : 3,
+          levelLoadingRetryDelay: 1000,
         });
         hlsRef.current = hls;
         hls.attachMedia(video);

@@ -1553,8 +1553,8 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
             raw_payload = await _fetch_consumet_json(
                 f"/anime/hianime/watch/{quote(episode_id)}",
                 params={"server": server_name, "category": category},
-                ttl_seconds=180,
-                timeout=6.0,
+                ttl_seconds=10,  # CDN tokens expire quickly; barely cache to avoid stale URLs
+                timeout=25.0,    # hianime extraction can take up to 10+ seconds
             )
             direct_resolution = _convert_hianime_source_payload(raw_payload, server_name, tried)
             if direct_resolution:

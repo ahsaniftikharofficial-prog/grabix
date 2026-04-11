@@ -1052,7 +1052,7 @@ async def get_health_status() -> dict[str, Any]:
         discover_payload = await _fetch_consumet_json(
             "/anime/hianime/top10",
             params={"period": "daily"},
-            ttl_seconds=45,
+            ttl_seconds=10,
             timeout=HEALTH_TIMEOUT,
         )
         discover_items = [item for item in _payload_items(discover_payload) if isinstance(item, dict)]
@@ -1419,7 +1419,7 @@ async def fetch_anime_watch(
                 payload = await _fetch_consumet_json(
                     f"/anime/{provider}/watch/{quote(episode_id)}",
                     params={"server": server_name, "category": category},
-                    ttl_seconds=180,
+                    ttl_seconds=10,  # MegaCloud tokens expire; don't cache stale URLs
                     timeout=ANIME_WATCH_TIMEOUT,
                 )
                 normalized = normalize_watch_payload(
@@ -1474,7 +1474,7 @@ async def fetch_anime_watch(
                     payload = await _fetch_consumet_json(
                         f"/anime/{provider}/watch/{quote(episode_id)}",
                         params={"server": server_name, "category": category},
-                        ttl_seconds=180,
+                        ttl_seconds=10,  # CDN tokens expire quickly; barely cache to avoid stale URLs
                         timeout=ANIME_WATCH_TIMEOUT,
                     )
                     normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio if category == "dub" else "original", server=server_name)
@@ -1492,7 +1492,7 @@ async def fetch_anime_watch(
         payload = await _fetch_consumet_json(
             "/anime/animepahe/watch",
             params={"episodeId": episode_id},
-            ttl_seconds=180,
+            ttl_seconds=10,  # CDN tokens expire quickly; barely cache to avoid stale URLs
             timeout=ANIME_WATCH_TIMEOUT,
         )
         normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio, server=server)
@@ -1504,7 +1504,7 @@ async def fetch_anime_watch(
         payload = await _fetch_consumet_json(
             "/anime/kickassanime/watch",
             params={"episodeId": episode_id},
-            ttl_seconds=180,
+            ttl_seconds=10,  # CDN tokens expire quickly; barely cache to avoid stale URLs
             timeout=ANIME_WATCH_TIMEOUT,
         )
         normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio, server=server)
@@ -1514,7 +1514,7 @@ async def fetch_anime_watch(
 
     payload = await _fetch_consumet_json(
         f"/anime/{provider}/watch/{quote(episode_id)}",
-        ttl_seconds=180,
+        ttl_seconds=10,
         timeout=ANIME_WATCH_TIMEOUT,
     )
     normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio, server=server)

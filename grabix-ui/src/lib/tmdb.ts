@@ -11,13 +11,34 @@ function buildMetadataUrl(path: string): string {
   return `${BACKEND_API}${path}`;
 }
 
-async function fetchCachedMetadata<T>(key: string, path: string, ttlMs = 180_000): Promise<T> {
-  return await getCachedJson<T>({
-    key,
-    url: buildMetadataUrl(path),
-    ttlMs,
-    scope: "session",
-  });
+/**
+ * Fetch cached metadata, gracefully returning null on 503/429/network errors
+ * instead of throwing — prevents unhandled-rejection CORS noise in the console
+ * when TMDB is temporarily unavailable.
+ */
+async function fetchCachedMetadata<T>(
+  key: string,
+  path: string,
+  ttlMs = 180_000
+): Promise<T | null> {
+  try {
+    return await getCachedJson<T>({
+      key,
+      url: buildMetadataUrl(path),
+      ttlMs,
+      scope: "session",
+      mapError: async (response) => {
+        if (response.status === 503) return "TMDB service temporarily unavailable (503)";
+        if (response.status === 429) return "TMDB rate limit exceeded (429)";
+        if (response.status === 401) return "TMDB API key not configured (401)";
+        return `Metadata request failed with ${response.status}`;
+      },
+    });
+  } catch {
+    // Network errors, TMDB down, API key missing — all silently return null so
+    // the rest of the UI can continue working without TMDB.
+    return null;
+  }
 }
 
 export async function discoverTmdbMedia(
@@ -63,5 +84,5 @@ export async function fetchTmdbSeasonMap(id: number): Promise<Array<{ season: nu
     `metadata:tmdb:tv-season-map:${id}`,
     `/metadata/tmdb/tv-season-map?id=${id}`
   );
-  return payload.seasons ?? [];
+  return payload?.seasons ?? [];
 }
