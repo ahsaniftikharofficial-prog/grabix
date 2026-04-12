@@ -31,6 +31,7 @@ const DownloaderPage = lazy(() => import("./pages/DownloaderPage"));
 const ConverterPage = lazy(() => import("./pages/ConverterPage"));
 const LibraryPage = lazy(() => import("./pages/LibraryPage"));
 const AnimePage = lazy(() => import("./pages/AnimePage"));
+const AnimePageV2 = lazy(() => import("./pages/AnimePageV2"));
 const MangaPage = lazy(() => import("./pages/MangaPage"));
 const ExplorePage = lazy(() => import("./pages/ExplorePage"));
 const MoviesPage = lazy(() => import("./pages/MoviesPage"));
@@ -219,6 +220,7 @@ function Inner() {
     converter:  <ErrorBoundary section="Converter"><ConverterPage /></ErrorBoundary>,
     library:    <ErrorBoundary section="Library"><LibraryPage /></ErrorBoundary>,
     anime:      <ErrorBoundary section="Anime"><AnimePage /></ErrorBoundary>,
+    animev2:    <ErrorBoundary section="AnimeV2"><AnimePageV2 /></ErrorBoundary>,
     manga:      <ErrorBoundary section="Manga"><MangaPage /></ErrorBoundary>,
     explore:    <ErrorBoundary section="Explore"><ExplorePage /></ErrorBoundary>,
     movies:     <ErrorBoundary section="Movies"><MoviesPage /></ErrorBoundary>,

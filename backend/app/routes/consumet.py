@@ -203,6 +203,63 @@ async def consumet_meta_info(
         return JSONResponse(status_code=502, content={"error": str(exc)})
 
 
+@router.get("/watch/anime/raw")
+async def consumet_watch_anime_raw(
+    episode_id: str = Query(..., min_length=1),
+    server: str = Query("vidcloud"),
+    category: str = Query("sub"),
+):
+    """
+    Raw pass-through of the Consumet watch call — no normalization, no filtering.
+    Mirrors anime.py exactly:
+      GET http://localhost:3000/anime/hianime/watch/{episodeId}?server=vidcloud&category=sub
+    Returns whatever Consumet gives back, including embed sources.
+    Frontend uses this to bypass the broken provider resolution chain.
+    """
+    import httpx
+    from urllib.parse import quote as urlquote
+    from app.services.consumet import get_consumet_api_base
+
+    base = get_consumet_api_base()
+    url = f"{base}/anime/hianime/watch/{urlquote(episode_id, safe='')}"
+    servers_to_try = [server] if server not in ("auto", "") else ["vidcloud", "vidstreaming"]
+    if server not in servers_to_try:
+        servers_to_try.append("vidcloud" if server == "vidstreaming" else "vidstreaming")
+
+    last_error = ""
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        for srv in servers_to_try:
+            try:
+                r = await client.get(url, params={"server": srv, "category": category})
+                if r.status_code >= 400:
+                    last_error = f"Consumet returned HTTP {r.status_code} for server={srv}"
+                    continue
+                data = r.json()
+                sources = data.get("sources") or []
+                if not sources:
+                    last_error = f"No sources from server={srv}"
+                    continue
+                # Return raw Consumet payload with server info attached
+                data["_server_used"] = srv
+                data["_category_used"] = category
+                return JSONResponse(content=data)
+            except Exception as exc:
+                last_error = str(exc)
+                continue
+
+    # All servers failed — return empty payload with diagnostic info
+    return JSONResponse(
+        status_code=502,
+        content={
+            "sources": [],
+            "subtitles": [],
+            "error": last_error or "No sources found",
+            "_tried_servers": servers_to_try,
+            "_episode_id": episode_id,
+        },
+    )
+
+
 @router.get("/proxy")
 async def consumet_proxy(
     url: str = Query(..., min_length=8),
