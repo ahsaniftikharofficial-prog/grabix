@@ -193,6 +193,106 @@ async function getMegaCloudKeys() {
   }
 }
 
+// ── Live key extraction from MegaCloud embed page ────────────────────────────
+// The _k value MegaCloud validates is embedded in their own player JavaScript.
+// We scrape it at call-time so we're never blocked by stale third-party key repos.
+async function scrapeKeyFromEmbedPage(embedPageUrl, embedDomain, fullUA, refererBase) {
+  // Regex patterns covering all known ways the key appears in minified player JS
+  const KEY_REGEXES = [
+    /_k\s*[:=]\s*["'`]([A-Za-z0-9]{20,})["'`]/g,
+    /[?&]_k=["'`]?([A-Za-z0-9]{20,})["'`]?/g,
+    /clientKey\s*[:=]\s*["'`]([A-Za-z0-9]{20,})["'`]/g,
+    /"_k"\s*:\s*"([A-Za-z0-9]{20,})"/g,
+    /\bkey\s*[:=]\s*["'`]([A-Za-z0-9]{30,})["'`]/g,
+  ];
+  function findKeysIn(content) {
+    const found = new Set();
+    for (const re of KEY_REGEXES) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(content)) !== null) found.add(m[1]);
+    }
+    return [...found];
+  }
+
+  const result = { pageStatus: null, cookie: "", scriptsFetched: [], keysFound: [], error: null };
+
+  try {
+    const pageResp = await axios.get(embedPageUrl, {
+      headers: {
+        "User-Agent": fullUA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": refererBase,
+        "sec-fetch-dest": "iframe",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "cross-site",
+      },
+      timeout: 15000,
+    });
+    result.pageStatus = pageResp.status;
+
+    const setCookieArr = pageResp.headers["set-cookie"];
+    if (setCookieArr) {
+      result.cookie = (Array.isArray(setCookieArr) ? setCookieArr : [setCookieArr])
+        .map((c) => c.split(";")[0]).join("; ");
+    }
+
+    const html = typeof pageResp.data === "string" ? pageResp.data : "";
+
+    // 1. Search inline HTML (data-attributes, inline <script> blocks)
+    result.keysFound.push(...findKeysIn(html));
+
+    // 2. Cheerio: check data-key / data-_k attributes on any element
+    const $ = cheerio.load(html);
+    $("[data-key],[data-_k],[data-client-key]").each((_, el) => {
+      const k = $(el).attr("data-key") || $(el).attr("data-_k") || $(el).attr("data-client-key") || "";
+      if (/^[A-Za-z0-9]{20,}$/.test(k)) result.keysFound.push(k);
+    });
+
+    // 3. Fetch external player scripts and search them
+    // Skip well-known third-party CDN scripts that won't contain MegaCloud's key
+    const SKIP_HOSTS = ["jquery", "bootstrap", "fontawesome", "googleapis", "cloudflare",
+                        "gtag", "analytics", "recaptcha", "sentry", "pusher"];
+    const scriptSrcs = [];
+    $("script[src]").each((_, el) => {
+      const src = String($(el).attr("src") || "");
+      if (!src || SKIP_HOSTS.some((s) => src.includes(s))) return;
+      const full = src.startsWith("http")
+        ? src
+        : `https://${embedDomain}${src.startsWith("/") ? src : "/" + src}`;
+      scriptSrcs.push(full);
+    });
+
+    const jsHeaders = {
+      "User-Agent": fullUA,
+      "Accept": "*/*",
+      "Referer": embedPageUrl,
+      "sec-fetch-dest": "script",
+      "sec-fetch-mode": "no-cors",
+      "sec-fetch-site": "same-origin",
+    };
+    for (const src of scriptSrcs) {
+      try {
+        const jsResp = await axios.get(src, { headers: jsHeaders, timeout: 12000 });
+        const js = typeof jsResp.data === "string" ? jsResp.data : "";
+        const jsKeys = findKeysIn(js);
+        result.scriptsFetched.push({ url: src.substring(0, 100), size: js.length, keys: jsKeys.length });
+        result.keysFound.push(...jsKeys);
+      } catch (e) {
+        result.scriptsFetched.push({ url: src.substring(0, 100), error: e.message });
+      }
+    }
+
+    result.keysFound = [...new Set(result.keysFound)];
+  } catch (e) {
+    result.error = e.message;
+    result.pageStatus = e.response?.status ?? "network_error";
+  }
+
+  return result;
+}
+
 // Shared result builder for extractMegaCloud
 function buildMegaCloudResult(data, embedUrl) {
   const rawSources = Array.isArray(data.sources) ? data.sources : [];
@@ -218,25 +318,34 @@ async function extractMegaCloud(link) {
   const sourceId = pathParts[pathParts.length - 1];
   if (!sourceId) throw new Error("Unable to extract MegaCloud source id from: " + link);
 
-  // megacloud.blog domain expired — always use megacloud.tv
   const embedDomain = "megacloud.tv";
-  const embedPageUrl = `https://${embedDomain}/embed-2/v3/e-1/${sourceId}`;
+  const kParam = embedUrl.searchParams.get("k") || "1";
+  const embedPageUrl = `https://${embedDomain}/embed-2/v3/e-1/${sourceId}?k=${kParam}`;
+  const fullUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-  const keys = await getMegaCloudKeys();
-  const keyCandidates = [keys.rabbit, keys.mega, keys.vidstr].filter(Boolean);
+  // Scrape the live _k from MegaCloud's own embed page JS — primary strategy.
+  // Stale static repos (yogesh-hacker) are a fallback only; MegaCloud rotates keys.
+  const scraped = await scrapeKeyFromEmbedPage(embedPageUrl, embedDomain, fullUA, `${siteBase}/`);
 
-  const referers = [
-    `${siteBase}/`,
-    `https://${embedDomain}/`,
-    embedPageUrl,
-  ];
+  // Build candidate list: live scraped keys first, static fallbacks at the end
+  const staticKeys = await getMegaCloudKeys();
+  const staticCandidates = [staticKeys.rabbit, staticKeys.mega, staticKeys.vidstr].filter(Boolean);
+  const keyCandidates = [...new Set([...scraped.keysFound, ...staticCandidates])];
+
+  if (keyCandidates.length === 0) throw new Error("MegaCloud: no key candidates available (scrape + static both empty)");
 
   const commonHeaders = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "User-Agent": fullUA,
     "X-Requested-With": "XMLHttpRequest",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+    ...(scraped.cookie ? { Cookie: scraped.cookie } : {}),
   };
+
+  const referers = [embedPageUrl, `${siteBase}/`, `https://${embedDomain}/`];
 
   let data = null;
   let lastError = "";
@@ -769,18 +878,38 @@ async function route(pathname, searchParams) {
       const linkData = typeof linkResp.data === "string" ? JSON.parse(linkResp.data) : linkResp.data;
       debug.steps.step2_embed_link = { ok: true, server: first, data: linkData };
 
-      // Step 3: MegaCloud getSources — try all key+referer combos on megacloud.tv
+
+      // Steps 2.5 + 3: Scrape the live _k from MegaCloud's embed page JS, then call getSources.
       const link = String(linkData?.link || "");
       if (link.includes("megacloud")) {
         const embedUrl2 = new URL(link);
         const pathParts2 = embedUrl2.pathname.split("/").filter(Boolean);
         const sourceId = pathParts2[pathParts2.length - 1];
         const embedDomain = "megacloud.tv";
-        const embedPageUrl = `https://${embedDomain}/embed-2/v3/e-1/${sourceId}`;
+        const kParam2 = embedUrl2.searchParams.get("k") || "1";
+        const embedPageUrl = `https://${embedDomain}/embed-2/v3/e-1/${sourceId}?k=${kParam2}`;
+        const fullUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-        const keys = await getMegaCloudKeys();
-        const keyCandidates = [keys.rabbit, keys.mega, keys.vidstr].filter(Boolean);
-        const referers = [`${siteBase}/`, `https://${embedDomain}/`, embedPageUrl];
+        // Step 2.5: Scrape live key from embed page + its JS files
+        const scraped = await scrapeKeyFromEmbedPage(embedPageUrl, embedDomain, fullUA, `${siteBase}/`);
+        debug.steps.step2_5_embed_preload = {
+          url: embedPageUrl,
+          page_status: scraped.pageStatus,
+          cookies_captured: scraped.cookie ? scraped.cookie.substring(0, 200) : "NONE",
+          scripts_fetched: scraped.scriptsFetched,
+          keys_scraped: scraped.keysFound.map((k) => k.substring(0, 12) + "..."),
+          keys_scraped_count: scraped.keysFound.length,
+          error: scraped.error,
+          verdict: scraped.keysFound.length > 0
+            ? `✅ Found ${scraped.keysFound.length} key candidate(s) from embed page`
+            : "⚠️ No keys found in embed page — will fall back to static keys",
+        };
+
+        // Step 3: try scraped keys first, then static fallbacks
+        const staticKeys = await getMegaCloudKeys();
+        const staticCandidates = [staticKeys.rabbit, staticKeys.mega, staticKeys.vidstr].filter(Boolean);
+        const keyCandidates = [...new Set([...scraped.keysFound, ...staticCandidates])];
+        const referers = [embedPageUrl, `${siteBase}/`, `https://${embedDomain}/`];
 
         const attempts = [];
         let mcData = null;
@@ -793,23 +922,38 @@ async function route(pathname, searchParams) {
             try {
               const r = await axios.get(url, {
                 headers: {
-                  Referer: referer,
-                  Origin: `https://${embedDomain}`,
-                  "User-Agent": "Mozilla/5.0",
+                  "User-Agent": fullUA,
                   "X-Requested-With": "XMLHttpRequest",
-                  Accept: "application/json, text/plain, */*",
+                  "Accept": "application/json, text/plain, */*",
+                  "Accept-Language": "en-US,en;q=0.9",
+                  "Referer": referer,
+                  "Origin": `https://${embedDomain}`,
+                  "sec-fetch-dest": "empty",
+                  "sec-fetch-mode": "cors",
+                  "sec-fetch-site": "same-origin",
+                  ...(scraped.cookie ? { Cookie: scraped.cookie } : {}),
                 },
                 timeout: 10000,
               });
               const d = r.data;
               if (d && ((Array.isArray(d.sources) && d.sources.length > 0) || (d?.encrypted && typeof d?.sources === "string"))) {
                 mcData = d;
-                winningCombo = `referer=${referer} key=${key.substring(0,8)}...`;
+                winningCombo = `referer=${referer} key=${key.substring(0, 8)}... (${scraped.keysFound.includes(key) ? "SCRAPED" : "static"})`;
                 break outerDebug;
               }
-              attempts.push({ referer: referer.substring(0,40), key: key.substring(0,8)+"...", status: "ok_but_empty" });
+              attempts.push({ referer: referer.substring(0, 60), key: key.substring(0, 8) + "...", status: "ok_but_empty" });
             } catch (e) {
-              attempts.push({ referer: referer.substring(0,40), key: key.substring(0,8)+"...", error: e.message });
+              const errBody = e.response?.data;
+              attempts.push({
+                referer: referer.substring(0, 60),
+                key: key.substring(0, 8) + "...",
+                key_source: scraped.keysFound.includes(key) ? "SCRAPED" : "static",
+                http_status: e.response?.status,
+                error: e.message,
+                error_body: errBody
+                  ? (typeof errBody === "string" ? errBody : JSON.stringify(errBody)).substring(0, 200)
+                  : null,
+              });
             }
           }
         }
@@ -818,7 +962,9 @@ async function route(pathname, searchParams) {
           ok: Boolean(mcData),
           sourceId,
           embedDomain,
-          keys_found: keyCandidates.map(k => k.substring(0,8)+"..."),
+          keys_tried: keyCandidates.length,
+          keys_from_scrape: scraped.keysFound.length,
+          keys_from_static: staticCandidates.length,
           winningCombo: winningCombo || "NONE — all failed",
           failed_attempts: attempts,
           encrypted: mcData?.encrypted,
@@ -826,11 +972,12 @@ async function route(pathname, searchParams) {
           sources_count: Array.isArray(mcData?.sources) ? mcData.sources.length : "N/A",
           has_key_field: Boolean(mcData?.key),
           tracks_count: Array.isArray(mcData?.tracks) ? mcData.tracks.length : 0,
-          verdict: !mcData ? "❌ All combinations failed — see failed_attempts"
+          verdict: !mcData
+            ? "❌ All combinations failed — see failed_attempts[].error_body"
             : !mcData?.encrypted && Array.isArray(mcData?.sources) && mcData.sources.length > 0
             ? "✅ UNENCRYPTED — sources ready"
             : mcData?.encrypted && mcData?.key
-            ? "⚠️ ENCRYPTED but key present"
+            ? "⚠️ ENCRYPTED but server key present"
             : "❌ Unknown state",
         };
       } else {
