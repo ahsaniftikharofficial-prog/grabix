@@ -68,7 +68,7 @@ function makeApi(base: string) {
     },
     async ping(): Promise<boolean> {
       try {
-        const r = await fetch(`${b}/anime/hianime/home`, { signal: AbortSignal.timeout(3500) });
+        const r = await fetch(`${b}/`, { signal: AbortSignal.timeout(3500) });
         return r.ok;
       } catch { return false; }
     },
@@ -290,9 +290,9 @@ export default function AnimePageV2() {
     const title = animeInfo?.anime?.info?.name ?? selectedAnime?.title ?? "Anime";
     const poster = animeInfo?.anime?.info?.poster ?? selectedAnime?.image;
     const episodes = animeInfo?.episodes ?? [];
-    const subs = (data.subtitles ?? []).filter(s => s.url && s.lang).map(s => ({ label: s.lang!, language: s.lang!.slice(0,2).toLowerCase(), url: s.url! }));
+    const subs = (data.subtitles ?? []).filter(s => s.url && s.lang).map((s, i) => ({ id: `sub-${i}`, label: s.lang!, language: s.lang!.slice(0,2).toLowerCase(), url: s.url! }));
     const buildSources = (d: HiAnimeWatch): StreamSource[] =>
-      (d.sources ?? []).map((s, i) => ({ id: `h-${i}`, label: s.quality ?? "Auto", provider: "HiAnime", kind: s.isM3U8 ? "hls" : "mp4", url: s.url, quality: s.quality, subtitles: subs }));
+      (d.sources ?? []).map((s, i) => ({ id: `h-${i}`, label: s.quality ?? "Auto", provider: "HiAnime", kind: s.isM3U8 ? "hls" : "direct", url: s.url, quality: s.quality, subtitles: subs }));
 
     setPlayer({
       title, poster, sources: buildSources(data),
@@ -303,7 +303,7 @@ export default function AnimePageV2() {
         const target = episodes.find(e => e.number === n);
         if (!target) throw new Error("Episode not found");
         const nd = await api().watch(target.id, server, category);
-        const ns = (nd.subtitles ?? []).filter(s => s.url && s.lang).map(s => ({ label: s.lang!, language: s.lang!.slice(0,2).toLowerCase(), url: s.url! }));
+        
         return { sources: buildSources({ ...nd, subtitles: nd.subtitles }), subtitle: `${category === "sub" ? "SUB" : "DUB"} · Ep ${n}` };
       },
     });
