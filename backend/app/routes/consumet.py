@@ -25,6 +25,86 @@ router = APIRouter()
 logger = logging.getLogger("consumet.routes")
 
 
+# ---------------------------------------------------------------------------
+# Helpers (used by /anime/stream and /anime/debug-stream)
+# ---------------------------------------------------------------------------
+
+def _title_score(result_title: str, query: str) -> int:
+    """Simple scoring — higher is better match."""
+    r = result_title.lower().strip()
+    q = query.lower().strip()
+    if r == q:
+        return 100
+    if r.startswith(q) or q.startswith(r):
+        return 80
+    q_words = set(q.split())
+    r_words = set(r.split())
+    overlap = len(q_words & r_words)
+    return overlap * 10
+
+
+def _safe_error_body(response) -> str:
+    """Extract a readable error string from a non-2xx httpx response."""
+    try:
+        body = response.json()
+        return str(body.get("detail") or body.get("error") or body.get("message") or body)[:400]
+    except Exception:
+        return response.text[:400].strip()
+
+
+def _build_sidecar_hint(attempt_errors: list[str]) -> str:
+    """Turn the raw list of sidecar error strings into a human-readable fix hint."""
+    combined = " ".join(attempt_errors).lower()
+
+    if not attempt_errors:
+        return "No attempt was made — the sidecar may be unreachable."
+
+    if "connection refused" in combined or "connect call failed" in combined:
+        return (
+            "The consumet sidecar is NOT running. "
+            "Open a terminal and run: cd consumet-local && node server.cjs"
+        )
+
+    if "aniwatch" in combined and ("outdated" in combined or "megacloud" in combined):
+        return (
+            "The aniwatch npm package is outdated. "
+            "Fix: cd consumet-local && npm update aniwatch && node server.cjs"
+        )
+
+    if "encrypted" in combined and "no key" in combined:
+        return (
+            "MegaCloud is using encrypted sources and the current key is missing. "
+            "Fix: cd consumet-local && npm update aniwatch && node server.cjs"
+        )
+
+    if "encrypted" in combined:
+        return (
+            "MegaCloud encryption detected. The aniwatch package may need updating. "
+            "Fix: cd consumet-local && npm update aniwatch && node server.cjs"
+        )
+
+    if "invalid episode id" in combined:
+        return (
+            "The episode ID format was rejected by the sidecar. "
+            "This is a bug — please report it with the _episode_id value."
+        )
+
+    if "502" in combined or "bad gateway" in combined:
+        return (
+            "The sidecar itself is returning errors. "
+            "Try: cd consumet-local && npm update aniwatch && node server.cjs"
+        )
+
+    return (
+        "The episode may not be available on HiAnime yet, or the sidecar needs a restart. "
+        "Try: cd consumet-local && node server.cjs"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Standard pass-through endpoints
+# ---------------------------------------------------------------------------
+
 @router.get("/health")
 async def consumet_health():
     try:
@@ -203,40 +283,12 @@ async def consumet_meta_info(
         return JSONResponse(status_code=502, content={"error": str(exc)})
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  /anime/stream  —  the anime.py flow, fully replicated inside the backend
+# ---------------------------------------------------------------------------
+#  /anime/stream  — full anime.py pipeline, server-side
 #
-#  anime.py does:
-#    1. GET /anime/hianime/{query}           → search results
-#    2. pick best match, grab anime_id
-#    3. GET /anime/hianime/info?id={id}      → episode list with real ep IDs
-#    4. pick episode, grab ep_id
-#    5. GET /anime/hianime/watch/{ep_id}?server=vidcloud&category=sub  → stream
-#
-#  This endpoint does EXACTLY that, server-side, so the browser never has to
-#  touch port 3000 and CORS is not a factor.
-#
-#  The frontend passes:
-#    title       — anime title to search for (use original/alt title too)
-#    episode     — episode number (1-based)
-#    audio       — "sub" or "dub"
-#    anime_id    — optional known HiAnime ID (skips search step if provided)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _title_score(result_title: str, query: str) -> int:
-    """Simple scoring — higher is better match."""
-    r = result_title.lower().strip()
-    q = query.lower().strip()
-    if r == q:
-        return 100
-    if r.startswith(q) or q.startswith(r):
-        return 80
-    # word overlap
-    q_words = set(q.split())
-    r_words = set(r.split())
-    overlap = len(q_words & r_words)
-    return overlap * 10
-
+#  Steps:  search → pick best match → info/episodes → watch
+#  Captures the real sidecar error body from every failed attempt (KEY FIX).
+# ---------------------------------------------------------------------------
 
 @router.get("/anime/stream")
 async def consumet_anime_stream(
@@ -248,10 +300,7 @@ async def consumet_anime_stream(
 ):
     """
     Full anime.py streaming pipeline, server-side.
-
-    Replicates anime.py steps 1-7 exactly:
-      search → pick best match → info/episodes → watch
-    Returns the raw Consumet payload (sources + subtitles).
+    Returns stream sources + subtitles, or a detailed error with _attempt_errors.
     """
     import httpx
     from urllib.parse import quote as urlquote
@@ -265,10 +314,9 @@ async def consumet_anime_stream(
     async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as client:
 
         # ── Step 1: Resolve anime ID ─────────────────────────────────────────
-        resolved_id: str | None = anime_id  # use caller's hint if present
+        resolved_id: str | None = anime_id
 
         if not resolved_id:
-            # Search by title (mirrors anime.py step 1)
             search_titles = [title]
             if alt_title and alt_title.strip() and alt_title.strip() != title.strip():
                 search_titles.append(alt_title.strip())
@@ -280,12 +328,15 @@ async def consumet_anime_stream(
                         timeout=15.0,
                     )
                     if r.status_code >= 400:
+                        logger.warning(
+                            "anime/stream: search HTTP %d for '%s' — sidecar: %s",
+                            r.status_code, search_term, _safe_error_body(r),
+                        )
                         continue
                     data = r.json()
                     results = data.get("results") or []
                     if not results:
                         continue
-                    # Pick best title match
                     best = max(results, key=lambda x: _title_score(str(x.get("title", "")), search_term))
                     resolved_id = str(best.get("id", ""))
                     if resolved_id:
@@ -300,13 +351,21 @@ async def consumet_anime_stream(
                 content={
                     "sources": [],
                     "subtitles": [],
-                    "error": f"Could not find '{title}' on HiAnime. Check the title spelling.",
+                    "error": (
+                        f"Could not find '{title}' on HiAnime. "
+                        "Check the title spelling, or try the original Japanese title."
+                    ),
                     "_step": "search",
+                    "_sidecar_hint": (
+                        "If HiAnime search consistently fails, check that the consumet sidecar "
+                        "is running: open a terminal and run 'cd consumet-local && node server.cjs'"
+                    ),
                 },
             )
 
-        # ── Step 2: Get episode list (mirrors anime.py step 3) ───────────────
+        # ── Step 2: Get episode list ─────────────────────────────────────────
         ep_id: str | None = None
+        info_error: str = ""
         try:
             r2 = await client.get(
                 f"{base}/anime/hianime/info",
@@ -316,14 +375,20 @@ async def consumet_anime_stream(
             if r2.status_code < 400:
                 data2 = r2.json()
                 episodes = data2.get("episodes") or []
-                # Find by number, fallback to index
                 ep_obj = next((e for e in episodes if e.get("number") == episode), None)
                 if ep_obj is None and episodes:
                     idx = min(episode - 1, len(episodes) - 1)
                     ep_obj = episodes[idx]
                 if ep_obj:
                     ep_id = str(ep_obj.get("id") or ep_obj.get("episodeId") or "")
+            else:
+                info_error = _safe_error_body(r2)
+                logger.warning(
+                    "anime/stream: info HTTP %d for id=%s — sidecar: %s",
+                    r2.status_code, resolved_id, info_error,
+                )
         except Exception as exc:
+            info_error = str(exc)
             logger.warning("anime/stream: info fetch failed for id=%s: %s", resolved_id, exc)
 
         if not ep_id:
@@ -332,14 +397,25 @@ async def consumet_anime_stream(
                 content={
                     "sources": [],
                     "subtitles": [],
-                    "error": f"Episode {episode} not found for '{title}' (id={resolved_id}).",
+                    "error": (
+                        f"Episode {episode} not found for '{title}' "
+                        f"(anime_id={resolved_id}). "
+                        + (f"Sidecar error: {info_error}" if info_error else "")
+                    ),
                     "_step": "info",
                     "_anime_id": resolved_id,
+                    "_sidecar_error": info_error,
+                    "_sidecar_hint": (
+                        "The sidecar returned no episode list. "
+                        "Try restarting it: 'cd consumet-local && node server.cjs'"
+                    ),
                 },
             )
 
-        # ── Step 3: Get stream (mirrors anime.py step 7) ─────────────────────
-        # Try preferred audio first, then fallback audio — exactly like anime.py
+        # ── Step 3: Get stream ───────────────────────────────────────────────
+        # KEY FIX: capture actual sidecar error body from every failed attempt.
+        attempt_errors: list[str] = []
+
         for cat in [category, fallback_category]:
             for srv in servers:
                 try:
@@ -349,10 +425,13 @@ async def consumet_anime_stream(
                         params={"server": srv, "category": cat},
                         timeout=35.0,
                     )
+
                     if r3.status_code >= 400:
-                        logger.debug(
-                            "anime/stream: watch HTTP %d for ep=%s server=%s cat=%s",
-                            r3.status_code, ep_id, srv, cat,
+                        sidecar_err = _safe_error_body(r3)
+                        attempt_errors.append(f"{srv}/{cat}: HTTP {r3.status_code} — {sidecar_err}")
+                        logger.warning(
+                            "anime/stream: watch HTTP %d ep=%s server=%s cat=%s — sidecar: %s",
+                            r3.status_code, ep_id, srv, cat, sidecar_err,
                         )
                         continue
 
@@ -360,13 +439,14 @@ async def consumet_anime_stream(
                     sources = data3.get("sources") or []
 
                     if not sources:
+                        inner_err = data3.get("error") or data3.get("detail") or "empty sources array"
+                        attempt_errors.append(f"{srv}/{cat}: 200 OK but no sources — {inner_err}")
                         logger.debug(
-                            "anime/stream: empty sources for ep=%s server=%s cat=%s",
-                            ep_id, srv, cat,
+                            "anime/stream: empty sources for ep=%s server=%s cat=%s — %s",
+                            ep_id, srv, cat, inner_err,
                         )
                         continue
 
-                    # ✓ Got sources — attach diagnostic fields and return
                     data3["_anime_id"] = resolved_id
                     data3["_episode_id"] = ep_id
                     data3["_server_used"] = srv
@@ -378,12 +458,19 @@ async def consumet_anime_stream(
                     return JSONResponse(content=data3)
 
                 except Exception as exc:
+                    attempt_errors.append(f"{srv}/{cat}: exception — {exc}")
                     logger.warning(
-                        "anime/stream: watch error ep=%s server=%s cat=%s: %s",
+                        "anime/stream: watch exception ep=%s server=%s cat=%s: %s",
                         ep_id, srv, cat, exc,
                     )
 
-        # All server/category combos failed
+        # All attempts failed
+        hint = _build_sidecar_hint(attempt_errors)
+        logger.error(
+            "anime/stream: all attempts failed for '%s' ep%d (id=%s ep_id=%s). Errors: %s",
+            title, episode, resolved_id, ep_id, attempt_errors,
+        )
+
         return JSONResponse(
             status_code=502,
             content={
@@ -392,18 +479,261 @@ async def consumet_anime_stream(
                 "error": (
                     f"No playable stream found for '{title}' episode {episode}. "
                     f"Tried vidcloud + vidstreaming ({category.upper()} + {fallback_category.upper()}). "
-                    f"The episode may not be available on HiAnime yet, or the sidecar needs a restart."
+                    f"{hint}"
                 ),
                 "_anime_id": resolved_id,
                 "_episode_id": ep_id,
                 "_step": "watch",
+                "_attempt_errors": attempt_errors,
+                "_sidecar_hint": hint,
             },
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  /watch/anime/raw  —  kept as-is for backward compatibility
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+#  /anime/debug-stream  — same pipeline but returns every intermediate result
+# ---------------------------------------------------------------------------
+
+@router.get("/anime/debug-stream")
+async def consumet_anime_debug_stream(
+    title: str = Query(..., min_length=1),
+    episode: int = Query(1, ge=1),
+    audio: str = Query("sub"),
+    anime_id: str | None = Query(None),
+    alt_title: str | None = Query(None),
+):
+    """
+    Diagnostic endpoint — runs the full anime pipeline and returns every
+    intermediate result so you can see exactly which step is failing.
+    """
+    import httpx
+    from urllib.parse import quote as urlquote
+    from app.services.consumet import get_consumet_api_base
+
+    base = get_consumet_api_base()
+    report: dict = {
+        "title": title,
+        "episode": episode,
+        "audio": audio,
+        "anime_id_hint": anime_id,
+        "sidecar_base": base,
+        "sidecar_reachable": False,
+        "step1_search": {},
+        "step2_info": {},
+        "step3_watch": [],
+        "verdict": "",
+    }
+
+    async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as client:
+
+        # Sidecar health check
+        try:
+            hc = await client.get(f"{base}/", timeout=5.0)
+            report["sidecar_reachable"] = hc.status_code < 500
+            try:
+                report["sidecar_home"] = hc.json()
+            except Exception:
+                report["sidecar_home"] = hc.text[:200]
+        except Exception as exc:
+            report["sidecar_reachable"] = False
+            report["sidecar_home"] = f"ERROR: {exc}"
+            report["verdict"] = (
+                f"Sidecar is NOT reachable at {base}. "
+                "Run: cd consumet-local && node server.cjs"
+            )
+            return JSONResponse(content=report)
+
+        # Step 1: Search
+        resolved_id: str | None = anime_id
+        step1: dict = {"skipped": bool(anime_id), "anime_id_used": anime_id}
+
+        if not resolved_id:
+            search_titles = [title]
+            if alt_title and alt_title.strip() and alt_title.strip() != title.strip():
+                search_titles.append(alt_title.strip())
+
+            step1["attempts"] = []
+            for search_term in search_titles:
+                attempt: dict = {"query": search_term}
+                try:
+                    r = await client.get(
+                        f"{base}/anime/hianime/{urlquote(search_term)}", timeout=15.0
+                    )
+                    attempt["status"] = r.status_code
+                    if r.status_code < 400:
+                        data = r.json()
+                        results = data.get("results") or []
+                        attempt["result_count"] = len(results)
+                        attempt["top5"] = [
+                            {"id": x.get("id"), "title": x.get("title")} for x in results[:5]
+                        ]
+                        if results:
+                            best = max(
+                                results,
+                                key=lambda x: _title_score(str(x.get("title", "")), search_term),
+                            )
+                            resolved_id = str(best.get("id", ""))
+                            attempt["chosen_id"] = resolved_id
+                            attempt["chosen_title"] = best.get("title")
+                    else:
+                        attempt["error"] = _safe_error_body(r)
+                except Exception as exc:
+                    attempt["error"] = str(exc)
+                step1["attempts"].append(attempt)
+                if resolved_id:
+                    break
+
+        step1["resolved_id"] = resolved_id
+        report["step1_search"] = step1
+
+        if not resolved_id:
+            report["verdict"] = (
+                f"FAILED at step 1 (search). Could not find '{title}' on HiAnime. "
+                "Try the Japanese title, or check that the sidecar can reach aniwatchtv.to"
+            )
+            return JSONResponse(content=report)
+
+        # Step 2: Info / episode list
+        ep_id: str | None = None
+        step2: dict = {"anime_id": resolved_id}
+        try:
+            r2 = await client.get(
+                f"{base}/anime/hianime/info", params={"id": resolved_id}, timeout=20.0
+            )
+            step2["status"] = r2.status_code
+            if r2.status_code < 400:
+                data2 = r2.json()
+                episodes = data2.get("episodes") or []
+                step2["total_episodes"] = len(episodes)
+                step2["sub_count"] = data2.get("subEpisodeCount", "?")
+                step2["dub_count"] = data2.get("dubEpisodeCount", "?")
+                step2["first5_episodes"] = [
+                    {"number": e.get("number"), "id": e.get("id"), "title": e.get("title")}
+                    for e in episodes[:5]
+                ]
+                ep_obj = next((e for e in episodes if e.get("number") == episode), None)
+                if ep_obj is None and episodes:
+                    idx = min(episode - 1, len(episodes) - 1)
+                    ep_obj = episodes[idx]
+                if ep_obj:
+                    ep_id = str(ep_obj.get("id") or ep_obj.get("episodeId") or "")
+                    step2["ep_obj"] = ep_obj
+                    step2["ep_id"] = ep_id
+                else:
+                    step2["error"] = f"Episode {episode} not found in list of {len(episodes)}"
+            else:
+                step2["error"] = _safe_error_body(r2)
+        except Exception as exc:
+            step2["error"] = str(exc)
+
+        report["step2_info"] = step2
+
+        if not ep_id:
+            report["verdict"] = (
+                f"FAILED at step 2 (info). "
+                f"Could not resolve episode {episode} for anime_id={resolved_id}. "
+                + (step2.get("error") or "")
+            )
+            return JSONResponse(content=report)
+
+        # Step 3: Watch — try all server/category combos
+        category = "dub" if audio.strip().lower() == "dub" else "sub"
+        fallback_category = "sub" if category == "dub" else "dub"
+        watch_results: list[dict] = []
+        got_sources = False
+
+        for cat in [category, fallback_category]:
+            for srv in ["vidcloud", "vidstreaming"]:
+                attempt2: dict = {"server": srv, "category": cat, "ep_id": ep_id}
+                try:
+                    watch_url = f"{base}/anime/hianime/watch/{urlquote(ep_id, safe='')}"
+                    r3 = await client.get(
+                        watch_url, params={"server": srv, "category": cat}, timeout=35.0
+                    )
+                    attempt2["status"] = r3.status_code
+                    if r3.status_code >= 400:
+                        attempt2["sidecar_error"] = _safe_error_body(r3)
+                        attempt2["result"] = "FAILED"
+                    else:
+                        data3 = r3.json()
+                        sources = data3.get("sources") or []
+                        attempt2["source_count"] = len(sources)
+                        attempt2["subtitle_count"] = len(data3.get("subtitles") or [])
+                        if sources:
+                            attempt2["result"] = "SUCCESS"
+                            attempt2["first_source"] = sources[0]
+                            got_sources = True
+                        else:
+                            attempt2["result"] = "EMPTY_SOURCES"
+                            attempt2["sidecar_error"] = (
+                                data3.get("error") or data3.get("detail") or "No sources in 200 response"
+                            )
+                except Exception as exc:
+                    attempt2["result"] = "EXCEPTION"
+                    attempt2["sidecar_error"] = str(exc)
+                watch_results.append(attempt2)
+
+        report["step3_watch"] = watch_results
+
+        if got_sources:
+            report["verdict"] = (
+                "✅ Stream found! The debug run succeeded. "
+                "If /anime/stream is still failing, try again — it may have been a transient error."
+            )
+        else:
+            report["verdict"] = (
+                "❌ FAILED at step 3 (watch). "
+                + _build_sidecar_hint(
+                    [f"{a['server']}/{a['category']}: {a.get('sidecar_error', '')}" for a in watch_results]
+                )
+            )
+            report["all_sidecar_errors"] = [
+                a.get("sidecar_error", "") for a in watch_results if a.get("sidecar_error")
+            ]
+
+    return JSONResponse(content=report)
+
+
+# ---------------------------------------------------------------------------
+#  /anime/debug-watch/{ep_id}  — proxy to sidecar's MegaCloud diagnostic
+# ---------------------------------------------------------------------------
+
+@router.get("/anime/debug-watch/{ep_id:path}")
+async def consumet_anime_debug_watch(ep_id: str):
+    """
+    Proxies GET /anime/hianime/debug-watch/{ep_id} from the consumet sidecar.
+    Use when /anime/debug-stream shows step 3 failing.
+    """
+    import httpx
+    from urllib.parse import quote as urlquote
+    from app.services.consumet import get_consumet_api_base
+
+    base = get_consumet_api_base()
+
+    try:
+        async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as client:
+            url = f"{base}/anime/hianime/debug-watch/{urlquote(ep_id, safe='')}"
+            r = await client.get(url, timeout=35.0)
+            try:
+                return JSONResponse(content=r.json(), status_code=r.status_code)
+            except Exception:
+                return JSONResponse(
+                    content={"raw": r.text[:2000], "status": r.status_code},
+                    status_code=r.status_code,
+                )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": str(exc),
+                "hint": f"Could not reach sidecar at {base}. Is it running?",
+            },
+        )
+
+
+# ---------------------------------------------------------------------------
+#  /watch/anime/raw  — raw pass-through (backward compat)
+# ---------------------------------------------------------------------------
 
 @router.get("/watch/anime/raw")
 async def consumet_watch_anime_raw(
@@ -411,11 +741,6 @@ async def consumet_watch_anime_raw(
     server: str = Query("vidcloud"),
     category: str = Query("sub"),
 ):
-    """
-    Raw pass-through of the Consumet watch call — no normalization.
-    Use /anime/stream instead (which also handles search + episode lookup).
-    This is kept for direct episode-ID callers.
-    """
     import httpx
     from urllib.parse import quote as urlquote
     from app.services.consumet import get_consumet_api_base
@@ -423,29 +748,30 @@ async def consumet_watch_anime_raw(
     base = get_consumet_api_base()
     url = f"{base}/anime/hianime/watch/{urlquote(episode_id, safe='')}"
     servers_to_try = ["vidcloud", "vidstreaming"] if server in ("auto", "") else [server]
-    if server not in ("auto", "") and server == "vidcloud":
+    if server == "vidcloud":
         servers_to_try = ["vidcloud", "vidstreaming"]
-    elif server not in ("auto", "") and server == "vidstreaming":
+    elif server == "vidstreaming":
         servers_to_try = ["vidstreaming", "vidcloud"]
 
-    last_error = ""
+    attempt_errors: list[str] = []
     async with httpx.AsyncClient(timeout=35.0, follow_redirects=True) as client:
         for srv in servers_to_try:
             try:
                 r = await client.get(url, params={"server": srv, "category": category})
                 if r.status_code >= 400:
-                    last_error = f"HTTP {r.status_code} from server={srv}"
+                    err = _safe_error_body(r)
+                    attempt_errors.append(f"{srv}: HTTP {r.status_code} — {err}")
                     continue
                 data = r.json()
                 sources = data.get("sources") or []
                 if not sources:
-                    last_error = f"Empty sources from server={srv}"
+                    attempt_errors.append(f"{srv}: 200 OK but no sources")
                     continue
                 data["_server_used"] = srv
                 data["_category_used"] = category
                 return JSONResponse(content=data)
             except Exception as exc:
-                last_error = str(exc)
+                attempt_errors.append(f"{srv}: exception — {exc}")
                 continue
 
     return JSONResponse(
@@ -453,8 +779,9 @@ async def consumet_watch_anime_raw(
         content={
             "sources": [],
             "subtitles": [],
-            "error": last_error or "No sources found",
+            "error": "; ".join(attempt_errors) or "No sources found",
             "_episode_id": episode_id,
+            "_attempt_errors": attempt_errors,
         },
     )
 
