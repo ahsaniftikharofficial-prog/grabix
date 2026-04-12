@@ -218,6 +218,20 @@ interface StreamPayload {
   _category_used?: string;
   _anime_id?: string;
   _episode_id?: string;
+  // ── New debug fields returned by fixed backend ──────────────────────────
+  _step?: "search" | "info" | "watch";
+  _attempt_errors?: string[];
+  _sidecar_hint?: string;
+}
+
+/** Rich error thrown by fetchAnimeStream — carries debug fields for the UI. */
+interface StreamErrorDetail {
+  message: string;
+  step?: string;
+  animeId?: string;
+  episodeId?: string;
+  attemptErrors?: string[];
+  sidecarHint?: string;
 }
 
 async function fetchAnimeStream(
@@ -250,8 +264,18 @@ async function fetchAnimeStream(
   const data = (await r.json()) as StreamPayload;
 
   if (!r.ok || data.error || !data.sources?.length) {
-    const msg = data.error || `No stream found for "${title}" episode ${episodeNumber}.`;
-    throw new Error(msg);
+    // ── Build a rich error so the UI can show actionable debug info ─────────
+    const detail: StreamErrorDetail = {
+      message: data.error || `No stream found for "${title}" episode ${episodeNumber}.`,
+      step: data._step,
+      animeId: data._anime_id,
+      episodeId: data._episode_id,
+      attemptErrors: data._attempt_errors,
+      sidecarHint: data._sidecar_hint,
+    };
+    const err = new Error(detail.message) as Error & { streamDetail?: StreamErrorDetail };
+    err.streamDetail = detail;
+    throw err;
   }
 
   const serverUsed = data._server_used || "vidcloud";
@@ -276,7 +300,14 @@ async function fetchAnimeStream(
     });
 
   if (sources.length === 0) {
-    throw new Error(`No playable sources found for "${title}" episode ${episodeNumber}.`);
+    const detail: StreamErrorDetail = {
+      message: `No playable sources found for "${title}" episode ${episodeNumber}.`,
+      animeId: data._anime_id,
+      episodeId: data._episode_id,
+    };
+    const err = new Error(detail.message) as Error & { streamDetail?: StreamErrorDetail };
+    err.streamDetail = detail;
+    throw err;
   }
 
   const subtitles = (data.subtitles ?? [])
@@ -950,6 +981,11 @@ function AnimeDetailV2({
   const [audio, setAudio] = useState<AudioMode>("sub");
   const [playing, setPlaying] = useState(false);
   const [toast, setToast] = useState<{ message: string; variant: "success" | "error" | "info" } | null>(null);
+  // ── Debug / diagnostic state ────────────────────────────────────────────
+  const [streamError, setStreamError] = useState<StreamErrorDetail | null>(null);
+  const [diagnosing, setDiagnosing] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [diagReport, setDiagReport] = useState<Record<string, any> | null>(null);
 
   const rawType = String((anime.raw as { type?: string } | undefined)?.type || "").toLowerCase();
   const isMovie = activeTab === "movie" || rawType === "movie";
@@ -1005,6 +1041,8 @@ function AnimeDetailV2({
   const handlePlay = async () => {
     if (playing) return;
     setPlaying(true);
+    setStreamError(null);
+    setDiagReport(null);
     try {
       const { sources, subtitle } = await resolveStream(episode, audio);
       const episodeNumbers =
@@ -1027,12 +1065,52 @@ function AnimeDetailV2({
         },
       });
     } catch (err) {
+      // ── Capture rich StreamErrorDetail if available ───────────────────────
+      const richErr = err as Error & { streamDetail?: StreamErrorDetail };
+      if (richErr.streamDetail) {
+        setStreamError(richErr.streamDetail);
+      } else {
+        setStreamError({
+          message: richErr.message || "Stream could not be loaded.",
+        });
+      }
       setToast({
-        message: err instanceof Error ? err.message : "Stream could not be loaded.",
+        message: richErr.streamDetail?.message ?? (richErr.message || "Stream could not be loaded."),
         variant: "error",
       });
     } finally {
       setPlaying(false);
+    }
+  };
+
+  /** Run the /anime/debug-stream diagnostic and show the report. */
+  const handleDiagnose = async () => {
+    if (diagnosing) return;
+    setDiagnosing(true);
+    setDiagReport(null);
+    try {
+      const params = new URLSearchParams({
+        title,
+        episode: String(episode),
+        audio,
+      });
+      if (anime.provider === "hianime" && anime.id) {
+        params.set("anime_id", anime.id);
+      }
+      const altTitle = (anime as AnimeItem & { alt_title?: string }).alt_title;
+      if (altTitle && altTitle.trim() && altTitle.trim() !== title.trim()) {
+        params.set("alt_title", altTitle.trim());
+      }
+      const r = await fetch(`${BACKEND}/consumet/anime/debug-stream?${params}`, {
+        signal: AbortSignal.timeout(90000),
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data = await r.json() as Record<string, any>;
+      setDiagReport(data);
+    } catch (ex) {
+      setDiagReport({ error: String(ex), verdict: "Could not reach the backend for diagnostics." });
+    } finally {
+      setDiagnosing(false);
     }
   };
 
@@ -1296,6 +1374,220 @@ function AnimeDetailV2({
             </button>
           </div>
 
+          {/* ── Stream Error + Diagnostic Panel ─────────────────────────── */}
+          {streamError && (
+            <div
+              style={{
+                marginTop: 14,
+                padding: "14px 16px",
+                borderRadius: 12,
+                background: "rgba(220,50,50,0.08)",
+                border: "1px solid rgba(220,50,50,0.25)",
+                fontSize: 12,
+                lineHeight: 1.6,
+              }}
+            >
+              {/* Error summary */}
+              <div style={{ fontWeight: 700, color: "var(--text-danger)", marginBottom: 8, fontSize: 13 }}>
+                ✗ Stream failed
+              </div>
+              <div style={{ color: "var(--text-secondary)", marginBottom: 10 }}>
+                {streamError.message}
+              </div>
+
+              {/* Sidecar hint (e.g. "run npm update aniwatch") */}
+              {streamError.sidecarHint && (
+                <div
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: 8,
+                    background: "var(--bg-surface2)",
+                    border: "1px solid var(--border)",
+                    marginBottom: 10,
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  <strong>Fix: </strong>{streamError.sidecarHint}
+                </div>
+              )}
+
+              {/* Per-attempt error list */}
+              {streamError.attemptErrors && streamError.attemptErrors.length > 0 && (
+                <details style={{ marginBottom: 10 }}>
+                  <summary style={{ cursor: "pointer", color: "var(--text-muted)", fontSize: 11 }}>
+                    Show sidecar errors ({streamError.attemptErrors.length} attempts)
+                  </summary>
+                  <div
+                    style={{
+                      marginTop: 6,
+                      padding: "8px 10px",
+                      borderRadius: 8,
+                      background: "var(--bg-surface2)",
+                      fontFamily: "monospace",
+                      fontSize: 11,
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-all",
+                      color: "var(--text-secondary)",
+                    }}
+                  >
+                    {streamError.attemptErrors.join("\n")}
+                  </div>
+                </details>
+              )}
+
+              {/* Debug info: anime_id, episode_id, step */}
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                {streamError.step && (
+                  <span style={{ padding: "2px 8px", borderRadius: 8, background: "var(--bg-surface2)", fontSize: 11, color: "var(--text-muted)" }}>
+                    failed at: <strong>{streamError.step}</strong>
+                  </span>
+                )}
+                {streamError.animeId && (
+                  <span style={{ padding: "2px 8px", borderRadius: 8, background: "var(--bg-surface2)", fontSize: 11, color: "var(--text-muted)", fontFamily: "monospace" }}>
+                    anime_id: {streamError.animeId}
+                  </span>
+                )}
+                {streamError.episodeId && (
+                  <span style={{ padding: "2px 8px", borderRadius: 8, background: "var(--bg-surface2)", fontSize: 11, color: "var(--text-muted)", fontFamily: "monospace" }}>
+                    ep_id: {streamError.episodeId}
+                  </span>
+                )}
+              </div>
+
+              {/* Diagnose button */}
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <button
+                  className="btn btn-ghost"
+                  style={{ fontSize: 12, gap: 6 }}
+                  disabled={diagnosing}
+                  onClick={() => void handleDiagnose()}
+                >
+                  {diagnosing ? "Running diagnostics..." : "🔍 Run Full Diagnostics"}
+                </button>
+                <button
+                  className="btn btn-ghost"
+                  style={{ fontSize: 12 }}
+                  onClick={() => {
+                    const info = JSON.stringify(streamError, null, 2);
+                    void navigator.clipboard.writeText(info);
+                    setToast({ message: "Error info copied to clipboard", variant: "info" });
+                  }}
+                >
+                  📋 Copy Error
+                </button>
+                <button
+                  className="btn btn-ghost"
+                  style={{ fontSize: 12 }}
+                  onClick={() => { setStreamError(null); setDiagReport(null); }}
+                >
+                  ✕ Dismiss
+                </button>
+              </div>
+
+              {/* Diagnostic report */}
+              {diagReport && (
+                <div style={{ marginTop: 14 }}>
+                  <div
+                    style={{
+                      fontWeight: 700,
+                      fontSize: 12,
+                      marginBottom: 8,
+                      color: diagReport.verdict?.startsWith("✅")
+                        ? "var(--text-success, #4caf50)"
+                        : "var(--text-danger)",
+                    }}
+                  >
+                    {diagReport.verdict || "Diagnostic complete"}
+                  </div>
+
+                  {/* Sidecar reachable */}
+                  <div style={{ fontSize: 11, marginBottom: 6, color: "var(--text-muted)" }}>
+                    Sidecar at <code>{diagReport.sidecar_base}</code>:{" "}
+                    <strong style={{ color: diagReport.sidecar_reachable ? "var(--text-success, #4caf50)" : "var(--text-danger)" }}>
+                      {diagReport.sidecar_reachable ? "✅ reachable" : "❌ NOT reachable"}
+                    </strong>
+                  </div>
+
+                  {/* Step 1 */}
+                  {diagReport.step1_search && (
+                    <details style={{ marginBottom: 6 }}>
+                      <summary style={{ cursor: "pointer", fontSize: 11, color: "var(--text-muted)" }}>
+                        Step 1 — Search:{" "}
+                        {diagReport.step1_search.resolved_id
+                          ? `✅ resolved → ${diagReport.step1_search.resolved_id}`
+                          : "❌ failed"}
+                      </summary>
+                      <pre style={{ fontSize: 10, margin: "4px 0 0", padding: "6px 8px", borderRadius: 6, background: "var(--bg-surface2)", overflow: "auto", maxHeight: 120 }}>
+                        {JSON.stringify(diagReport.step1_search, null, 2)}
+                      </pre>
+                    </details>
+                  )}
+
+                  {/* Step 2 */}
+                  {diagReport.step2_info && (
+                    <details style={{ marginBottom: 6 }}>
+                      <summary style={{ cursor: "pointer", fontSize: 11, color: "var(--text-muted)" }}>
+                        Step 2 — Episode info:{" "}
+                        {diagReport.step2_info.ep_id
+                          ? `✅ ep_id=${diagReport.step2_info.ep_id}`
+                          : "❌ failed"}
+                      </summary>
+                      <pre style={{ fontSize: 10, margin: "4px 0 0", padding: "6px 8px", borderRadius: 6, background: "var(--bg-surface2)", overflow: "auto", maxHeight: 120 }}>
+                        {JSON.stringify(diagReport.step2_info, null, 2)}
+                      </pre>
+                    </details>
+                  )}
+
+                  {/* Step 3 — watch attempts */}
+                  {Array.isArray(diagReport.step3_watch) && diagReport.step3_watch.length > 0 && (
+                    <details style={{ marginBottom: 6 }}>
+                      <summary style={{ cursor: "pointer", fontSize: 11, color: "var(--text-muted)" }}>
+                        Step 3 — Watch attempts ({diagReport.step3_watch.length})
+                      </summary>
+                      <div style={{ marginTop: 4, display: "flex", flexDirection: "column", gap: 4 }}>
+                        {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                        {diagReport.step3_watch.map((a: any, i: number) => (
+                          <div
+                            key={i}
+                            style={{
+                              padding: "6px 10px",
+                              borderRadius: 8,
+                              background: "var(--bg-surface2)",
+                              fontSize: 11,
+                              fontFamily: "monospace",
+                            }}
+                          >
+                            <strong style={{ color: a.result === "SUCCESS" ? "var(--text-success, #4caf50)" : "var(--text-danger)" }}>
+                              {a.result}
+                            </strong>{" "}
+                            {a.server}/{a.category} — HTTP {a.status ?? "?"}
+                            {a.source_count != null && ` — ${a.source_count} sources`}
+                            {a.sidecar_error && (
+                              <div style={{ marginTop: 2, color: "var(--text-muted)", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+                                {a.sidecar_error}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+
+                  <button
+                    className="btn btn-ghost"
+                    style={{ fontSize: 11, marginTop: 6 }}
+                    onClick={() => {
+                      void navigator.clipboard.writeText(JSON.stringify(diagReport, null, 2));
+                      setToast({ message: "Full diagnostic report copied", variant: "info" });
+                    }}
+                  >
+                    📋 Copy Full Report
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Info hint */}
           <div
             style={{
@@ -1313,6 +1605,12 @@ function AnimeDetailV2({
             <code style={{ fontSize: 11 }}>/consumet/anime/stream</code> — the backend searches
             HiAnime by title, resolves the episode ID, then fetches the M3U8 directly. Same flow
             as anime.py, no browser CORS issues.
+            {!streamError && (
+              <span style={{ display: "block", marginTop: 4 }}>
+                If streaming fails, click <strong>Play</strong> then use the{" "}
+                <strong>🔍 Run Full Diagnostics</strong> button to see exactly why.
+              </span>
+            )}
           </div>
         </div>
       </div>

@@ -1,1684 +1,861 @@
-import asyncio
-import json
-import os
-import time
-from datetime import datetime
-from html import unescape
-from typing import Any
-from urllib.parse import quote
-from xml.etree import ElementTree
+import logging
 
-import httpx
-from fastapi import HTTPException
+from fastapi import APIRouter, Query, Response
+from fastapi.responses import JSONResponse
 
-from app.services.manga_anilist import get_seasonal_manga, get_trending_manga
-from app.services.manga_comick import get_frontpage as get_comick_frontpage
-from app.services.manga_mangadex import (
-    get_chapter_list as get_mangadex_chapter_list,
-    get_chapter_pages as get_mangadex_chapter_pages,
-    get_manga_details as get_mangadex_manga_details,
-    search_manga as search_mangadex_manga,
+from app.services.consumet import (
+    fetch_anime_episodes,
+    fetch_anime_watch,
+    fetch_domain_info,
+    fetch_generic_read,
+    fetch_manga_chapters,
+    fetch_manga_read,
+    fetch_meta_info,
+    fetch_meta_search,
+    fetch_news_article,
+    fetch_news_feed,
+    fetch_proxy_response,
+    get_health_status,
+    search_domain,
+    discover_anime,
+    discover_manga,
 )
-from app.services.network_policy import validate_outbound_target
-from app.services.runtime_config import has_tmdb_token, tmdb_bearer_token
-from app.services.security import DEFAULT_APPROVED_MEDIA_HOSTS
 
-CONSUMET_API_BASE_ENV = "CONSUMET_API_BASE"
-DEFAULT_AUDIO_PRIORITY = ["en", "original", "hi"]
-DEFAULT_SUBTITLE_PRIORITY = ["en", "hi"]
-HTTP_TIMEOUT = 25.0
-HEALTH_TIMEOUT = 8.0
-LOCAL_CONSUMET_TIMEOUT = 10.0
-ANIME_INFO_TIMEOUT = 8.0
-ANIME_WATCH_TIMEOUT = 18.0
-JIKAN_API_BASE = "https://api.jikan.moe/v4"
-TMDB_API_BASE = "https://api.themoviedb.org/3"
-_CACHE: dict[str, tuple[float, Any]] = {}
-_ASYNC_CLIENTS: dict[int, httpx.AsyncClient] = {}
+router = APIRouter()
+logger = logging.getLogger("consumet.routes")
 
 
-class ConsumetConfigError(RuntimeError):
-    pass
-
-
-def _cache_key(kind: str, *parts: Any) -> str:
-    return f"{kind}:{json.dumps(parts, sort_keys=True, ensure_ascii=True, default=str)}"
-
-
-def _cache_get(key: str) -> Any | None:
-    entry = _CACHE.get(key)
-    if not entry:
-        return None
-    expires_at, value = entry
-    if expires_at <= time.time():
-        _CACHE.pop(key, None)
-        return None
-    return value
-
-
-def _cache_set(key: str, value: Any, ttl_seconds: int) -> Any:
-    _CACHE[key] = (time.time() + max(ttl_seconds, 1), value)
-    return value
-
-
-def get_consumet_api_base() -> str:
-    return (os.getenv(CONSUMET_API_BASE_ENV, "").strip().rstrip("/")) or "http://127.0.0.1:3000"
-
-
-def is_consumet_configured() -> bool:
-    return bool(get_consumet_api_base())
-
-
-def _consumet_configured() -> bool:
-    return is_consumet_configured()
-
-
-def _http_error(detail: str, status_code: int = 502) -> HTTPException:
-    return HTTPException(status_code=status_code, detail=detail)
-
-
-def _get_async_client() -> httpx.AsyncClient:
-    loop = asyncio.get_running_loop()
-    loop_key = id(loop)
-    client = _ASYNC_CLIENTS.get(loop_key)
-    if client is None or client.is_closed:
-        client = httpx.AsyncClient(follow_redirects=True)
-        _ASYNC_CLIENTS[loop_key] = client
-    return client
-
-
-async def _http_get(
-    url: str,
-    *,
-    params: dict[str, Any] | None = None,
-    headers: dict[str, str] | None = None,
-    timeout: float = HTTP_TIMEOUT,
-) -> httpx.Response:
-    client = _get_async_client()
+@router.get("/health")
+async def consumet_health():
     try:
-        return await client.get(url, params=params, headers=headers, timeout=timeout)
+        return await get_health_status()
     except Exception as exc:
-        raise _http_error(f"Request failed: {exc}") from exc
+        logger.error("consumet_health failed: %s", exc)
+        return JSONResponse(status_code=503, content={"healthy": False, "message": str(exc)})
 
 
-async def _fetch_json_url(
-    url: str,
-    *,
-    params: dict[str, Any] | None = None,
-    ttl_seconds: int = 300,
-) -> Any:
-    filtered = {key: value for key, value in (params or {}).items() if value is not None and value != ""}
-    key = _cache_key("json", url, filtered)
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached
-
-    headers = {
-        "User-Agent": "GRABIX/1.0 (+https://github.com/consumet/api.consumet.org)",
-        "Accept": "application/json, text/plain;q=0.9, */*;q=0.8",
-    }
-
-    response = await _http_get(url, params=filtered, headers=headers, timeout=HTTP_TIMEOUT)
-
-    if response.status_code >= 400:
-        detail = response.text.strip() or f"Consumet request failed with {response.status_code}"
-        raise _http_error(detail, response.status_code if response.status_code in {401, 403, 404, 429, 500, 503} else 502)
-
+@router.get("/discover/anime")
+async def consumet_discover_anime(
+    section: str = Query("trending"),
+    page: int = Query(1, ge=1),
+    period: str = Query("daily"),
+):
     try:
-        data = response.json()
+        return await discover_anime(section=section, page=page, period=period)
     except Exception as exc:
-        raise _http_error(f"Consumet returned invalid JSON from {url}: {exc}") from exc
-
-    return _cache_set(key, data, ttl_seconds)
-
-
-async def _fetch_text_url(
-    url: str,
-    *,
-    params: dict[str, Any] | None = None,
-    ttl_seconds: int = 300,
-) -> str:
-    filtered = {key: value for key, value in (params or {}).items() if value is not None and value != ""}
-    key = _cache_key("text", url, filtered)
-    cached = _cache_get(key)
-    if isinstance(cached, str):
-        return cached
-
-    headers = {
-        "User-Agent": "GRABIX/1.0",
-        "Accept": "text/plain, application/xml;q=0.9, text/xml;q=0.9, */*;q=0.8",
-    }
-
-    response = await _http_get(url, params=filtered, headers=headers, timeout=HTTP_TIMEOUT)
-
-    if response.status_code >= 400:
-        detail = response.text.strip() or f"Request failed with {response.status_code}"
-        raise _http_error(detail, response.status_code if response.status_code in {401, 403, 404, 429, 500, 503} else 502)
-
-    return _cache_set(key, response.text, ttl_seconds)
+        logger.error("consumet_discover_anime failed: %s", exc)
+        return JSONResponse(status_code=502, content={"results": [], "error": str(exc)})
 
 
-async def _fetch_tmdb_json(path: str, *, params: dict[str, Any] | None = None, ttl_seconds: int = 600) -> Any:
-    if not has_tmdb_token():
-        raise _http_error("TMDB is not configured for this build.", 503)
-    filtered = {key: value for key, value in (params or {}).items() if value is not None and value != ""}
-    key = _cache_key("tmdb-json", path, filtered)
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached
-
-    headers = {
-        "User-Agent": "GRABIX/1.0",
-        "Accept": "application/json, text/plain;q=0.9, */*;q=0.8",
-        "Authorization": f"Bearer {tmdb_bearer_token()}",
-        "Content-Type": "application/json",
-    }
-    response = await _http_get(f"{TMDB_API_BASE}{path}", params=filtered, headers=headers, timeout=HTTP_TIMEOUT)
-
-    if response.status_code >= 400:
-        detail = response.text.strip() or f"TMDB request failed with {response.status_code}"
-        raise _http_error(detail, response.status_code if response.status_code in {401, 403, 404, 429, 500, 503} else 502)
-
+@router.get("/discover/manga")
+async def consumet_discover_manga(
+    section: str = Query("trending"),
+    page: int = Query(1, ge=1),
+):
     try:
-        data = response.json()
+        return await discover_manga(section=section, page=page)
     except Exception as exc:
-        raise _http_error(f"TMDB returned invalid JSON from {path}: {exc}") from exc
+        logger.error("consumet_discover_manga failed: %s", exc)
+        return JSONResponse(status_code=502, content={"results": [], "error": str(exc)})
 
-    return _cache_set(key, data, ttl_seconds)
 
-
-async def _fetch_consumet_json(
-    path: str,
-    *,
-    params: dict[str, Any] | None = None,
-    ttl_seconds: int = 300,
-    timeout: float | None = None,
-) -> Any:
-    base = get_consumet_api_base()
-    effective_timeout = timeout if timeout is not None else LOCAL_CONSUMET_TIMEOUT
-    if effective_timeout == HTTP_TIMEOUT:
-        return await _fetch_json_url(f"{base}{path}", params=params, ttl_seconds=ttl_seconds)
-
-    filtered = {key: value for key, value in (params or {}).items() if value is not None and value != ""}
-    key = _cache_key("json-timeout", f"{base}{path}", filtered, effective_timeout)
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached
-
-    headers = {
-        "User-Agent": "GRABIX/1.0 (+https://github.com/consumet/api.consumet.org)",
-        "Accept": "application/json, text/plain;q=0.9, */*;q=0.8",
-    }
-    response = await _http_get(f"{base}{path}", params=filtered, headers=headers, timeout=effective_timeout)
-
-    if response.status_code >= 400:
-        detail = response.text.strip() or f"Consumet request failed with {response.status_code}"
-        raise _http_error(detail, response.status_code if response.status_code in {401, 403, 404, 429, 500, 503} else 502)
-
-    try:
-        data = response.json()
-    except Exception as exc:
-        raise _http_error(f"Consumet returned invalid JSON from {base}{path}: {exc}") from exc
-
-    return _cache_set(key, data, ttl_seconds)
-
-
-async def fetch_proxy_response(url: str) -> tuple[bytes, str | None]:
-    validated = validate_outbound_target(
-        url,
-        mode="approved_provider_target",
-        allowed_hosts=DEFAULT_APPROVED_MEDIA_HOSTS,
-    )
-    safe_url = validated.normalized_url
-
-    headers = {"User-Agent": "GRABIX/1.0"}
-    response = await _http_get(safe_url, headers=headers, timeout=HTTP_TIMEOUT)
-
-    if response.status_code >= 400:
-        raise _http_error(
-            response.text.strip() or f"Proxy request failed with {response.status_code}",
-            response.status_code if response.status_code in {400, 401, 403, 404, 429, 500, 503} else 502,
-        )
-
-    return response.content, response.headers.get("content-type")
-
-
-def _first_non_empty(*values: Any) -> str:
-    for value in values:
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
-def _coerce_int(value: Any) -> int | None:
-    try:
-        if value is None or value == "":
-            return None
-        return int(float(value))
-    except Exception:
-        return None
-
-
-def _extract_title(item: dict[str, Any]) -> str:
-    title = item.get("title")
-    if isinstance(title, dict):
-        return _first_non_empty(
-            title.get("english"),
-            title.get("romaji"),
-            title.get("userPreferred"),
-            title.get("native"),
-        )
-    return _first_non_empty(
-        title,
-        item.get("name"),
-        item.get("englishTitle"),
-        item.get("romanjiTitle"),
-    )
-
-
-def _normalize_jikan_anime_item(item: dict[str, Any], provider: str) -> dict[str, Any]:
-    images = item.get("images") or {}
-    jpg = images.get("jpg") if isinstance(images, dict) else {}
-    trailer = item.get("trailer") or {}
-    return {
-        "id": str(item.get("mal_id") or ""),
-        "provider": provider,
-        "type": "anime",
-        "title": _first_non_empty(item.get("title_english"), item.get("title")),
-        "alt_title": _first_non_empty(item.get("title"), item.get("title_japanese")),
-        "image": _first_non_empty(
-            (jpg.get("large_image_url") if isinstance(jpg, dict) else ""),
-            (jpg.get("image_url") if isinstance(jpg, dict) else ""),
-        ),
-        "description": _first_non_empty(item.get("synopsis"), item.get("background")),
-        "year": _coerce_int(item.get("year") or item.get("aired", {}).get("prop", {}).get("from", {}).get("year")),
-        "rating": float(item.get("score")) if item.get("score") is not None else None,
-        "status": _first_non_empty(item.get("status")),
-        "genres": [
-            genre.get("name")
-            for genre in item.get("genres") or []
-            if isinstance(genre, dict) and genre.get("name")
-        ],
-        "languages": ["original"],
-        "url": _first_non_empty(item.get("url")),
-        "mal_id": item.get("mal_id"),
-        "episodes_count": _coerce_int(item.get("episodes")),
-        "trailer_url": _first_non_empty(trailer.get("embed_url")) if isinstance(trailer, dict) else "",
-        "raw": item,
-    }
-
-
-def _normalize_jikan_episode_item(
-    item: dict[str, Any],
-    *,
-    provider: str,
-    anime_id: str,
-    fallback_number: int,
-) -> dict[str, Any]:
-    number = _coerce_int(item.get("mal_id")) or _coerce_int(item.get("episode_id")) or fallback_number
-    return {
-        "id": f"{provider}:{anime_id}:{number}",
-        "provider": provider,
-        "number": number,
-        "title": _first_non_empty(item.get("title"), item.get("title_japanese")) or f"Episode {number}",
-        "is_filler": False,
-        "languages": ["original"],
-        "raw": item,
-    }
-
-
-async def _search_jikan_anime(query: str, page: int = 1, provider: str = "jikan") -> dict[str, Any]:
-    payload = await _fetch_json_url(
-        f"{JIKAN_API_BASE}/anime",
-        params={"q": query, "page": page, "limit": 20, "sfw": "true"},
-        ttl_seconds=600,
-    )
-    items = [
-        _normalize_jikan_anime_item(item, provider)
-        for item in payload.get("data") or []
-        if isinstance(item, dict)
-    ]
-    return {"domain": "anime", "provider": provider, "query": query, "page": page, "items": items}
-
-
-async def _fetch_jikan_anime_full(media_id: str, provider: str) -> dict[str, Any]:
-    payload = await _fetch_json_url(
-        f"{JIKAN_API_BASE}/anime/{quote(media_id)}/full",
-        ttl_seconds=1800,
-    )
-    item = payload.get("data") if isinstance(payload, dict) else {}
-    if not isinstance(item, dict):
-        raise _http_error("Anime details were not found.", 404)
-    return {"domain": "anime", "provider": provider, "item": _normalize_jikan_anime_item(item, provider), "raw": item}
-
-
-async def _fetch_jikan_anime_episodes(media_id: str, provider: str) -> dict[str, Any]:
-    items: list[dict[str, Any]] = []
-    page = 1
-    while page <= 6:
-        payload = await _fetch_json_url(
-            f"{JIKAN_API_BASE}/anime/{quote(media_id)}/episodes",
-            params={"page": page},
-            ttl_seconds=1800,
-        )
-        batch = payload.get("data") or []
-        for index, item in enumerate(batch):
-            if isinstance(item, dict):
-                items.append(
-                    _normalize_jikan_episode_item(
-                        item,
-                        provider=provider,
-                        anime_id=media_id,
-                        fallback_number=len(items) + index + 1,
-                    )
-                )
-        pagination = payload.get("pagination") or {}
-        if not isinstance(pagination, dict) or not pagination.get("has_next_page"):
-            break
-        page += 1
-    return {"provider": provider, "id": media_id, "items": items}
-
-
-async def _fetch_tmdb_meta_search(query: str, media_type: str = "movie") -> dict[str, Any]:
-    path = "movie" if media_type == "movie" else "tv"
-    payload = await _fetch_tmdb_json(
-        f"/search/{path}",
-        params={"query": query, "page": 1},
-        ttl_seconds=600,
-    )
-    results: list[dict[str, Any]] = []
-    for item in payload.get("results") or []:
-        if not isinstance(item, dict):
-            continue
-        title = _first_non_empty(item.get("title"), item.get("name"))
-        poster = _first_non_empty(item.get("poster_path"))
-        backdrop = _first_non_empty(item.get("backdrop_path"))
-        image = f"https://image.tmdb.org/t/p/w500{poster}" if poster else (f"https://image.tmdb.org/t/p/w780{backdrop}" if backdrop else "")
-        release = _first_non_empty(item.get("release_date"), item.get("first_air_date"))
-        results.append(
-            {
-                "id": str(item.get("id") or ""),
-                "provider": "tmdb",
-                "type": media_type,
-                "title": title,
-                "alt_title": "",
-                "image": image,
-                "description": _first_non_empty(item.get("overview")),
-                "year": _coerce_int(release[:4]) if len(release) >= 4 else None,
-                "rating": float(item.get("vote_average")) if item.get("vote_average") is not None else None,
-                "status": "",
-                "genres": [],
-                "languages": [],
-                "url": "",
-                "raw": item,
-            }
-        )
-    return {"query": query, "type": media_type, "items": results}
-
-
-async def _fetch_tmdb_meta_info(item_id: str, media_type: str = "movie") -> dict[str, Any]:
-    path = "movie" if media_type == "movie" else "tv"
-    payload = await _fetch_tmdb_json(
-        f"/{path}/{quote(item_id)}",
-        ttl_seconds=1800,
-    )
-    if not isinstance(payload, dict):
-        raise _http_error("TMDB details were not found.", 404)
-    title = _first_non_empty(payload.get("title"), payload.get("name"))
-    poster = _first_non_empty(payload.get("poster_path"))
-    backdrop = _first_non_empty(payload.get("backdrop_path"))
-    image = f"https://image.tmdb.org/t/p/w500{poster}" if poster else (f"https://image.tmdb.org/t/p/w780{backdrop}" if backdrop else "")
-    item = {
-        "id": str(payload.get("id") or item_id),
-        "provider": "tmdb",
-        "type": media_type,
-        "title": title,
-        "alt_title": "",
-        "image": image,
-        "description": _first_non_empty(payload.get("overview")),
-        "year": _coerce_int(_first_non_empty(payload.get("release_date"), payload.get("first_air_date"))[:4]),
-        "rating": float(payload.get("vote_average")) if payload.get("vote_average") is not None else None,
-        "status": _first_non_empty(payload.get("status")),
-        "genres": [
-            genre.get("name")
-            for genre in payload.get("genres") or []
-            if isinstance(genre, dict) and genre.get("name")
-        ],
-        "languages": [],
-        "url": "",
-        "raw": payload,
-    }
-    return {"id": item_id, "type": media_type, "item": item, "raw": payload}
-
-
-def _extract_alt_title(item: dict[str, Any]) -> str:
-    title = item.get("title")
-    if isinstance(title, dict):
-        primary = _extract_title(item)
-        return _first_non_empty(
-            *(value for value in title.values() if isinstance(value, str) and value.strip() and value.strip() != primary)
-        )
-    return _first_non_empty(item.get("title_english"), item.get("originalTitle"))
-
-
-def _extract_image(item: dict[str, Any]) -> str:
-    image = item.get("image")
-    if isinstance(image, str):
-        return image.strip()
-    if isinstance(image, dict):
-        return _first_non_empty(
-            image.get("large"),
-            image.get("medium"),
-            image.get("poster"),
-            image.get("cover"),
-            image.get("url"),
-        )
-    return _first_non_empty(
-        item.get("imageUrl"),
-        item.get("cover_image"),
-        item.get("img"),
-        item.get("poster"),
-        item.get("posterImage"),
-        item.get("cover"),
-        item.get("coverImage"),
-        item.get("thumbnail"),
-    )
-
-
-def _extract_description(item: dict[str, Any]) -> str:
-    return _first_non_empty(
-        item.get("description"),
-        item.get("overview"),
-        item.get("summary"),
-        item.get("desc"),
-        item.get("synopsis"),
-    )
-
-
-def _extract_genres(item: dict[str, Any]) -> list[str]:
-    raw = item.get("genres") or item.get("genre") or []
-    if isinstance(raw, list):
-        result: list[str] = []
-        for value in raw:
-            if isinstance(value, str) and value.strip():
-                result.append(value.strip())
-            elif isinstance(value, dict):
-                name = _first_non_empty(value.get("name"), value.get("title"))
-                if name:
-                    result.append(name)
-        return result
-    return []
-
-
-def _extract_languages(item: dict[str, Any]) -> list[str]:
-    raw = item.get("languages") or item.get("audioLanguages") or item.get("availableAudio")
-    if isinstance(raw, list):
-        return [str(value).strip().lower() for value in raw if str(value).strip()]
-
-    flags = []
-    if item.get("isHindi"):
-        flags.append("hi")
-    if item.get("isDubbed"):
-        flags.append("en")
-    if item.get("isSubbed"):
-        flags.append("original")
-    if item.get("subOrDub"):
-        flags.append(str(item.get("subOrDub")).strip().lower())
-    return list(dict.fromkeys(flags))
-
-
-def _payload_items(payload: Any) -> list[Any]:
-    if isinstance(payload, list):
-        return payload
-    if isinstance(payload, dict):
-        for key in ("results", "items", "data", "episodes", "chapters", "pages", "spotlightAnimes", "scheduledAnimes", "suggestions"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                return value
-    return []
-
-
-def _normalize_media_item(item: dict[str, Any], domain: str, provider: str) -> dict[str, Any]:
-    media_id = _first_non_empty(
-        str(item.get("id") or ""),
-        str(item.get("_id") or ""),
-        str(item.get("mangadex_id") or ""),
-        str(item.get("anilist_id") or ""),
-        str(item.get("mal_id") or ""),
-        item.get("slug") or "",
-        item.get("url") or "",
-    )
-    year = _coerce_int(item.get("releaseDate") or item.get("year") or item.get("releaseYear"))
-    rating = item.get("rating") or item.get("score") or item.get("vote_average")
-    if isinstance(rating, str):
-        try:
-            rating = float(rating)
-        except Exception:
-            rating = None
-    elif isinstance(rating, int):
-        rating = float(rating)
-
-    return {
-        "id": media_id,
-        "provider": provider,
-        "type": domain,
-        "title": _extract_title(item),
-        "alt_title": _first_non_empty(_extract_alt_title(item), item.get("otherName")),
-        "image": _extract_image(item),
-        "description": _extract_description(item),
-        "year": year,
-        "rating": rating if isinstance(rating, float) else None,
-        "status": _first_non_empty(item.get("status"), item.get("state")),
-        "genres": _extract_genres(item),
-        "languages": _extract_languages(item),
-        "url": _first_non_empty(item.get("url"), item.get("siteUrl")),
-        "anilist_id": _coerce_int(item.get("anilist_id") or item.get("anilistId")),
-        "mangadex_id": _first_non_empty(str(item.get("mangadex_id") or ""), str(item.get("mangadexId") or "")),
-        "mal_id": _coerce_int(item.get("mal_id") or item.get("malId")),
-        "episodes_count": _coerce_int(item.get("totalEpisodes") or item.get("episodes")),
-        "dub_episode_count": _coerce_int(item.get("dubEpisodeCount")),
-        "raw": item,
-    }
-
-
-def _normalize_episode_item(item: dict[str, Any], provider: str, fallback_number: int) -> dict[str, Any]:
-    number = _coerce_int(
-        item.get("number")
-        or item.get("episode")
-        or item.get("episodeNumber")
-        or item.get("episodeNo")
-    ) or fallback_number
-    title = _first_non_empty(item.get("title"), item.get("name"))
-    episode_id = _first_non_empty(
-        str(item.get("id") or ""),
-        str(item.get("episodeId") or ""),
-        item.get("url") or "",
-    )
-    return {
-        "id": episode_id,
-        "provider": provider,
-        "number": number,
-        "title": title or f"Episode {number}",
-        "is_filler": bool(item.get("isFiller")),
-        "languages": _extract_languages(item),
-        "raw": item,
-    }
-
-
-def _normalize_chapter_item(item: dict[str, Any], provider: str, fallback_number: int) -> dict[str, Any]:
-    number = (
-        item.get("chapterNumber")
-        or item.get("chapter_number")
-        or item.get("number")
-        or item.get("chapter")
-        or fallback_number
-    )
-    chapter_id = _first_non_empty(
-        str(item.get("id") or ""),
-        str(item.get("chapter_id") or ""),
-        str(item.get("chapterId") or ""),
-        item.get("url") or "",
-    )
-    released = _first_non_empty(
-        item.get("releaseDate"),
-        item.get("published_at"),
-        item.get("publishedAt"),
-        item.get("updatedAt"),
-    )
-    return {
-        "id": chapter_id,
-        "provider": provider,
-        "number": str(number),
-        "title": _first_non_empty(item.get("title"), item.get("name")),
-        "language": _first_non_empty(item.get("language"), item.get("translatedLanguage"), item.get("lang")).lower() or "en",
-        "released_at": released,
-        "raw": item,
-    }
-
-
-async def _search_mangadex_manga(query: str, provider: str, page: int = 1) -> dict[str, Any]:
-    items = await search_mangadex_manga(query)
-    normalized = [
-        _normalize_media_item(item, "manga", provider)
-        for item in items
-        if isinstance(item, dict)
-    ]
-    return {"domain": "manga", "provider": provider, "query": query, "page": page, "items": normalized}
-
-
-async def _fetch_mangadex_manga_detail(media_id: str, provider: str) -> dict[str, Any]:
-    item = await get_mangadex_manga_details(media_id)
-    if not isinstance(item, dict) or not item:
-        raise _http_error("Manga details were not found.", 404)
-
-    chapters = await get_mangadex_chapter_list(media_id, "en")
-    normalized = _normalize_media_item(item, "manga", provider)
-    normalized["chapters"] = [
-        _normalize_chapter_item(chapter, provider, index + 1)
-        for index, chapter in enumerate(chapters)
-        if isinstance(chapter, dict)
-    ]
-    return {
-        "domain": "manga",
-        "provider": provider,
-        "item": normalized,
-        "raw": {"detail": item, "chapters": chapters},
-    }
-
-
-def _openlibrary_search_query(domain: str, query: str) -> str:
-    if domain == "comics":
-        return f"{query} subject:comics"
-    if domain == "light-novels":
-        return f"{query} \"light novel\""
-    return query
-
-
-def _map_openlibrary_doc(doc: dict[str, Any], domain: str) -> dict[str, Any]:
-    cover_id = doc.get("cover_i")
-    image = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg" if cover_id else ""
-    first_publish = _coerce_int(doc.get("first_publish_year"))
-    title = _first_non_empty(doc.get("title"))
-    description_parts = [
-        ", ".join(doc.get("author_name") or []) if isinstance(doc.get("author_name"), list) else "",
-        ", ".join(doc.get("subject")[:6]) if isinstance(doc.get("subject"), list) else "",
-    ]
-    description = " · ".join([part for part in description_parts if part])
-    key = _first_non_empty(doc.get("key"), str(doc.get("cover_edition_key") or ""))
-    return {
-        "id": key.replace("/works/", "").replace("/books/", ""),
-        "provider": "openlibrary",
-        "type": domain,
-        "title": title,
-        "alt_title": "",
-        "image": image,
-        "description": description,
-        "year": first_publish,
-        "rating": None,
-        "status": "",
-        "genres": [subject for subject in (doc.get("subject") or [])[:6] if isinstance(subject, str)],
-        "languages": ["en"],
-        "url": f"https://openlibrary.org{key}" if key.startswith("/") else "",
-        "raw": doc,
-    }
-
-
-async def _search_openlibrary(domain: str, query: str, page: int = 1) -> dict[str, Any]:
-    payload = await _fetch_json_url(
-        "https://openlibrary.org/search.json",
-        params={"q": _openlibrary_search_query(domain, query), "page": page, "limit": 24},
-        ttl_seconds=900,
-    )
-    items = [_map_openlibrary_doc(item, domain) for item in payload.get("docs") or [] if isinstance(item, dict)]
-    return {"domain": domain, "provider": "openlibrary", "query": query, "page": page, "items": items}
-
-
-async def _fetch_openlibrary_info(domain: str, media_id: str) -> dict[str, Any]:
-    work_id = media_id if media_id.startswith("OL") else media_id
-    payload = await _fetch_json_url(
-        f"https://openlibrary.org/works/{work_id}.json",
-        ttl_seconds=1800,
-    )
-    description_value = payload.get("description")
-    if isinstance(description_value, dict):
-        description = _first_non_empty(description_value.get("value"))
-    else:
-        description = _first_non_empty(description_value)
-    covers = payload.get("covers") or []
-    image = f"https://covers.openlibrary.org/b/id/{covers[0]}-L.jpg" if covers else ""
-    item = {
-        "id": work_id,
-        "provider": "openlibrary",
-        "type": domain,
-        "title": _first_non_empty(payload.get("title")),
-        "alt_title": "",
-        "image": image,
-        "description": description,
-        "year": _coerce_int(payload.get("first_publish_date")),
-        "rating": None,
-        "status": "",
-        "genres": [subject for subject in (payload.get("subjects") or [])[:8] if isinstance(subject, str)],
-        "languages": ["en"],
-        "url": f"https://openlibrary.org/works/{work_id}",
-        "raw": payload,
-    }
-    return {"domain": domain, "provider": "openlibrary", "item": item, "raw": payload}
-
-
-async def _fetch_openlibrary_read(domain: str, item_id: str) -> dict[str, Any]:
-    info = await _fetch_openlibrary_info(domain, item_id)
-    return {
-        "domain": domain,
-        "provider": "openlibrary",
-        "id": item_id,
-        "content": {
-            "title": info["item"]["title"],
-            "description": info["item"]["description"],
-            "url": info["item"]["url"],
-        },
-        "raw": info["raw"],
-    }
-
-
-def _gutendex_extract_formats(
-    formats: dict[str, Any] | None,
-) -> tuple[str, str, list[dict[str, str]]]:
-    payload = formats if isinstance(formats, dict) else {}
-    read_url = ""
-    preview_url = ""
-    downloads: list[dict[str, str]] = []
-
-    preferred_read = [
-        ("text/html", "Read Online"),
-        ("text/plain; charset=utf-8", "Read Text"),
-        ("text/plain; charset=us-ascii", "Read Text"),
-    ]
-    preferred_downloads = [
-        ("application/epub+zip", "EPUB"),
-        ("application/pdf", "PDF"),
-        ("application/x-mobipocket-ebook", "MOBI"),
-        ("application/octet-stream", "Download"),
-    ]
-
-    for key, label in preferred_read:
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            if not read_url:
-                read_url = value.strip()
-            if not preview_url and key.startswith("text/plain"):
-                preview_url = value.strip()
-
-    for key, label in preferred_downloads:
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            downloads.append({"label": label, "url": value.strip()})
-
-    if not preview_url:
-        preview_url = read_url
-
-    return read_url, preview_url, downloads
-
-
-def _map_gutendex_book(book: dict[str, Any]) -> dict[str, Any]:
-    authors = [
-        author.get("name", "").strip()
-        for author in (book.get("authors") or [])
-        if isinstance(author, dict) and author.get("name")
-    ]
-    languages = [str(value).strip().lower() for value in (book.get("languages") or []) if str(value).strip()]
-    subjects = [str(value).strip() for value in (book.get("subjects") or [])[:8] if str(value).strip()]
-    image = _first_non_empty(((book.get("formats") or {}).get("image/jpeg")) if isinstance(book.get("formats"), dict) else "")
-    title = _first_non_empty(book.get("title"))
-    read_url, preview_url, downloads = _gutendex_extract_formats(book.get("formats"))
-    description = " - ".join([part for part in [", ".join(authors), ", ".join(subjects[:4])] if part])
-
-    return {
-        "id": str(book.get("id") or ""),
-        "provider": "gutendex",
-        "type": "books",
-        "title": title,
-        "alt_title": "",
-        "image": image,
-        "description": description,
-        "year": None,
-        "rating": None,
-        "status": "",
-        "genres": subjects,
-        "languages": languages or ["en"],
-        "url": read_url or preview_url or "",
-        "downloads": downloads,
-        "authors": authors,
-        "download_count": _coerce_int(book.get("download_count")),
-        "raw": book,
-    }
-
-
-async def _search_gutendex(query: str, page: int = 1) -> dict[str, Any]:
-    payload = await _fetch_json_url(
-        "https://gutendex.com/books",
-        params={"search": query, "page": page},
-        ttl_seconds=900,
-    )
-    items = [_map_gutendex_book(item) for item in payload.get("results") or [] if isinstance(item, dict)]
-    return {"domain": "books", "provider": "gutendex", "query": query, "page": page, "items": items}
-
-
-async def _fetch_gutendex_info(book_id: str) -> dict[str, Any]:
-    payload = await _fetch_json_url(
-        f"https://gutendex.com/books/{quote(book_id)}",
-        ttl_seconds=1800,
-    )
-    item = _map_gutendex_book(payload if isinstance(payload, dict) else {})
-    return {"domain": "books", "provider": "gutendex", "item": item, "raw": payload}
-
-
-async def _fetch_gutendex_read(book_id: str) -> dict[str, Any]:
-    info = await _fetch_gutendex_info(book_id)
-    book = info["raw"] if isinstance(info.get("raw"), dict) else {}
-    item = info["item"]
-    read_url, preview_url, downloads = _gutendex_extract_formats(book.get("formats"))
-
-    preview_text = ""
-    preview_source = preview_url or read_url
-    if preview_source and preview_source.lower().endswith((".txt", ".utf-8", ".txt.utf-8", ".txt.utf8", ".txt; charset=utf-8")):
-        try:
-            preview_text = (await _fetch_text_url(preview_source, ttl_seconds=1800))[:24000]
-        except HTTPException:
-            preview_text = ""
-
-    content = {
-        "title": item.get("title", ""),
-        "description": item.get("description", ""),
-        "url": item.get("url", ""),
-        "read_url": read_url or preview_url or item.get("url", ""),
-        "preview_text": preview_text,
-        "downloads": downloads,
-        "authors": item.get("authors", []),
-    }
-    return {"domain": "books", "provider": "gutendex", "id": book_id, "content": content, "raw": book}
-
-
-def _strip_html(value: str) -> str:
-    return unescape(
-        value.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
-    ).replace("&nbsp;", " ")
-
-
-async def _fetch_ann_feed(topic: str | None = None) -> dict[str, Any]:
-    xml_content = await _fetch_text_url(
-        "https://www.animenewsnetwork.com/news/rss.xml?ann-edition=us",
-        ttl_seconds=600,
-    )
-    root = ElementTree.fromstring(xml_content)
-    items: list[dict[str, Any]] = []
-    for entry in root.findall(".//item"):
-        title = _first_non_empty(entry.findtext("title"))
-        description = _strip_html(entry.findtext("description") or "")
-        link = _first_non_empty(entry.findtext("link"))
-        published = _first_non_empty(entry.findtext("pubDate"))
-        if topic and topic.lower() not in f"{title} {description}".lower():
-            continue
-        items.append(
-            {
-                "id": link or title,
-                "title": title,
-                "description": description,
-                "image": "",
-                "url": link,
-                "published_at": published,
-                "topic": topic or "",
-                "raw": {"title": title, "description": description, "link": link, "published_at": published},
-            }
-        )
-    return {"topic": topic or "", "items": items}
-
-
-def _language_rank(language: str | None, order: list[str]) -> int:
-    normalized = (language or "original").strip().lower()
-    synonyms = {
-        "dub": "en",
-        "english": "en",
-        "hindi": "hi",
-        "sub": "original",
-        "subbed": "original",
-        "japanese": "original",
-    }
-    normalized = synonyms.get(normalized, normalized)
-    if normalized in order:
-        return order.index(normalized)
-    return len(order)
-
-
-def _sort_subtitles(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(items, key=lambda item: (_language_rank(item.get("language"), DEFAULT_SUBTITLE_PRIORITY), item.get("label") or ""))
-
-
-def _proxy_url(url: str) -> str:
-    return f"/consumet/proxy?url={quote(url, safe='')}"
-
-
-def _normalize_subtitles(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    raw_tracks = payload.get("subtitles") or payload.get("tracks") or []
-    results: list[dict[str, Any]] = []
-    for index, item in enumerate(raw_tracks):
-        if isinstance(item, str):
-            url = item.strip()
-            if not url:
-                continue
-            label = f"Subtitle {index + 1}"
-            language = ""
-        elif isinstance(item, dict):
-            url = _first_non_empty(item.get("url"), item.get("file"))
-            if not url:
-                continue
-            label = _first_non_empty(item.get("lang"), item.get("label"), item.get("language")) or f"Subtitle {index + 1}"
-            language = _first_non_empty(item.get("srclang"), item.get("language"), item.get("lang")).lower()
-        else:
-            continue
-
-        results.append(
-            {
-                "id": f"subtitle-{index}",
-                "label": label,
-                "language": language or label.lower(),
-                "url": _proxy_url(url),
-                "originalUrl": url,
-            }
-        )
-
-    return _sort_subtitles(results)
-
-
-def normalize_watch_payload(
-    payload: dict[str, Any],
-    *,
-    provider: str,
-    requested_audio: str,
-    server: str | None,
-) -> dict[str, Any]:
-    subtitles = _normalize_subtitles(payload)
-    raw_sources = payload.get("sources") or payload.get("data") or []
-    normalized_sources: list[dict[str, Any]] = []
-    audio_priority = (
-        ["hi", "en", "original"]
-        if requested_audio == "hi"
-        else ["en", "original", "hi"]
-        if requested_audio == "en"
-        else ["original", "en", "hi"]
-    )
-
-    if isinstance(raw_sources, dict):
-        raw_sources = [raw_sources]
-
-    for index, item in enumerate(raw_sources):
-        if not isinstance(item, dict):
-            continue
-        url = _first_non_empty(item.get("url"), item.get("file"))
-        if not url:
-            continue
-        language = _first_non_empty(item.get("lang"), item.get("language"), requested_audio).lower() or "original"
-        quality = _first_non_empty(item.get("quality"), item.get("label")) or "Auto"
-        is_embed = bool(item.get("isEmbed")) or _first_non_empty(item.get("type")).lower() == "embed"
-        normalized_sources.append(
-            {
-                "id": f"{provider}-source-{index}",
-                "label": quality,
-                "provider": f"Consumet {provider}",
-                "kind": "embed" if is_embed else "hls" if item.get("isM3U8") or ".m3u8" in url.lower() else "direct",
-                "url": url,
-                "description": f"{provider} source" + (f" via {server}" if server else ""),
-                "quality": quality,
-                "mimeType": item.get("type"),
-                "externalUrl": url,
-                "canExtract": False,
-                "subtitles": subtitles,
-                "language": language,
-            }
-        )
-
-    ordered_sources = sorted(
-        normalized_sources,
-        key=lambda item: (_language_rank(item.get("language"), audio_priority), item.get("quality") != "1080p"),
-    )
-
-    return {
-        "provider": provider,
-        "requested_audio": requested_audio,
-        "available_audio": list(dict.fromkeys([(item.get("language") or "original") for item in ordered_sources])),
-        "selected_server": server or "",
-        "headers": payload.get("headers") or {},
-        "download": payload.get("download"),
-        "sources": ordered_sources,
-        "subtitles": subtitles,
-        "raw": payload,
-    }
-
-
-async def get_health_status() -> dict[str, Any]:
-    configured = _consumet_configured()
-    if not configured:
-        return {
-            "configured": False,
-            "healthy": False,
-            "api_base": "",
-            "message": "Consumet sidecar is disabled for this build. GRABIX is using built-in anime fallback mode.",
-            "mode": "fallback",
-            "default_audio_priority": DEFAULT_AUDIO_PRIORITY,
-            "default_subtitle_priority": DEFAULT_SUBTITLE_PRIORITY,
-        }
-
-    base = get_consumet_api_base()
-    try:
-        discover_payload = await _fetch_consumet_json(
-            "/anime/hianime/top10",
-            params={"period": "daily"},
-            ttl_seconds=10,
-            timeout=HEALTH_TIMEOUT,
-        )
-        discover_items = [item for item in _payload_items(discover_payload) if isinstance(item, dict)]
-
-        if discover_items:
-            healthy = True
-            message = "Consumet is reachable for Hianime anime playback."
-        else:
-            healthy = False
-            message = "Consumet is running, but Hianime returned no anime data yet. GRABIX fallback playback is ready."
-    except HTTPException as exc:
-        healthy = False
-        _ = exc
-        message = "Consumet is still warming up. GRABIX can already use built-in anime fallbacks."
-
-    return {
-        "configured": True,
-        "healthy": healthy,
-        "api_base": base,
-        "message": message,
-        "default_audio_priority": DEFAULT_AUDIO_PRIORITY,
-        "default_subtitle_priority": DEFAULT_SUBTITLE_PRIORITY,
-    }
-
-
-async def discover_anime(section: str = "trending", page: int = 1, period: str = "daily") -> dict[str, Any]:
-    section_key = (section or "trending").strip().lower()
-    period_key = (period or "daily").strip().lower()
-    try:
-        if section_key == "trending":
-            # Try requested period, then cascade: daily→weekly→monthly
-            fallback_order = {
-                "daily": ["daily", "weekly", "monthly"],
-                "weekly": ["weekly", "monthly"],
-                "monthly": ["monthly"],
-            }
-            items = []
-            for attempt_period in fallback_order.get(period_key, [period_key]):
-                try:
-                    payload = await _fetch_consumet_json("/anime/hianime/top10", params={"period": attempt_period}, ttl_seconds=300)
-                    items = [
-                        _normalize_media_item(item, "anime", "hianime")
-                        for item in _payload_items(payload)
-                        if isinstance(item, dict)
-                    ]
-                    if items:
-                        break
-                except Exception:
-                    continue
-            if items:
-                return {"section": section_key, "period": period_key, "page": page, "items": items if page == 1 else []}
-
-        route_map = {
-            "popular": "/anime/hianime/most-popular",
-            "toprated": "/anime/hianime/most-favorite",
-            "seasonal": "/anime/hianime/top-airing",
-            "movie": "/anime/hianime/movie",
-        }
-        payload = await _fetch_consumet_json(
-            route_map.get(section_key, route_map["popular"]),
-            params={"page": page},
-            ttl_seconds=600,
-        )
-        items = [
-            _normalize_media_item(item, "anime", "hianime")
-            for item in _payload_items(payload)
-            if isinstance(item, dict)
-        ]
-        if items:
-            return {"section": section_key, "period": period_key, "page": page, "items": items}
-    except (HTTPException, ConsumetConfigError):
-        pass
-
-    urls = {
-        "trending": f"https://api.jikan.moe/v4/top/anime?filter=airing&page={page}&limit=10",
-        "popular": f"https://api.jikan.moe/v4/top/anime?filter=bypopularity&page={page}&limit=20",
-        "toprated": f"https://api.jikan.moe/v4/top/anime?page={page}&limit=20",
-        "seasonal": f"https://api.jikan.moe/v4/seasons/now?page={page}&limit=20",
-        "movie": f"https://api.jikan.moe/v4/top/anime?type=movie&page={page}&limit=20",
-    }
-    url = urls.get(section_key, urls["popular"])
-    payload = await _fetch_json_url(url, ttl_seconds=900)
-    items = []
-    for raw in payload.get("data") or []:
-        if not isinstance(raw, dict):
-            continue
-        title = _first_non_empty(raw.get("title_english"), raw.get("title"))
-        image = (
-            (((raw.get("images") or {}).get("jpg") or {}).get("large_image_url"))
-            or (((raw.get("images") or {}).get("jpg") or {}).get("image_url"))
-            or ""
-        )
-        items.append(
-            {
-                "id": str(raw.get("mal_id") or ""),
-                "provider": "jikan",
-                "type": "anime",
-                "title": title,
-                "alt_title": _first_non_empty(raw.get("title")),
-                "image": image,
-                "description": _first_non_empty(raw.get("synopsis")),
-                "year": raw.get("year"),
-                "rating": float(raw.get("score")) if raw.get("score") else None,
-                "status": _first_non_empty(raw.get("status")),
-                "genres": [genre.get("name") for genre in raw.get("genres") or [] if isinstance(genre, dict) and genre.get("name")],
-                "languages": ["original"],
-                "url": raw.get("url") or "",
-                "mal_id": raw.get("mal_id"),
-                "episodes": raw.get("episodes"),
-                "trailer_url": ((raw.get("trailer") or {}).get("embed_url")) or "",
-            }
-        )
-
-    return {"section": section_key, "period": period_key, "page": page, "items": items}
-
-
-async def discover_manga(section: str = "trending", page: int = 1) -> dict[str, Any]:
-    section_key = (section or "trending").strip().lower()
-    if section_key == "seasonal":
-        current_month = datetime.utcnow().month
-        season = "WINTER" if current_month <= 3 else "SPRING" if current_month <= 6 else "SUMMER" if current_month <= 9 else "FALL"
-        raw_items = await get_seasonal_manga(datetime.utcnow().year, season)
-        items = [
-            {
-                "id": str(item.get("mangadex_id") or item.get("anilist_id") or item.get("mal_id") or item.get("title") or ""),
-                "provider": "anilist",
-                "type": "manga",
-                "title": item.get("title") or "",
-                "alt_title": "",
-                "image": item.get("cover_image") or "",
-                "description": item.get("description") or "",
-                "year": item.get("year"),
-                "rating": float(item.get("score")) if item.get("score") is not None else None,
-                "status": item.get("status") or "",
-                "genres": item.get("genres") or [],
-                "languages": ["en"],
-                "url": "",
-                "anilist_id": item.get("anilist_id"),
-                "mangadex_id": item.get("mangadex_id"),
-                "mal_id": item.get("mal_id"),
-            }
-            for item in raw_items
-        ]
-        return {"section": section_key, "page": page, "items": items}
-    if section_key == "hot":
-        raw_items = await get_comick_frontpage(section="trending", page=page, limit=12, days=7)
-    else:
-        raw_items = await get_trending_manga(page=page)
-    items = [
-        {
-            "id": str(item.get("mangadex_id") or item.get("anilist_id") or item.get("mal_id") or item.get("title") or ""),
-            "provider": "comick" if section_key == "hot" else "anilist",
-            "type": "manga",
-            "title": item.get("title") or "",
-            "alt_title": "",
-            "image": item.get("cover_image") or "",
-            "description": item.get("description") or "",
-            "year": item.get("year"),
-            "rating": float(item.get("score")) if item.get("score") is not None else None,
-            "status": item.get("status") or "",
-            "genres": item.get("genres") or [],
-            "languages": ["en"],
-            "url": "",
-            "anilist_id": item.get("anilist_id"),
-            "mangadex_id": item.get("mangadex_id"),
-            "mal_id": item.get("mal_id"),
-        }
-        for item in raw_items
-    ]
-    return {"section": section_key, "page": page, "items": items}
-
-
-async def search_domain(
+@router.get("/search/{domain}")
+async def consumet_search(
     domain: str,
-    query: str,
-    *,
-    provider: str,
-    page: int = 1,
-) -> dict[str, Any]:
-    if domain == "books" and provider == "gutendex":
-        try:
-            return await _search_gutendex(query, page)
-        except HTTPException:
-            pass
-
-    if domain in {"books", "comics", "light-novels"}:
-        try:
-            return await _search_openlibrary(domain, query, page)
-        except HTTPException:
-            pass
-
-    if domain == "anime":
-        if not _consumet_configured():
-            return await _search_jikan_anime(query, page, provider)
-        try:
-            path = f"/anime/{provider}/{quote(query)}"
-            payload = await _fetch_consumet_json(path, params={"page": page}, ttl_seconds=600)
-        except (HTTPException, ConsumetConfigError):
-            return await _search_jikan_anime(query, page, provider)
-    elif domain == "manga":
-        if not _consumet_configured():
-            return await _search_mangadex_manga(query, provider, page)
-        path = f"/manga/{provider}/{quote(query)}"
-        payload = await _fetch_consumet_json(path, ttl_seconds=600)
-    else:
-        path = f"/{domain}/{provider}/{quote(query)}"
-        payload = await _fetch_consumet_json(path, params={"page": page}, ttl_seconds=600)
-
-    raw_items = _payload_items(payload)
-    items = [
-        _normalize_media_item(item, domain, provider)
-        for item in raw_items
-        if isinstance(item, dict)
-    ]
-    return {"domain": domain, "provider": provider, "query": query, "page": page, "items": items}
-
-
-async def fetch_domain_info(domain: str, provider: str, media_id: str) -> dict[str, Any]:
-    if domain == "books" and provider == "gutendex":
-        return await _fetch_gutendex_info(media_id)
-
-    if provider == "openlibrary" or domain in {"books", "comics", "light-novels"}:
-        return await _fetch_openlibrary_info(domain, media_id)
-
-    if domain == "anime" and provider == "jikan":
-        detail = await _fetch_jikan_anime_full(media_id, provider)
-        episodes = await _fetch_jikan_anime_episodes(media_id, provider)
-        detail["item"]["episodes"] = episodes.get("items") or []
-        return detail
-
-    if domain == "anime" and provider in {"zoro", "hianime", "gogoanime"} and not _consumet_configured():
-        detail = await _fetch_jikan_anime_full(media_id, provider)
-        episodes = await _fetch_jikan_anime_episodes(media_id, provider)
-        detail["item"]["episodes"] = episodes.get("items") or []
-        return detail
-
-    if domain == "anime" and provider in {"zoro", "hianime", "animekai", "kickassanime"}:
-        try:
-            path = f"/anime/{provider}/info"
-            payload = await _fetch_consumet_json(
-                path,
-                params={"id": media_id},
-                ttl_seconds=1800,
-                timeout=ANIME_INFO_TIMEOUT,
-            )
-        except (HTTPException, ConsumetConfigError):
-            detail = await _fetch_jikan_anime_full(media_id, provider)
-            episodes = await _fetch_jikan_anime_episodes(media_id, provider)
-            detail["item"]["episodes"] = episodes.get("items") or []
-            return detail
-    elif domain == "anime":
-        try:
-            path = f"/anime/{provider}/info/{quote(media_id)}"
-            payload = await _fetch_consumet_json(
-                path,
-                ttl_seconds=1800,
-                timeout=ANIME_INFO_TIMEOUT,
-            )
-        except (HTTPException, ConsumetConfigError):
-            detail = await _fetch_jikan_anime_full(media_id, provider)
-            episodes = await _fetch_jikan_anime_episodes(media_id, provider)
-            detail["item"]["episodes"] = episodes.get("items") or []
-            return detail
-    elif domain == "manga" and not _consumet_configured():
-        return await _fetch_mangadex_manga_detail(media_id, provider)
-    elif domain == "manga":
-        path = f"/manga/{provider}/info/{quote(media_id)}"
-        payload = await _fetch_consumet_json(path, ttl_seconds=1800)
-    else:
-        path = f"/{domain}/{provider}/info/{quote(media_id)}"
-        payload = await _fetch_consumet_json(path, ttl_seconds=1800)
-
-    item = payload if isinstance(payload, dict) else {"value": payload}
-    normalized = _normalize_media_item(item, domain, provider)
-
-    if domain == "anime":
-        episodes = [
-            _normalize_episode_item(episode, provider, index + 1)
-            for index, episode in enumerate(_payload_items({"episodes": item.get("episodes") or []}))
-            if isinstance(episode, dict)
-        ]
-        normalized["episodes"] = episodes
-    elif domain == "manga":
-        chapters = [
-            _normalize_chapter_item(chapter, provider, index + 1)
-            for index, chapter in enumerate(_payload_items({"chapters": item.get("chapters") or []}))
-            if isinstance(chapter, dict)
-        ]
-        normalized["chapters"] = chapters
-
-    return {
-        "domain": domain,
-        "provider": provider,
-        "item": normalized,
-        "raw": payload,
-    }
-
-
-async def fetch_anime_episodes(provider: str, media_id: str) -> dict[str, Any]:
-    if provider == "jikan":
-        return await _fetch_jikan_anime_episodes(media_id, provider)
-    if not _consumet_configured():
-        return await _fetch_jikan_anime_episodes(media_id, provider)
+    query: str = Query(..., min_length=1),
+    provider: str = Query("zoro"),
+    page: int = Query(1, ge=1),
+):
     try:
-        detail = await fetch_domain_info("anime", provider, media_id)
-        return {
-            "provider": provider,
-            "id": media_id,
-            "items": detail["item"].get("episodes") or [],
-        }
-    except (HTTPException, ConsumetConfigError):
-        return await _fetch_jikan_anime_episodes(media_id, provider)
+        return await search_domain(domain=domain, query=query, provider=provider, page=page)
+    except Exception as exc:
+        logger.error("consumet_search failed: %s", exc)
+        return JSONResponse(status_code=502, content={"results": [], "error": str(exc)})
 
 
-async def fetch_manga_chapters(provider: str, media_id: str) -> dict[str, Any]:
-    if not _consumet_configured():
-        detail = await _fetch_mangadex_manga_detail(media_id, provider)
-        return {
-            "provider": provider,
-            "id": media_id,
-            "items": detail["item"].get("chapters") or [],
-        }
-    detail = await fetch_domain_info("manga", provider, media_id)
-    return {
-        "provider": provider,
-        "id": media_id,
-        "items": detail["item"].get("chapters") or [],
+@router.get("/info/{domain}")
+async def consumet_info(
+    domain: str,
+    id: str = Query(..., min_length=1),
+    provider: str = Query("zoro"),
+):
+    try:
+        return await fetch_domain_info(domain=domain, provider=provider, media_id=id)
+    except Exception as exc:
+        logger.error("consumet_info failed: %s", exc)
+        return JSONResponse(status_code=502, content={"error": str(exc)})
+
+
+@router.get("/episodes/anime")
+async def consumet_anime_episodes(
+    id: str = Query(..., min_length=1),
+    provider: str = Query("zoro"),
+):
+    try:
+        return await fetch_anime_episodes(provider=provider, media_id=id)
+    except Exception as exc:
+        logger.error("consumet_anime_episodes failed: %s", exc)
+        return JSONResponse(status_code=502, content={"items": [], "error": str(exc)})
+
+
+@router.get("/chapters/manga")
+async def consumet_manga_chapters(
+    id: str = Query(..., min_length=1),
+    provider: str = Query("mangadex"),
+):
+    try:
+        return await fetch_manga_chapters(provider=provider, media_id=id)
+    except Exception as exc:
+        logger.error("consumet_manga_chapters failed: %s", exc)
+        return JSONResponse(status_code=502, content={"items": [], "error": str(exc)})
+
+
+@router.get("/watch/anime")
+async def consumet_watch_anime(
+    episode_id: str = Query(..., min_length=1),
+    provider: str = Query("zoro"),
+    server: str | None = Query(None),
+    audio: str = Query("hi"),
+):
+    try:
+        return await fetch_anime_watch(
+            provider=provider,
+            episode_id=episode_id,
+            server=server,
+            audio=audio,
+        )
+    except Exception as exc:
+        logger.error("consumet_watch_anime failed: %s", exc)
+        return JSONResponse(
+            status_code=502,
+            content={"sources": [], "subtitles": [], "error": str(exc)},
+        )
+
+
+@router.get("/read/manga")
+async def consumet_read_manga(
+    chapter_id: str = Query(..., min_length=1),
+    provider: str = Query("mangadex"),
+):
+    try:
+        return await fetch_manga_read(provider=provider, chapter_id=chapter_id)
+    except Exception as exc:
+        logger.error("consumet_read_manga failed: %s", exc)
+        return JSONResponse(status_code=502, content={"pages": [], "error": str(exc)})
+
+
+@router.get("/read/{domain}")
+async def consumet_read_generic(
+    domain: str,
+    id: str = Query(..., min_length=1),
+    provider: str = Query("libgen"),
+):
+    try:
+        return await fetch_generic_read(domain=domain, provider=provider, item_id=id)
+    except Exception as exc:
+        logger.error("consumet_read_generic failed: %s", exc)
+        return JSONResponse(status_code=502, content={"error": str(exc)})
+
+
+@router.get("/news/feed")
+async def consumet_news_feed(
+    topic: str | None = Query(None),
+):
+    try:
+        return await fetch_news_feed(topic=topic)
+    except Exception as exc:
+        logger.error("consumet_news_feed failed: %s", exc)
+        return JSONResponse(status_code=502, content={"items": [], "error": str(exc)})
+
+
+@router.get("/news/article")
+async def consumet_news_article(
+    id: str = Query(..., min_length=1),
+):
+    try:
+        return await fetch_news_article(article_id=id)
+    except Exception as exc:
+        logger.error("consumet_news_article failed: %s", exc)
+        return JSONResponse(status_code=502, content={"error": str(exc)})
+
+
+@router.get("/meta/search")
+async def consumet_meta_search(
+    query: str = Query(..., min_length=1),
+    type: str = Query("movie"),
+):
+    try:
+        return await fetch_meta_search(query=query, media_type=type)
+    except Exception as exc:
+        logger.error("consumet_meta_search failed: %s", exc)
+        return JSONResponse(status_code=502, content={"results": [], "error": str(exc)})
+
+
+@router.get("/meta/info")
+async def consumet_meta_info(
+    id: str = Query(..., min_length=1),
+    type: str = Query("movie"),
+):
+    try:
+        return await fetch_meta_info(item_id=id, media_type=type)
+    except Exception as exc:
+        logger.error("consumet_meta_info failed: %s", exc)
+        return JSONResponse(status_code=502, content={"error": str(exc)})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _title_score(result_title: str, query: str) -> int:
+    """Simple scoring — higher is better match."""
+    r = result_title.lower().strip()
+    q = query.lower().strip()
+    if r == q:
+        return 100
+    if r.startswith(q) or q.startswith(r):
+        return 80
+    q_words = set(q.split())
+    r_words = set(r.split())
+    overlap = len(q_words & r_words)
+    return overlap * 10
+
+
+def _safe_error_body(response) -> str:
+    """Extract a readable error string from a non-2xx httpx response."""
+    try:
+        body = response.json()
+        # consumet-local returns {"detail": "..."} for errors
+        return str(body.get("detail") or body.get("error") or body.get("message") or body)[:400]
+    except Exception:
+        return response.text[:400].strip()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  /anime/stream  —  the anime.py flow, fully replicated inside the backend
+#
+#  anime.py does:
+#    1. GET /anime/hianime/{query}           → search results
+#    2. pick best match, grab anime_id
+#    3. GET /anime/hianime/info?id={id}      → episode list with real ep IDs
+#    4. pick episode, grab ep_id
+#    5. GET /anime/hianime/watch/{ep_id}?server=vidcloud&category=sub  → stream
+#
+#  This endpoint does EXACTLY that, server-side, so the browser never has to
+#  touch port 3000 and CORS is not a factor.
+#
+#  The frontend passes:
+#    title       — anime title to search for (use original/alt title too)
+#    episode     — episode number (1-based)
+#    audio       — "sub" or "dub"
+#    anime_id    — optional known HiAnime ID (skips search step if provided)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/anime/stream")
+async def consumet_anime_stream(
+    title: str = Query(..., min_length=1, description="Anime title to search for"),
+    episode: int = Query(1, ge=1, description="Episode number (1-based)"),
+    audio: str = Query("sub", description="'sub' or 'dub'"),
+    anime_id: str | None = Query(None, description="Optional known HiAnime ID — skips search"),
+    alt_title: str | None = Query(None, description="Alt title to try if primary search fails"),
+):
+    """
+    Full anime.py streaming pipeline, server-side.
+
+    Replicates anime.py steps 1-7 exactly:
+      search → pick best match → info/episodes → watch
+    Returns the raw Consumet payload (sources + subtitles).
+
+    On failure, returns a detailed error body including:
+      - _step: which step failed (search / info / watch)
+      - _anime_id / _episode_id: resolved IDs for debugging
+      - _attempt_errors: per-server error messages from the sidecar
+      - _sidecar_hint: actionable fix suggestion
+    """
+    import httpx
+    from urllib.parse import quote as urlquote
+    from app.services.consumet import get_consumet_api_base
+
+    base = get_consumet_api_base()
+    category = "dub" if audio.strip().lower() == "dub" else "sub"
+    fallback_category = "sub" if category == "dub" else "dub"
+    servers = ["vidcloud", "vidstreaming"]
+
+    async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as client:
+
+        # ── Step 1: Resolve anime ID ─────────────────────────────────────────
+        resolved_id: str | None = anime_id  # use caller's hint if present
+
+        if not resolved_id:
+            search_titles = [title]
+            if alt_title and alt_title.strip() and alt_title.strip() != title.strip():
+                search_titles.append(alt_title.strip())
+
+            for search_term in search_titles:
+                try:
+                    r = await client.get(
+                        f"{base}/anime/hianime/{urlquote(search_term)}",
+                        timeout=15.0,
+                    )
+                    if r.status_code >= 400:
+                        logger.warning(
+                            "anime/stream: search HTTP %d for '%s' — sidecar: %s",
+                            r.status_code, search_term, _safe_error_body(r),
+                        )
+                        continue
+                    data = r.json()
+                    results = data.get("results") or []
+                    if not results:
+                        continue
+                    best = max(results, key=lambda x: _title_score(str(x.get("title", "")), search_term))
+                    resolved_id = str(best.get("id", ""))
+                    if resolved_id:
+                        logger.info("anime/stream: resolved '%s' → id=%s", search_term, resolved_id)
+                        break
+                except Exception as exc:
+                    logger.warning("anime/stream: search failed for '%s': %s", search_term, exc)
+
+        if not resolved_id:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "sources": [],
+                    "subtitles": [],
+                    "error": (
+                        f"Could not find '{title}' on HiAnime. "
+                        "Check the title spelling, or try the original Japanese title."
+                    ),
+                    "_step": "search",
+                    "_sidecar_hint": (
+                        "If HiAnime search consistently fails, check that the consumet sidecar "
+                        "is running: open a terminal and run 'cd consumet-local && node server.cjs'"
+                    ),
+                },
+            )
+
+        # ── Step 2: Get episode list (mirrors anime.py step 3) ───────────────
+        ep_id: str | None = None
+        info_error: str = ""
+        try:
+            r2 = await client.get(
+                f"{base}/anime/hianime/info",
+                params={"id": resolved_id},
+                timeout=20.0,
+            )
+            if r2.status_code < 400:
+                data2 = r2.json()
+                episodes = data2.get("episodes") or []
+                ep_obj = next((e for e in episodes if e.get("number") == episode), None)
+                if ep_obj is None and episodes:
+                    idx = min(episode - 1, len(episodes) - 1)
+                    ep_obj = episodes[idx]
+                if ep_obj:
+                    ep_id = str(ep_obj.get("id") or ep_obj.get("episodeId") or "")
+            else:
+                info_error = _safe_error_body(r2)
+                logger.warning(
+                    "anime/stream: info HTTP %d for id=%s — sidecar: %s",
+                    r2.status_code, resolved_id, info_error,
+                )
+        except Exception as exc:
+            info_error = str(exc)
+            logger.warning("anime/stream: info fetch failed for id=%s: %s", resolved_id, exc)
+
+        if not ep_id:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "sources": [],
+                    "subtitles": [],
+                    "error": (
+                        f"Episode {episode} not found for '{title}' "
+                        f"(anime_id={resolved_id}). "
+                        + (f"Sidecar error: {info_error}" if info_error else "")
+                    ),
+                    "_step": "info",
+                    "_anime_id": resolved_id,
+                    "_sidecar_error": info_error,
+                    "_sidecar_hint": (
+                        "The sidecar returned no episode list. "
+                        "Try restarting it: 'cd consumet-local && node server.cjs'"
+                    ),
+                },
+            )
+
+        # ── Step 3: Get stream (mirrors anime.py step 7) ─────────────────────
+        # Try preferred audio first, then fallback — exactly like anime.py.
+        # KEY FIX: capture the actual sidecar error body from every 4xx/5xx
+        # response so we can surface it to the user instead of silently dropping it.
+        attempt_errors: list[str] = []
+
+        for cat in [category, fallback_category]:
+            for srv in servers:
+                try:
+                    watch_url = f"{base}/anime/hianime/watch/{urlquote(ep_id, safe='')}"
+                    r3 = await client.get(
+                        watch_url,
+                        params={"server": srv, "category": cat},
+                        timeout=35.0,
+                    )
+
+                    if r3.status_code >= 400:
+                        # ← FIXED: read the actual sidecar error, not just the status code
+                        sidecar_err = _safe_error_body(r3)
+                        attempt_errors.append(
+                            f"{srv}/{cat}: HTTP {r3.status_code} — {sidecar_err}"
+                        )
+                        logger.warning(
+                            "anime/stream: watch HTTP %d ep=%s server=%s cat=%s — sidecar: %s",
+                            r3.status_code, ep_id, srv, cat, sidecar_err,
+                        )
+                        continue
+
+                    data3 = r3.json()
+                    sources = data3.get("sources") or []
+
+                    if not sources:
+                        # Sources array is present but empty
+                        inner_err = data3.get("error") or data3.get("detail") or "empty sources array"
+                        attempt_errors.append(f"{srv}/{cat}: 200 OK but no sources — {inner_err}")
+                        logger.debug(
+                            "anime/stream: empty sources for ep=%s server=%s cat=%s — %s",
+                            ep_id, srv, cat, inner_err,
+                        )
+                        continue
+
+                    # ✓ Got real sources — annotate and return
+                    data3["_anime_id"] = resolved_id
+                    data3["_episode_id"] = ep_id
+                    data3["_server_used"] = srv
+                    data3["_category_used"] = cat
+                    logger.info(
+                        "anime/stream: ✓ %d sources for '%s' ep%d via %s/%s",
+                        len(sources), title, episode, srv, cat,
+                    )
+                    return JSONResponse(content=data3)
+
+                except Exception as exc:
+                    attempt_errors.append(f"{srv}/{cat}: exception — {exc}")
+                    logger.warning(
+                        "anime/stream: watch exception ep=%s server=%s cat=%s: %s",
+                        ep_id, srv, cat, exc,
+                    )
+
+        # ── All server/category combos failed ────────────────────────────────
+        # Build a human-readable hint from the actual sidecar errors collected above.
+        hint = _build_sidecar_hint(attempt_errors)
+
+        logger.error(
+            "anime/stream: all attempts failed for '%s' ep%d (id=%s ep_id=%s). Errors: %s",
+            title, episode, resolved_id, ep_id, attempt_errors,
+        )
+
+        return JSONResponse(
+            status_code=502,
+            content={
+                "sources": [],
+                "subtitles": [],
+                "error": (
+                    f"No playable stream found for '{title}' episode {episode}. "
+                    f"Tried vidcloud + vidstreaming ({category.upper()} + {fallback_category.upper()}). "
+                    f"{hint}"
+                ),
+                "_anime_id": resolved_id,
+                "_episode_id": ep_id,
+                "_step": "watch",
+                "_attempt_errors": attempt_errors,
+                "_sidecar_hint": hint,
+            },
+        )
+
+
+def _build_sidecar_hint(attempt_errors: list[str]) -> str:
+    """
+    Turn the raw list of sidecar error strings into a human-readable fix hint.
+    Looks for known patterns from the consumet-local server.cjs error messages.
+    """
+    combined = " ".join(attempt_errors).lower()
+
+    if not attempt_errors:
+        return "No attempt was made — the sidecar may be unreachable."
+
+    if "connection refused" in combined or "connect call failed" in combined:
+        return (
+            "The consumet sidecar is NOT running. "
+            "Open a terminal and run: cd consumet-local && node server.cjs"
+        )
+
+    if "aniwatch" in combined and ("outdated" in combined or "megacloud" in combined):
+        return (
+            "The aniwatch npm package is outdated. "
+            "Fix: cd consumet-local && npm update aniwatch && node server.cjs"
+        )
+
+    if "encrypted" in combined and "no key" in combined:
+        return (
+            "MegaCloud is using encrypted sources and the current key is missing. "
+            "Fix: cd consumet-local && npm update aniwatch && node server.cjs"
+        )
+
+    if "encrypted" in combined:
+        return (
+            "MegaCloud encryption detected. The aniwatch package may need updating. "
+            "Fix: cd consumet-local && npm update aniwatch && node server.cjs"
+        )
+
+    if "invalid episode id" in combined:
+        return (
+            "The episode ID format was rejected by the sidecar. "
+            "This is a bug — please report it with the _episode_id value."
+        )
+
+    if "502" in combined or "bad gateway" in combined:
+        return (
+            "The sidecar itself is returning errors. "
+            "Try: cd consumet-local && npm update aniwatch && node server.cjs"
+        )
+
+    # Generic fallback
+    return (
+        "The episode may not be available on HiAnime yet, or the sidecar needs a restart. "
+        "Try: cd consumet-local && node server.cjs"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  /anime/debug-stream  —  same pipeline as /anime/stream but returns every
+#  intermediate result so you can see exactly where it breaks.
+#
+#  Call this from the browser / curl when /anime/stream fails.
+#  It never throws — it always returns a JSON report.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/anime/debug-stream")
+async def consumet_anime_debug_stream(
+    title: str = Query(..., min_length=1),
+    episode: int = Query(1, ge=1),
+    audio: str = Query("sub"),
+    anime_id: str | None = Query(None),
+    alt_title: str | None = Query(None),
+):
+    """
+    Diagnostic endpoint — runs the full anime.py pipeline and returns every
+    intermediate result so you can see exactly which step is failing.
+
+    Returns a JSON report with:
+      - sidecar_reachable: bool
+      - step1_search: search results + chosen ID
+      - step2_info: episode list + resolved ep_id
+      - step3_watch: per-server attempt results with full sidecar response bodies
+      - verdict: human-readable summary of what went wrong
+    """
+    import httpx
+    from urllib.parse import quote as urlquote
+    from app.services.consumet import get_consumet_api_base
+
+    base = get_consumet_api_base()
+    report: dict = {
+        "title": title,
+        "episode": episode,
+        "audio": audio,
+        "anime_id_hint": anime_id,
+        "sidecar_base": base,
+        "sidecar_reachable": False,
+        "step1_search": {},
+        "step2_info": {},
+        "step3_watch": [],
+        "verdict": "",
     }
 
+    async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as client:
 
-async def fetch_anime_watch(
-    *,
-    provider: str,
-    episode_id: str,
-    server: str | None = None,
-    audio: str = "hi",
-) -> dict[str, Any]:
-    requested_audio = (audio or "hi").strip().lower()
+        # ── Sidecar health check ──────────────────────────────────────────────
+        try:
+            hc = await client.get(f"{base}/", timeout=5.0)
+            report["sidecar_reachable"] = hc.status_code < 500
+            try:
+                report["sidecar_home"] = hc.json()
+            except Exception:
+                report["sidecar_home"] = hc.text[:200]
+        except Exception as exc:
+            report["sidecar_reachable"] = False
+            report["sidecar_home"] = f"ERROR: {exc}"
+            report["verdict"] = (
+                f"Sidecar is NOT reachable at {base}. "
+                "Run: cd consumet-local && node server.cjs"
+            )
+            return JSONResponse(content=report)
 
-    if not _consumet_configured():
-        return {
-            "provider": provider,
-            "requested_audio": requested_audio,
-            "available_audio": [requested_audio],
-            "selected_server": server or "fallback",
-            "headers": {},
-            "download": "",
+        # ── Step 1: Search ────────────────────────────────────────────────────
+        resolved_id: str | None = anime_id
+        step1: dict = {"skipped": bool(anime_id), "anime_id_used": anime_id}
+
+        if not resolved_id:
+            search_titles = [title]
+            if alt_title and alt_title.strip() and alt_title.strip() != title.strip():
+                search_titles.append(alt_title.strip())
+
+            step1["attempts"] = []
+            for search_term in search_titles:
+                attempt: dict = {"query": search_term}
+                try:
+                    r = await client.get(
+                        f"{base}/anime/hianime/{urlquote(search_term)}", timeout=15.0
+                    )
+                    attempt["status"] = r.status_code
+                    if r.status_code < 400:
+                        data = r.json()
+                        results = data.get("results") or []
+                        attempt["result_count"] = len(results)
+                        attempt["top5"] = [
+                            {"id": x.get("id"), "title": x.get("title")} for x in results[:5]
+                        ]
+                        if results:
+                            best = max(
+                                results,
+                                key=lambda x: _title_score(str(x.get("title", "")), search_term),
+                            )
+                            resolved_id = str(best.get("id", ""))
+                            attempt["chosen_id"] = resolved_id
+                            attempt["chosen_title"] = best.get("title")
+                    else:
+                        attempt["error"] = _safe_error_body(r)
+                except Exception as exc:
+                    attempt["error"] = str(exc)
+                step1["attempts"].append(attempt)
+                if resolved_id:
+                    break
+
+        step1["resolved_id"] = resolved_id
+        report["step1_search"] = step1
+
+        if not resolved_id:
+            report["verdict"] = (
+                f"FAILED at step 1 (search). Could not find '{title}' on HiAnime. "
+                "Try the Japanese title, or check that the sidecar can reach aniwatchtv.to"
+            )
+            return JSONResponse(content=report)
+
+        # ── Step 2: Info / episode list ───────────────────────────────────────
+        ep_id: str | None = None
+        step2: dict = {"anime_id": resolved_id}
+        try:
+            r2 = await client.get(
+                f"{base}/anime/hianime/info", params={"id": resolved_id}, timeout=20.0
+            )
+            step2["status"] = r2.status_code
+            if r2.status_code < 400:
+                data2 = r2.json()
+                episodes = data2.get("episodes") or []
+                step2["total_episodes"] = len(episodes)
+                step2["sub_count"] = data2.get("subEpisodeCount", "?")
+                step2["dub_count"] = data2.get("dubEpisodeCount", "?")
+                step2["first5_episodes"] = [
+                    {"number": e.get("number"), "id": e.get("id"), "title": e.get("title")}
+                    for e in episodes[:5]
+                ]
+                ep_obj = next((e for e in episodes if e.get("number") == episode), None)
+                if ep_obj is None and episodes:
+                    idx = min(episode - 1, len(episodes) - 1)
+                    ep_obj = episodes[idx]
+                if ep_obj:
+                    ep_id = str(ep_obj.get("id") or ep_obj.get("episodeId") or "")
+                    step2["ep_obj"] = ep_obj
+                    step2["ep_id"] = ep_id
+                else:
+                    step2["error"] = f"Episode {episode} not found in list of {len(episodes)}"
+            else:
+                step2["error"] = _safe_error_body(r2)
+        except Exception as exc:
+            step2["error"] = str(exc)
+
+        report["step2_info"] = step2
+
+        if not ep_id:
+            report["verdict"] = (
+                f"FAILED at step 2 (info). "
+                f"Could not resolve episode {episode} for anime_id={resolved_id}. "
+                + (step2.get("error") or "")
+            )
+            return JSONResponse(content=report)
+
+        # ── Step 3: Watch — try all server/category combos ────────────────────
+        category = "dub" if audio.strip().lower() == "dub" else "sub"
+        fallback_category = "sub" if category == "dub" else "dub"
+        watch_results: list[dict] = []
+        got_sources = False
+
+        for cat in [category, fallback_category]:
+            for srv in ["vidcloud", "vidstreaming"]:
+                attempt: dict = {"server": srv, "category": cat, "ep_id": ep_id}
+                try:
+                    watch_url = f"{base}/anime/hianime/watch/{urlquote(ep_id, safe='')}"
+                    r3 = await client.get(
+                        watch_url, params={"server": srv, "category": cat}, timeout=35.0
+                    )
+                    attempt["status"] = r3.status_code
+                    if r3.status_code >= 400:
+                        attempt["sidecar_error"] = _safe_error_body(r3)
+                        attempt["result"] = "FAILED"
+                    else:
+                        data3 = r3.json()
+                        sources = data3.get("sources") or []
+                        attempt["source_count"] = len(sources)
+                        attempt["subtitle_count"] = len(data3.get("subtitles") or [])
+                        if sources:
+                            attempt["result"] = "SUCCESS"
+                            attempt["first_source"] = sources[0]
+                            got_sources = True
+                        else:
+                            attempt["result"] = "EMPTY_SOURCES"
+                            attempt["sidecar_error"] = (
+                                data3.get("error") or data3.get("detail") or "No sources in 200 response"
+                            )
+                except Exception as exc:
+                    attempt["result"] = "EXCEPTION"
+                    attempt["sidecar_error"] = str(exc)
+                watch_results.append(attempt)
+
+        report["step3_watch"] = watch_results
+
+        # ── Verdict ───────────────────────────────────────────────────────────
+        if got_sources:
+            report["verdict"] = (
+                "✅ Stream found! The debug run succeeded. "
+                "If /anime/stream is still failing, try again — it may have been a transient error."
+            )
+        else:
+            all_errors = [
+                a.get("sidecar_error", "") for a in watch_results if a.get("sidecar_error")
+            ]
+            report["verdict"] = (
+                "❌ FAILED at step 3 (watch). "
+                + _build_sidecar_hint(
+                    [f"{a['server']}/{a['category']}: {a.get('sidecar_error','')}" for a in watch_results]
+                )
+            )
+            report["all_sidecar_errors"] = all_errors
+
+    return JSONResponse(content=report)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  /anime/debug-watch/{ep_id}  —  proxy to the sidecar's built-in debug-watch
+#  endpoint which diagnoses MegaCloud extraction step by step.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/anime/debug-watch/{ep_id:path}")
+async def consumet_anime_debug_watch(ep_id: str):
+    """
+    Proxies GET /anime/hianime/debug-watch/{ep_id} from the consumet sidecar.
+
+    The sidecar's debug-watch endpoint shows:
+      - Step 1: server list from HiAnime AJAX
+      - Step 2: embed link for first server
+      - Step 3: MegaCloud AJAX response (encrypted? key present? sources count?)
+      - verdict: ✅ / ⚠️ / ❌
+
+    Call this when /anime/debug-stream shows step 3 failing.
+    You need the ep_id (e.g. jujutsu-kaisen-18679?ep=126296) from step2_info.ep_id.
+    """
+    import httpx
+    from urllib.parse import quote as urlquote
+    from app.services.consumet import get_consumet_api_base
+
+    base = get_consumet_api_base()
+
+    try:
+        async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as client:
+            url = f"{base}/anime/hianime/debug-watch/{urlquote(ep_id, safe='')}"
+            r = await client.get(url, timeout=35.0)
+            try:
+                return JSONResponse(content=r.json(), status_code=r.status_code)
+            except Exception:
+                return JSONResponse(
+                    content={"raw": r.text[:2000], "status": r.status_code},
+                    status_code=r.status_code,
+                )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": str(exc),
+                "hint": f"Could not reach sidecar at {base}. Is it running?",
+            },
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  /watch/anime/raw  —  kept as-is for backward compatibility
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/watch/anime/raw")
+async def consumet_watch_anime_raw(
+    episode_id: str = Query(..., min_length=1),
+    server: str = Query("vidcloud"),
+    category: str = Query("sub"),
+):
+    """
+    Raw pass-through of the Consumet watch call — no normalization.
+    Use /anime/stream instead (which also handles search + episode lookup).
+    This is kept for direct episode-ID callers.
+    """
+    import httpx
+    from urllib.parse import quote as urlquote
+    from app.services.consumet import get_consumet_api_base
+
+    base = get_consumet_api_base()
+    url = f"{base}/anime/hianime/watch/{urlquote(episode_id, safe='')}"
+    servers_to_try = ["vidcloud", "vidstreaming"] if server in ("auto", "") else [server]
+    if server not in ("auto", "") and server == "vidcloud":
+        servers_to_try = ["vidcloud", "vidstreaming"]
+    elif server not in ("auto", "") and server == "vidstreaming":
+        servers_to_try = ["vidstreaming", "vidcloud"]
+
+    attempt_errors: list[str] = []
+    async with httpx.AsyncClient(timeout=35.0, follow_redirects=True) as client:
+        for srv in servers_to_try:
+            try:
+                r = await client.get(url, params={"server": srv, "category": category})
+                if r.status_code >= 400:
+                    err = _safe_error_body(r)
+                    attempt_errors.append(f"{srv}: HTTP {r.status_code} — {err}")
+                    continue
+                data = r.json()
+                sources = data.get("sources") or []
+                if not sources:
+                    attempt_errors.append(f"{srv}: 200 OK but no sources")
+                    continue
+                data["_server_used"] = srv
+                data["_category_used"] = category
+                return JSONResponse(content=data)
+            except Exception as exc:
+                attempt_errors.append(f"{srv}: exception — {exc}")
+                continue
+
+    return JSONResponse(
+        status_code=502,
+        content={
             "sources": [],
             "subtitles": [],
-            "raw": {"fallback_only": True},
-        }
-
-    if provider == "hianime":
-        # Map frontend server names to consumet-local values
-        _server_map = {"hd-1": "vidstreaming", "hd-2": "vidcloud", "vidstreaming": "vidstreaming", "vidcloud": "vidcloud"}
-        if server and server != "auto" and server in _server_map:
-            # Always try BOTH servers — requested one first, the other as automatic fallback.
-            # This is critical: if vidstreaming is down or MegaCloud key extraction fails
-            # for that server, vidcloud may still work (and vice versa).
-            primary = _server_map[server]
-            secondary = "vidcloud" if primary == "vidstreaming" else "vidstreaming"
-            servers = [primary, secondary]
-        else:
-            servers = ["vidstreaming", "vidcloud"]
-        categories = ["dub", "sub"] if requested_audio in {"hi", "en"} else ["sub", "dub"]
-
-        async def _try_hianime(category: str, server_name: str) -> "dict[str, Any] | None":
-            try:
-                payload = await _fetch_consumet_json(
-                    f"/anime/{provider}/watch/{quote(episode_id)}",
-                    params={"server": server_name, "category": category},
-                    ttl_seconds=10,  # MegaCloud tokens expire; don't cache stale URLs
-                    timeout=ANIME_WATCH_TIMEOUT,
-                )
-                normalized = normalize_watch_payload(
-                    payload,
-                    provider=provider,
-                    requested_audio=requested_audio if category == "dub" else "original",
-                    server=server_name,
-                )
-                if normalized["sources"]:
-                    normalized["category"] = category
-                    return normalized
-            except HTTPException:
-                pass
-            return None
-
-        tasks = [
-            asyncio.create_task(_try_hianime(category, server_name))
-            for category in categories
-            for server_name in servers
-        ]
-        embed_fallback: dict[str, Any] | None = None
-        try:
-            for completed in asyncio.as_completed(tasks):
-                result = await completed
-                if not isinstance(result, dict) or not result.get("sources"):
-                    continue
-                # Prefer real HLS/direct sources — skip raw embed iframe URLs which
-                # cannot be played in the internal player.
-                playable = [s for s in result["sources"] if s.get("kind") in {"hls", "direct"}]
-                if playable:
-                    result["sources"] = playable
-                    return result
-                # Keep the first result that has *any* sources as a last-resort fallback.
-                # These will be embed-kind but at least we return something rather than failing.
-                if embed_fallback is None:
-                    embed_fallback = result
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-        if embed_fallback:
-            return embed_fallback
-        raise _http_error("Hianime did not return any playable anime sources.")
-
-    if provider == "zoro":
-        categories = ["dub", "sub"] if requested_audio in {"hi", "en"} else ["sub", "dub"]
-        servers_z = [server] if server else ["hd-1", "hd-2", "streamsb", "streamtape"]
-        last_error2: HTTPException | None = None
-        for category in categories:
-            for server_name in servers_z:
-                try:
-                    payload = await _fetch_consumet_json(
-                        f"/anime/{provider}/watch/{quote(episode_id)}",
-                        params={"server": server_name, "category": category},
-                        ttl_seconds=10,  # CDN tokens expire quickly; barely cache to avoid stale URLs
-                        timeout=ANIME_WATCH_TIMEOUT,
-                    )
-                    normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio if category == "dub" else "original", server=server_name)
-                    if normalized["sources"]:
-                        normalized["category"] = category
-                        return normalized
-                except HTTPException as exc:
-                    last_error2 = exc
-                    continue
-        if last_error2:
-            raise last_error2
-        raise _http_error("Consumet did not return any playable anime sources.")
-
-    if provider == "animepahe":
-        payload = await _fetch_consumet_json(
-            "/anime/animepahe/watch",
-            params={"episodeId": episode_id},
-            ttl_seconds=10,  # CDN tokens expire quickly; barely cache to avoid stale URLs
-            timeout=ANIME_WATCH_TIMEOUT,
-        )
-        normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio, server=server)
-        if not normalized["sources"]:
-            raise _http_error("AnimePahe did not return any playable sources.")
-        return normalized
-
-    if provider == "kickassanime":
-        payload = await _fetch_consumet_json(
-            "/anime/kickassanime/watch",
-            params={"episodeId": episode_id},
-            ttl_seconds=10,  # CDN tokens expire quickly; barely cache to avoid stale URLs
-            timeout=ANIME_WATCH_TIMEOUT,
-        )
-        normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio, server=server)
-        if not normalized["sources"]:
-            raise _http_error("KickAssAnime did not return any playable sources.")
-        return normalized
-
-    payload = await _fetch_consumet_json(
-        f"/anime/{provider}/watch/{quote(episode_id)}",
-        ttl_seconds=10,
-        timeout=ANIME_WATCH_TIMEOUT,
+            "error": "; ".join(attempt_errors) or "No sources found",
+            "_episode_id": episode_id,
+            "_attempt_errors": attempt_errors,
+        },
     )
-    normalized = normalize_watch_payload(payload, provider=provider, requested_audio=requested_audio, server=server)
-    if not normalized["sources"]:
-        raise _http_error("Consumet did not return any playable anime sources.")
-    return normalized
 
 
-async def fetch_manga_read(provider: str, chapter_id: str) -> dict[str, Any]:
-    if not _consumet_configured():
-        pages = await get_mangadex_chapter_pages(chapter_id)
-        return {
-            "provider": provider,
-            "chapter_id": chapter_id,
-            "pages": pages,
-            "raw": {"provider": "mangadex", "pages": pages},
-        }
-    payload = await _fetch_consumet_json(
-        f"/manga/{provider}/read/{quote(chapter_id)}",
-        ttl_seconds=180,
-    )
-    pages: list[str] = []
-    for item in _payload_items(payload):
-        if isinstance(item, str) and item.strip():
-            pages.append(item.strip())
-        elif isinstance(item, dict):
-            url = _first_non_empty(item.get("img"), item.get("url"), item.get("image"))
-            if url:
-                pages.append(url)
-
-    return {
-        "provider": provider,
-        "chapter_id": chapter_id,
-        "pages": pages,
-        "raw": payload,
-    }
-
-
-async def fetch_generic_read(domain: str, provider: str, item_id: str) -> dict[str, Any]:
-    if domain == "books" and provider == "gutendex":
-        return await _fetch_gutendex_read(item_id)
-
-    if provider == "openlibrary" or domain in {"books", "comics", "light-novels"}:
-        return await _fetch_openlibrary_read(domain, item_id)
-
-    payload = await _fetch_consumet_json(
-        f"/{domain}/{provider}/read/{quote(item_id)}",
-        ttl_seconds=180,
-    )
-    if isinstance(payload, dict) and payload.get("content"):
-        content = payload.get("content")
-    else:
-        content = payload
-    return {
-        "domain": domain,
-        "provider": provider,
-        "id": item_id,
-        "content": content,
-        "raw": payload,
-    }
-
-
-async def fetch_news_feed(topic: str | None = None) -> dict[str, Any]:
+@router.get("/proxy")
+async def consumet_proxy(
+    url: str = Query(..., min_length=8),
+):
+    """Proxy external CDN images/resources to avoid CORS issues."""
     try:
-        payload = await _fetch_consumet_json(
-            "/news/ann/recent-feeds",
-            params={"topic": topic} if topic else None,
-            ttl_seconds=600,
+        content, media_type = await fetch_proxy_response(url)
+        return Response(content=content, media_type=media_type or "application/octet-stream")
+    except Exception as exc:
+        logger.warning("consumet_proxy failed for url=%s: %s", url[:120], exc)
+        return JSONResponse(
+            status_code=502,
+            content={"error": "Proxy fetch failed", "detail": str(exc)},
         )
-        items = []
-        for item in _payload_items(payload):
-            if not isinstance(item, dict):
-                continue
-            items.append(
-                {
-                    "id": _first_non_empty(str(item.get("id") or ""), item.get("guid") or "", item.get("url") or ""),
-                    "title": _first_non_empty(item.get("title")),
-                    "description": _first_non_empty(item.get("description"), item.get("content")),
-                    "image": _extract_image(item),
-                    "url": _first_non_empty(item.get("url"), item.get("link")),
-                    "published_at": _first_non_empty(item.get("date"), item.get("publishedAt"), item.get("isoDate")),
-                    "topic": _first_non_empty(item.get("topic")),
-                    "raw": item,
-                }
-            )
-        return {"topic": topic or "", "items": items}
-    except Exception:
-        return await _fetch_ann_feed(topic)
-
-
-async def fetch_news_article(article_id: str) -> dict[str, Any]:
-    try:
-        payload = await _fetch_consumet_json(
-            "/news/ann/info",
-            params={"id": article_id},
-            ttl_seconds=1800,
-        )
-        return {
-            "id": article_id,
-            "title": _first_non_empty(payload.get("title")),
-            "description": _first_non_empty(payload.get("description"), payload.get("content")),
-            "image": _extract_image(payload),
-            "url": _first_non_empty(payload.get("url"), payload.get("link")),
-            "published_at": _first_non_empty(payload.get("date"), payload.get("publishedAt"), payload.get("isoDate")),
-            "content": payload.get("content") or payload.get("description") or "",
-            "raw": payload,
-        }
-    except Exception:
-        feed = await _fetch_ann_feed(None)
-        item = next((entry for entry in feed["items"] if entry["id"] == article_id), None)
-        if not item:
-            raise _http_error("News article not found.", 404)
-        return {
-            "id": item["id"],
-            "title": item["title"],
-            "description": item["description"],
-            "image": item.get("image", ""),
-            "url": item.get("url", ""),
-            "published_at": item.get("published_at", ""),
-            "content": item.get("description", ""),
-            "raw": item,
-        }
-
-
-async def fetch_meta_search(query: str, media_type: str = "movie") -> dict[str, Any]:
-    if not _consumet_configured():
-        return await _fetch_tmdb_meta_search(query, media_type)
-    try:
-        payload = await _fetch_consumet_json(
-            f"/meta/tmdb/{quote(query)}",
-            params={"type": media_type} if media_type else None,
-            ttl_seconds=600,
-        )
-        items = [
-            _normalize_media_item(item, media_type, "tmdb")
-            for item in _payload_items(payload)
-            if isinstance(item, dict)
-        ]
-        return {"query": query, "type": media_type, "items": items}
-    except (HTTPException, ConsumetConfigError):
-        return await _fetch_tmdb_meta_search(query, media_type)
-
-
-async def fetch_meta_info(item_id: str, media_type: str = "movie") -> dict[str, Any]:
-    if not _consumet_configured():
-        return await _fetch_tmdb_meta_info(item_id, media_type)
-    try:
-        payload = await _fetch_consumet_json(
-            f"/meta/tmdb/info/{quote(item_id)}",
-            params={"type": media_type},
-            ttl_seconds=1800,
-        )
-        return {
-            "id": item_id,
-            "type": media_type,
-            "item": _normalize_media_item(payload if isinstance(payload, dict) else {}, media_type, "tmdb"),
-            "raw": payload,
-        }
-    except (HTTPException, ConsumetConfigError):
-        return await _fetch_tmdb_meta_info(item_id, media_type)
