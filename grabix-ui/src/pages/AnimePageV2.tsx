@@ -332,6 +332,35 @@ async function fetchAnimeStream(
   return { sources, subtitles };
 }
 
+// ─── Auto-update aniwatch package ────────────────────────────────────────────
+
+async function triggerAniwatchUpdate(): Promise<{ success: boolean; message: string; nextStep?: string }> {
+  try {
+    const r = await fetch(`${BACKEND}/consumet/anime/update-aniwatch`, {
+      signal: AbortSignal.timeout(200000), // 3 min — npm update can be slow
+    });
+    const data = await r.json() as {
+      success?: boolean;
+      error?: string;
+      next_step?: string;
+      stdout?: string;
+      stderr?: string;
+    };
+    return {
+      success: Boolean(data.success),
+      message: data.success
+        ? `✅ aniwatch updated! ${data.next_step || ""}`
+        : `❌ Update failed: ${data.error || data.stderr || "Unknown error"}`,
+      nextStep: data.next_step,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      message: `Could not reach backend: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
 // ─── Main Page ───────────────────────────────────────────────────────────────
 
 export default function AnimePageV2() {
@@ -999,6 +1028,8 @@ function AnimeDetailV2({
   // ── Debug / diagnostic state ────────────────────────────────────────────
   const [streamError, setStreamError] = useState<StreamErrorDetail | null>(null);
   const [diagnosing, setDiagnosing] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [updateResult, setUpdateResult] = useState<string | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [diagReport, setDiagReport] = useState<Record<string, any> | null>(null);
 
@@ -1126,6 +1157,21 @@ function AnimeDetailV2({
       setDiagReport({ error: String(ex), verdict: "Could not reach the backend for diagnostics." });
     } finally {
       setDiagnosing(false);
+    }
+  };
+
+  const handleUpdateAniwatch = async () => {
+    if (updating) return;
+    setUpdating(true);
+    setUpdateResult(null);
+    try {
+      const result = await triggerAniwatchUpdate();
+      setUpdateResult(result.message);
+      if (result.success) {
+        setToast({ message: "aniwatch updated! Restart the sidecar to apply.", variant: "success" });
+      }
+    } finally {
+      setUpdating(false);
     }
   };
 
@@ -1469,8 +1515,56 @@ function AnimeDetailV2({
                 )}
               </div>
 
-              {/* Diagnose button */}
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {/* Primary fix: Auto-update aniwatch */}
+              <div
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  background: "rgba(99,102,241,0.1)",
+                  border: "1px solid rgba(99,102,241,0.3)",
+                  marginBottom: 10,
+                }}
+              >
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--accent)", marginBottom: 6 }}>
+                  🔧 One-Click Fix — Update aniwatch Package
+                </div>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 8 }}>
+                  MegaCloud changed their encryption. Updating the aniwatch npm package fixes it.
+                  After the update you must restart the sidecar (<code>node server.cjs</code>).
+                </div>
+                <button
+                  className="btn btn-primary"
+                  style={{ fontSize: 12, gap: 6 }}
+                  disabled={updating}
+                  onClick={() => void handleUpdateAniwatch()}
+                >
+                  {updating ? "⏳ Updating aniwatch... (may take ~60s)" : "⬆️ Auto-Update aniwatch"}
+                </button>
+                {updateResult && (
+                  <div
+                    style={{
+                      marginTop: 8,
+                      padding: "6px 10px",
+                      borderRadius: 6,
+                      background: "var(--bg-surface2)",
+                      fontSize: 11,
+                      color: updateResult.startsWith("✅") ? "var(--text-success, #4caf50)" : "var(--text-danger)",
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-all",
+                    }}
+                  >
+                    {updateResult}
+                    {updateResult.startsWith("✅") && (
+                      <div style={{ marginTop: 6, color: "var(--text-muted)" }}>
+                        Now open a terminal in <code>consumet-local/</code> and run: <code>node server.cjs</code>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Diagnose + copy + dismiss */}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 <button
                   className="btn btn-ghost"
                   style={{ fontSize: 12, gap: 6 }}
@@ -1493,7 +1587,7 @@ function AnimeDetailV2({
                 <button
                   className="btn btn-ghost"
                   style={{ fontSize: 12 }}
-                  onClick={() => { setStreamError(null); setDiagReport(null); }}
+                  onClick={() => { setStreamError(null); setDiagReport(null); setUpdateResult(null); }}
                 >
                   ✕ Dismiss
                 </button>
@@ -1617,13 +1711,12 @@ function AnimeDetailV2({
             }}
           >
             <strong style={{ color: "var(--text-primary)" }}>How V2 streams:</strong> Calls{" "}
-            <code style={{ fontSize: 11 }}>/consumet/anime/stream</code> — the backend searches
-            HiAnime by title, resolves the episode ID, then fetches the M3U8 directly. Same flow
-            as anime.py, no browser CORS issues.
+            <code style={{ fontSize: 11 }}>/consumet/anime/stream</code> — tries HiAnime (vidcloud +
+            vidstreaming + t-cloud) then falls back to AnimePahe if MegaCloud keys are stale.
             {!streamError && (
               <span style={{ display: "block", marginTop: 4 }}>
-                If streaming fails, click <strong>Play</strong> then use the{" "}
-                <strong>🔍 Run Full Diagnostics</strong> button to see exactly why.
+                If streaming fails, click <strong>Play</strong> then use{" "}
+                <strong>⬆️ Auto-Update aniwatch</strong> or <strong>🔍 Run Full Diagnostics</strong>.
               </span>
             )}
           </div>

@@ -463,7 +463,134 @@ async def consumet_anime_stream(
             if data3:
                 return JSONResponse(content=data3)
 
-        # All attempts failed
+        # ── All HiAnime sidecar attempts failed — try Python MegaCloud extractor ─
+        # The aniwatch npm package (v2.27.9) is broken since MegaCloud changed
+        # their API in April 2026. This Python extractor bypasses it entirely:
+        # it calls the HiAnime AJAX API directly and implements the decryption.
+        try:
+            from app.services.megacloud import extract_hianime_stream as _py_extract
+            logger.info("anime/stream: trying Python MegaCloud extractor for ep_id=%s", ep_id)
+            py_result = await _py_extract(ep_id, category)
+            py_sources = py_result.get("sources") or []
+            if py_sources:
+                logger.info("anime/stream: Python extractor succeeded (%d sources)", len(py_sources))
+                return JSONResponse(content={
+                    "sources": py_sources,
+                    "subtitles": py_result.get("subtitles") or [],
+                    "headers": py_result.get("headers") or {},
+                    "_server_used": "python-megacloud",
+                    "_category_used": category,
+                    "_anime_id": resolved_id,
+                    "_episode_id": ep_id,
+                    "_fallback": "python-megacloud",
+                })
+        except Exception as py_exc:
+            logger.warning("anime/stream: Python MegaCloud extractor failed: %s", py_exc)
+
+        # ── All HiAnime/MegaCloud attempts failed — try Gogoanime first ────────
+        # Gogoanime uses a completely different CDN (not MegaCloud).
+        # The sidecar exposes a single /anime/gogoanime/stream endpoint that
+        # does search → info → episode sources internally.
+        try:
+            logger.info("anime/stream: trying Gogoanime for '%s' ep%d", title, episode)
+            gogo_dubbed = (category == "dub")
+            # Try primary title, then alt_title (Japanese romanization often matches Gogoanime)
+            gogo_titles = [title]
+            if alt_title and alt_title.strip() and alt_title.strip() != title.strip():
+                gogo_titles.append(alt_title.strip())
+            gr = None
+            for gogo_title in gogo_titles:
+                _gr = await client.get(
+                    f"{base}/anime/gogoanime/stream",
+                    params={"title": gogo_title, "episode": episode, "dubbed": str(gogo_dubbed).lower()},
+                    timeout=30.0,
+                )
+                if _gr.status_code < 400 and (_gr.json().get("sources") or []):
+                    gr = _gr
+                    break
+                gr = _gr  # keep last for error checking
+            if gr is None:
+                raise RuntimeError("no gogoanime response")
+            if gr.status_code < 400:
+                gd = gr.json()
+                gogo_sources = gd.get("sources") or []
+                # Filter to m3u8 / direct video only
+                playable = [s for s in gogo_sources if s.get("url") and (
+                    s.get("isM3U8") or ".m3u8" in str(s.get("url", "")) or
+                    str(s.get("quality", "")).lower() not in ("backup", "")
+                )]
+                if not playable:
+                    playable = gogo_sources  # take whatever we have
+                if playable:
+                    logger.info("anime/stream: Gogoanime succeeded for '%s' ep%d (%d sources)", title, episode, len(playable))
+                    return JSONResponse(content={
+                        "sources": playable,
+                        "subtitles": gd.get("subtitles") or [],
+                        "headers": gd.get("headers") or {},
+                        "_server_used": "gogoanime",
+                        "_category_used": category,
+                        "_fallback": "gogoanime",
+                    })
+        except Exception as gogo_exc:
+            logger.warning("anime/stream: Gogoanime fallback failed for '%s': %s", title, gogo_exc)
+
+        # ── All HiAnime/MegaCloud attempts failed — try AnimePahe as fallback ──
+        # AnimePahe uses the Kwik CDN (completely different from MegaCloud),
+        # so it works even when MegaCloud encryption keys are stale.
+        try:
+            logger.info("anime/stream: HiAnime failed, trying AnimePahe fallback for '%s' ep%d", title, episode)
+            pahe_search_url = f"{base}/anime/animepahe/{urlquote(title, safe='')}"
+            pr = await client.get(pahe_search_url, timeout=12.0)
+            if pr.status_code < 400:
+                pahe_results = pr.json().get("results") or []
+                if pahe_results:
+                    best_pahe = max(
+                        pahe_results,
+                        key=lambda x: _title_score(str(x.get("title", "")), title),
+                    )
+                    pahe_id = str(best_pahe.get("id", "")).strip()
+                    if pahe_id:
+                        pi_r = await client.get(
+                            f"{base}/anime/animepahe/info/{urlquote(pahe_id, safe='')}",
+                            timeout=15.0,
+                        )
+                        if pi_r.status_code < 400:
+                            pahe_eps = pi_r.json().get("episodes") or []
+                            # Match by episode number; fall back to index
+                            pahe_ep = next((e for e in pahe_eps if e.get("number") == episode), None)
+                            if pahe_ep is None and pahe_eps:
+                                idx = min(episode - 1, len(pahe_eps) - 1)
+                                pahe_ep = pahe_eps[idx]
+                            if pahe_ep:
+                                pahe_ep_id = str(pahe_ep.get("id") or pahe_ep.get("episodeId") or "").strip()
+                                if pahe_ep_id:
+                                    ps_r = await client.get(
+                                        f"{base}/anime/animepahe/watch",
+                                        params={"episodeId": pahe_ep_id},
+                                        timeout=15.0,
+                                    )
+                                    if ps_r.status_code < 400:
+                                        ps_data = ps_r.json()
+                                        pahe_sources = ps_data.get("sources") or []
+                                        if pahe_sources:
+                                            logger.info(
+                                                "anime/stream: AnimePahe fallback succeeded for '%s' ep%d (%d sources)",
+                                                title, episode, len(pahe_sources),
+                                            )
+                                            return JSONResponse(content={
+                                                "sources": pahe_sources,
+                                                "subtitles": ps_data.get("subtitles") or [],
+                                                "headers": ps_data.get("headers") or {},
+                                                "_server_used": "animepahe",
+                                                "_category_used": category,
+                                                "_anime_id": pahe_id,
+                                                "_episode_id": pahe_ep_id,
+                                                "_fallback": "animepahe",
+                                            })
+        except Exception as pahe_exc:
+            logger.warning("anime/stream: AnimePahe fallback failed for '%s': %s", title, pahe_exc)
+
+        # All attempts failed (HiAnime + AnimePahe)
         hint = _build_sidecar_hint(attempt_errors)
         logger.error(
             "anime/stream: all attempts failed for '%s' ep%d (id=%s ep_id=%s). Errors: %s",
@@ -477,7 +604,7 @@ async def consumet_anime_stream(
                 "subtitles": [],
                 "error": (
                     f"No playable stream found for '{title}' episode {episode}. "
-                    f"Tried vidcloud + vidstreaming ({category.upper()} + {fallback_category.upper()}). "
+                    f"Tried HiAnime (vidcloud+vidstreaming+t-cloud, {category.upper()}+{fallback_category.upper()}) + Gogoanime + AnimePahe. "
                     f"{hint}"
                 ),
                 "_anime_id": resolved_id,
@@ -783,6 +910,135 @@ async def consumet_watch_anime_raw(
             "_attempt_errors": attempt_errors,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+#  /anime/update-aniwatch  — runs npm update aniwatch in consumet-local
+# ---------------------------------------------------------------------------
+
+@router.get("/anime/update-aniwatch")
+async def update_aniwatch_package():
+    """
+    Run 'npm update aniwatch' in the consumet-local directory.
+    Call this when HiAnime streams fail with MegaCloud key errors.
+    After the update, restart the sidecar manually: node server.cjs
+    """
+    import subprocess
+    import os as _os
+
+    # Walk up from this file to find consumet-local/
+    this_dir = _os.path.dirname(_os.path.abspath(__file__))
+    project_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(this_dir))))
+    consumet_dir = _os.path.join(project_root, "consumet-local")
+
+    # Fallback: check common relative paths
+    if not _os.path.isdir(consumet_dir):
+        for candidate in [
+            _os.path.join(_os.getcwd(), "consumet-local"),
+            _os.path.join(_os.path.dirname(_os.getcwd()), "consumet-local"),
+        ]:
+            if _os.path.isdir(candidate):
+                consumet_dir = candidate
+                break
+
+    if not _os.path.isdir(consumet_dir):
+        return JSONResponse(
+            status_code=404,
+            content={
+                "success": False,
+                "error": f"consumet-local directory not found. Expected: {consumet_dir}",
+                "hint": "Make sure consumet-local/ is at the project root, then run: cd consumet-local && npm update aniwatch && node server.cjs",
+            },
+        )
+
+    # ── Locate npm — subprocess on Windows often misses PATH ──────────────
+    import shutil as _shutil
+    import sys as _sys
+
+    npm_cmd = _shutil.which("npm")
+
+    if not npm_cmd:
+        # Search common Node.js install locations (Windows + macOS + Linux)
+        candidates = [
+            # Windows
+            r"C:\Program Files\nodejs\npm.cmd",
+            r"C:\Program Files (x86)\nodejs\npm.cmd",
+            _os.path.expandvars(r"%APPDATA%\npm\npm.cmd"),
+            _os.path.expandvars(r"%ProgramFiles%\nodejs\npm.cmd"),
+            # macOS / Linux via nvm, brew, system
+            _os.path.expanduser("~/.nvm/versions/node/$(node -e 'process.version' 2>/dev/null)/bin/npm"),
+            "/usr/local/bin/npm",
+            "/usr/bin/npm",
+            "/opt/homebrew/bin/npm",
+        ]
+        for c in candidates:
+            if _os.path.isfile(c):
+                npm_cmd = c
+                break
+
+    if not npm_cmd:
+        # Last resort: try with shell=True so the OS shell finds npm itself
+        npm_cmd = "npm"
+        use_shell = True
+    else:
+        use_shell = False
+
+    try:
+        if use_shell:
+            # shell=True lets Windows cmd.exe / bash resolve npm from PATH
+            result = subprocess.run(
+                f"npm update aniwatch",
+                cwd=consumet_dir,
+                capture_output=True,
+                text=True,
+                timeout=180,
+                shell=True,
+            )
+        else:
+            result = subprocess.run(
+                [npm_cmd, "update", "aniwatch"],
+                cwd=consumet_dir,
+                capture_output=True,
+                text=True,
+                timeout=180,
+                shell=False,
+            )
+        success = result.returncode == 0
+        return JSONResponse(content={
+            "success": success,
+            "consumet_dir": consumet_dir,
+            "npm_used": npm_cmd,
+            "stdout": result.stdout[-3000:],
+            "stderr": result.stderr[-3000:],
+            "returncode": result.returncode,
+            "next_step": (
+                "Update succeeded! Now restart the sidecar: open a terminal in consumet-local and run 'node server.cjs'"
+                if success
+                else "npm update failed. Try running manually: cd consumet-local && npm update aniwatch && node server.cjs"
+            ),
+        })
+    except subprocess.TimeoutExpired:
+        return JSONResponse(
+            status_code=504,
+            content={"success": False, "error": "npm update timed out after 3 minutes. Run it manually."},
+        )
+    except FileNotFoundError:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": (
+                    f"npm not found even after searching common locations. "
+                    f"Please run manually: cd consumet-local && npm update aniwatch && node server.cjs"
+                ),
+                "searched": candidates if not _shutil.which("npm") else [],
+            },
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(exc)},
+        )
 
 
 @router.get("/proxy")

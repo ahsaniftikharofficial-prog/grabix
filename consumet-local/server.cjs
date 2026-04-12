@@ -175,22 +175,26 @@ const FALLBACK_MEGACLOUD_KEYS = {
 };
 
 async function getMegaCloudKeys() {
-  try {
-    const r = await axios.get(
-      "https://raw.githubusercontent.com/yogesh-hacker/MegacloudKeys/refs/heads/main/keys.json",
-      { timeout: 8000 }
-    );
-    const k = r.data || {};
-    // Merge with fallbacks so we always have something
-    return {
-      rabbit: k.rabbit || FALLBACK_MEGACLOUD_KEYS.rabbit,
-      mega:   k.mega   || FALLBACK_MEGACLOUD_KEYS.mega,
-      vidstr: k.vidstr || FALLBACK_MEGACLOUD_KEYS.vidstr,
-    };
-  } catch {
-    // Network unreachable — use hardcoded fallback keys
-    return FALLBACK_MEGACLOUD_KEYS;
+  // Try multiple key repos in order — whichever responds first with valid keys wins.
+  const KEY_URLS = [
+    "https://raw.githubusercontent.com/yogesh-hacker/MegacloudKeys/refs/heads/main/keys.json",
+    "https://raw.githubusercontent.com/consumet/rapidcloudKeys/refs/heads/main/keys.json",
+    "https://raw.githubusercontent.com/aniwatch-team/megacloud-keys/refs/heads/main/keys.json",
+  ];
+  for (const url of KEY_URLS) {
+    try {
+      const r = await axios.get(url, { timeout: 6000 });
+      const k = r.data || {};
+      if (k.rabbit || k.mega || k.vidstr) {
+        return {
+          rabbit: k.rabbit || FALLBACK_MEGACLOUD_KEYS.rabbit,
+          mega:   k.mega   || FALLBACK_MEGACLOUD_KEYS.mega,
+          vidstr: k.vidstr || FALLBACK_MEGACLOUD_KEYS.vidstr,
+        };
+      }
+    } catch {}
   }
+  return FALLBACK_MEGACLOUD_KEYS;
 }
 
 // ── Live key extraction from MegaCloud embed page ────────────────────────────
@@ -600,9 +604,10 @@ async function fetchWatch(episodeId, server, category) {
     } catch {}
   }
 
-  // SECONDARY: manual AJAX — includes T-Cloud as a 3rd option.
-  // T-Cloud does NOT use MegaCloud, bypassing the invalid-key problem entirely.
-  const secondaryServers = [requestedServer, fallbackServer, tCloudServer];
+  // SECONDARY: manual AJAX — includes T-Cloud + StreamTape as extra options.
+  // T-Cloud (serverId 6) and StreamTape (serverId 3) do NOT use MegaCloud encryption.
+  const streamTapeServer = mapServer("streamtape");
+  const secondaryServers = [requestedServer, fallbackServer, tCloudServer, streamTapeServer];
   for (const tryServer of secondaryServers) {
     let link = "";
     let tracks = [];
@@ -1098,6 +1103,64 @@ async function route(pathname, searchParams) {
         results: Array.isArray(data?.results) ? data.results : [],
       },
     };
+  }
+
+  // ── Gogoanime stream pipeline — search → info → episode sources ──────────
+  // Used as primary fallback when HiAnime/MegaCloud is broken.
+  // Gogoanime uses a different CDN (not MegaCloud) so it works independently.
+
+  if (pathname === "/anime/gogoanime/stream") {
+    const rawTitle = String(searchParams.get("title") || "").trim();
+    const epNum = parseInt(searchParams.get("episode") || "1", 10);
+    const dubbed = String(searchParams.get("dubbed") || "").toLowerCase() === "true";
+    if (!rawTitle) return { status: 400, body: { detail: "title is required" } };
+
+    const gogoanime = new ANIME.Gogoanime();
+
+    // Step 1: search — try dubbed variant first if requested
+    const searchQuery = dubbed ? `${rawTitle} (dub)` : rawTitle;
+    let results = [];
+    try {
+      const sr = await gogoanime.search(searchQuery);
+      results = Array.isArray(sr?.results) ? sr.results : [];
+    } catch {}
+    // Fallback: search plain title even if dubbed search failed
+    if (!results.length && dubbed) {
+      try {
+        const sr2 = await gogoanime.search(rawTitle);
+        results = Array.isArray(sr2?.results) ? sr2.results : [];
+      } catch {}
+    }
+    if (!results.length) {
+      throw new Error(`Gogoanime: no results for "${rawTitle}"`);
+    }
+
+    // Step 2: pick best match by title similarity
+    function simpleScore(a, b) {
+      a = a.toLowerCase().replace(/[^a-z0-9]/g, " ").trim();
+      b = b.toLowerCase().replace(/[^a-z0-9]/g, " ").trim();
+      if (a === b) return 100;
+      const bWords = new Set(b.split(" ").filter(Boolean));
+      const aWords = a.split(" ").filter(Boolean);
+      const hits = aWords.filter(w => bWords.has(w)).length;
+      return bWords.size ? (hits / bWords.size) * 100 : 0;
+    }
+    results.sort((a, b) => simpleScore(b.title || "", rawTitle) - simpleScore(a.title || "", rawTitle));
+    const best = results[0];
+
+    // Step 3: fetch episode list
+    const info = await gogoanime.fetchAnimeInfo(best.id);
+    const episodes = Array.isArray(info?.episodes) ? info.episodes : [];
+    if (!episodes.length) throw new Error(`Gogoanime: no episodes for "${rawTitle}" (id=${best.id})`);
+
+    // Match by episode number; fall back to index
+    let ep = episodes.find(e => e.number === epNum);
+    if (!ep) ep = episodes[Math.min(epNum - 1, episodes.length - 1)];
+    if (!ep) throw new Error(`Gogoanime: episode ${epNum} not found`);
+
+    // Step 4: fetch sources
+    const sources = await gogoanime.fetchEpisodeSources(ep.id);
+    return { status: 200, body: sources };
   }
 
   // ── AnimePahe routes ───────────────────────────────────────────────────────
