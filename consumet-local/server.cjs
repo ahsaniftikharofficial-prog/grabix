@@ -167,245 +167,100 @@ function decryptMegaCloudSources(src, clientKey, megacloudKey) {
   return decrypted.substring(4, 4 + dataLength);
 }
 
-// Known working keys as of April 2026 — used as fallback if fetch fails
-const FALLBACK_MEGACLOUD_KEYS = {
-  rabbit: "3AlttPAF1Zwn2l63meMeGMIvlWOXgm9ZXNk3glEzLTGOr1F113",
-  mega:   "nTAygRRNLS3wo82OtMyfPrWgD9K2UIvcwlj",
-  vidstr: "nTAygRRNLS3wo82OtMyfPrWgD9K2UIvcwlj",
-};
-
-async function getMegaCloudKeys() {
-  // Try multiple key repos in order — whichever responds first with valid keys wins.
-  const KEY_URLS = [
-    "https://raw.githubusercontent.com/yogesh-hacker/MegacloudKeys/refs/heads/main/keys.json",
-    "https://raw.githubusercontent.com/consumet/rapidcloudKeys/refs/heads/main/keys.json",
-    "https://raw.githubusercontent.com/aniwatch-team/megacloud-keys/refs/heads/main/keys.json",
+async function getMegaCloudClientKey(sourceId) {
+  const response = await axios.get(`https://megacloud.blog/embed-2/v3/e-1/${sourceId}`, {
+    headers: {
+      Referer: `${siteBase}/`,
+      "User-Agent": "Mozilla/5.0",
+    },
+    timeout: 20000,
+  });
+  const text = String(response.data || "");
+  const directMatch = text.match(/window\._xy_ws\s*=\s*["'`]([^"'`]+)["'`];/);
+  if (directMatch?.[1]) {
+    return directMatch[1];
+  }
+  const regexes = [
+    /<meta name="_gg_fb" content="[a-zA-Z0-9]+">/,
+    /<!--\s+_is_th:[0-9a-zA-Z]+\s+-->/,
+    /<script>window._lk_db\s+=\s+\{[xyz]:\s+["'`][a-zA-Z0-9]+["'`],\s+[xyz]:\s+["'`][a-zA-Z0-9]+["'`],\s+[xyz]:\s+["'`][a-zA-Z0-9]+["'`]\};<\/script>/,
+    /<div\s+data-dpi="[0-9a-zA-Z]+"\s+.*><\/div>/,
+    /<script nonce="[0-9a-zA-Z]+">/,
+    /<script>window._xy_ws = ['"`][0-9a-zA-Z]+['"`];<\/script>/,
   ];
-  for (const url of KEY_URLS) {
-    try {
-      const r = await axios.get(url, { timeout: 6000 });
-      const k = r.data || {};
-      if (k.rabbit || k.mega || k.vidstr) {
-        return {
-          rabbit: k.rabbit || FALLBACK_MEGACLOUD_KEYS.rabbit,
-          mega:   k.mega   || FALLBACK_MEGACLOUD_KEYS.mega,
-          vidstr: k.vidstr || FALLBACK_MEGACLOUD_KEYS.vidstr,
-        };
-      }
-    } catch {}
-  }
-  return FALLBACK_MEGACLOUD_KEYS;
-}
 
-// ── Live key extraction from MegaCloud embed page ────────────────────────────
-// The _k value MegaCloud validates is embedded in their own player JavaScript.
-// We scrape it at call-time so we're never blocked by stale third-party key repos.
-async function scrapeKeyFromEmbedPage(embedPageUrl, embedDomain, fullUA, refererBase) {
-  // Regex patterns covering all known ways the key appears in minified player JS
-  const KEY_REGEXES = [
-    /_k\s*[:=]\s*["'`]([A-Za-z0-9]{20,})["'`]/g,
-    /[?&]_k=["'`]?([A-Za-z0-9]{20,})["'`]?/g,
-    /clientKey\s*[:=]\s*["'`]([A-Za-z0-9]{20,})["'`]/g,
-    /"_k"\s*:\s*"([A-Za-z0-9]{20,})"/g,
-    /\bkey\s*[:=]\s*["'`]([A-Za-z0-9]{30,})["'`]/g,
-  ];
-  function findKeysIn(content) {
-    const found = new Set();
-    for (const re of KEY_REGEXES) {
-      re.lastIndex = 0;
-      let m;
-      while ((m = re.exec(content)) !== null) found.add(m[1]);
-    }
-    return [...found];
-  }
+  const keyMatch = /"[a-zA-Z0-9]+"/;
+  for (let index = 0; index < regexes.length; index += 1) {
+    const match = text.match(regexes[index]);
+    if (!match) continue;
 
-  const result = { pageStatus: null, cookie: "", scriptsFetched: [], keysFound: [], error: null };
-
-  try {
-    const pageResp = await axios.get(embedPageUrl, {
-      headers: {
-        "User-Agent": fullUA,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": refererBase,
-        "sec-fetch-dest": "iframe",
-        "sec-fetch-mode": "navigate",
-        "sec-fetch-site": "cross-site",
-      },
-      timeout: 15000,
-    });
-    result.pageStatus = pageResp.status;
-
-    const setCookieArr = pageResp.headers["set-cookie"];
-    if (setCookieArr) {
-      result.cookie = (Array.isArray(setCookieArr) ? setCookieArr : [setCookieArr])
-        .map((c) => c.split(";")[0]).join("; ");
+    if (index === 2) {
+      const parts = [...match[0].matchAll(/[xyz]:\s+"([a-zA-Z0-9]+)"/g)].map((item) => item[1]);
+      if (parts.length === 3) return parts.join("");
     }
 
-    const html = typeof pageResp.data === "string" ? pageResp.data : "";
-
-    // 1. Search inline HTML (data-attributes, inline <script> blocks)
-    result.keysFound.push(...findKeysIn(html));
-
-    // 2. Cheerio: check data-key / data-_k attributes on any element
-    const $ = cheerio.load(html);
-    $("[data-key],[data-_k],[data-client-key]").each((_, el) => {
-      const k = $(el).attr("data-key") || $(el).attr("data-_k") || $(el).attr("data-client-key") || "";
-      if (/^[A-Za-z0-9]{20,}$/.test(k)) result.keysFound.push(k);
-    });
-
-    // 3. Fetch external player scripts and search them
-    // Skip well-known third-party CDN scripts that won't contain MegaCloud's key
-    const SKIP_HOSTS = ["jquery", "bootstrap", "fontawesome", "googleapis", "cloudflare",
-                        "gtag", "analytics", "recaptcha", "sentry", "pusher"];
-    const scriptSrcs = [];
-    $("script[src]").each((_, el) => {
-      const src = String($(el).attr("src") || "");
-      if (!src || SKIP_HOSTS.some((s) => src.includes(s))) return;
-      const full = src.startsWith("http")
-        ? src
-        : `https://${embedDomain}${src.startsWith("/") ? src : "/" + src}`;
-      scriptSrcs.push(full);
-    });
-
-    const jsHeaders = {
-      "User-Agent": fullUA,
-      "Accept": "*/*",
-      "Referer": embedPageUrl,
-      "sec-fetch-dest": "script",
-      "sec-fetch-mode": "no-cors",
-      "sec-fetch-site": "same-origin",
-    };
-    for (const src of scriptSrcs) {
-      try {
-        const jsResp = await axios.get(src, { headers: jsHeaders, timeout: 12000 });
-        const js = typeof jsResp.data === "string" ? jsResp.data : "";
-        const jsKeys = findKeysIn(js);
-        result.scriptsFetched.push({ url: src.substring(0, 100), size: js.length, keys: jsKeys.length });
-        result.keysFound.push(...jsKeys);
-      } catch (e) {
-        result.scriptsFetched.push({ url: src.substring(0, 100), error: e.message });
-      }
+    if (index === 4) {
+      const nonceMatch = match[0].match(/:[a-zA-Z0-9]+ /);
+      if (nonceMatch) return nonceMatch[0].replaceAll(":", "").replaceAll(" ", "");
     }
 
-    result.keysFound = [...new Set(result.keysFound)];
-  } catch (e) {
-    result.error = e.message;
-    result.pageStatus = e.response?.status ?? "network_error";
+    const directMatch = match[0].match(keyMatch);
+    if (directMatch) return directMatch[0].replaceAll('"', "");
   }
 
-  return result;
-}
-
-// Shared result builder for extractMegaCloud
-function buildMegaCloudResult(data, embedUrl) {
-  const rawSources = Array.isArray(data.sources) ? data.sources : [];
-  const sources = rawSources
-    .map((item) => ({
-      url: item?.file || item?.url,
-      isM3U8: item?.type === "hls" || String(item?.file || item?.url || "").includes(".m3u8"),
-      type: item?.type || "auto",
-      quality: item?.label || item?.quality || "Auto",
-    }))
-    .filter((s) => Boolean(s.url));
-  const subtitles = Array.isArray(data?.tracks)
-    ? data.tracks
-        .filter((t) => t?.kind === "captions" || t?.kind === "subtitles")
-        .map((t) => ({ url: t.file, lang: t.label || t.kind, default: Boolean(t.default) }))
-    : [];
-  return { headers: { Referer: `${embedUrl.origin}/` }, sources, subtitles, download: data?.download || "" };
+  throw new Error("Failed extracting MegaCloud client key");
 }
 
 async function extractMegaCloud(link) {
   const embedUrl = new URL(link);
-  const pathParts = embedUrl.pathname.split("/").filter(Boolean);
-  const sourceId = pathParts[pathParts.length - 1];
-  if (!sourceId) throw new Error("Unable to extract MegaCloud source id from: " + link);
+  const sourceIdMatch = /\/([^/?]+)\?/.exec(embedUrl.href);
+  const sourceId = sourceIdMatch?.[1];
+  if (!sourceId) {
+    throw new Error("Unable to extract MegaCloud source id");
+  }
 
-  const embedDomain = "megacloud.tv";
-  const kParam = embedUrl.searchParams.get("k") || "1";
-  const embedPageUrl = `https://${embedDomain}/embed-2/v3/e-1/${sourceId}?k=${kParam}`;
-  const fullUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+  const clientKey = await getMegaCloudClientKey(sourceId);
+  const { data } = await axios.get(
+    `https://megacloud.blog/embed-2/v3/e-1/getSources?id=${sourceId}&_k=${encodeURIComponent(clientKey)}`,
+    {
+      timeout: 20000,
+      headers: {
+        Referer: `${embedUrl.origin}/`,
+        "User-Agent": "Mozilla/5.0",
+        "X-Requested-With": "XMLHttpRequest",
+      },
+    }
+  );
 
-  // Scrape the live _k from MegaCloud's own embed page JS — primary strategy.
-  // Hard cap at 4 s so slow JS fetches never block the watch pipeline.
-  const scraped = await Promise.race([
-    scrapeKeyFromEmbedPage(embedPageUrl, embedDomain, fullUA, `${siteBase}/`),
-    new Promise((resolve) =>
-      setTimeout(
-        () => resolve({ keysFound: [], pageStatus: "timeout", cookie: "", scriptsFetched: [], error: "scrape timed out after 4 s" }),
-        4000
-      )
-    ),
-  ]);
+  let decryptedSources = data?.sources;
+  if (data?.encrypted) {
+    throw new Error("Encrypted MegaCloud source payload is not supported by the current v3 extractor");
+  }
 
-  // Build candidate list: live scraped keys first, static fallbacks at the end
-  const staticKeys = await getMegaCloudKeys();
-  const staticCandidates = [staticKeys.rabbit, staticKeys.mega, staticKeys.vidstr].filter(Boolean);
-  const keyCandidates = [...new Set([...scraped.keysFound, ...staticCandidates])];
+  const sources = Array.isArray(decryptedSources)
+    ? decryptedSources.map((item) => ({
+        url: item?.file,
+        isM3U8: item?.type === "hls",
+        type: item?.type || "auto",
+      })).filter((item) => Boolean(item.url))
+    : [];
 
-  if (keyCandidates.length === 0) throw new Error("MegaCloud: no key candidates available (scrape + static both empty)");
+  const subtitles = Array.isArray(data?.tracks)
+    ? data.tracks
+        .filter((track) => track?.kind === "captions")
+        .map((track) => ({
+          url: track.file,
+          lang: track.label || track.kind,
+          default: Boolean(track.default),
+        }))
+    : [];
 
-  const commonHeaders = {
-    "User-Agent": fullUA,
-    "X-Requested-With": "XMLHttpRequest",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-origin",
-    ...(scraped.cookie ? { Cookie: scraped.cookie } : {}),
+  return {
+    headers: { Referer: `${embedUrl.origin}/` },
+    sources,
+    subtitles,
+    download: "",
   };
-
-  const referers = [embedPageUrl, `${siteBase}/`, `https://${embedDomain}/`];
-
-  let data = null;
-  let lastError = "";
-
-  outer:
-  for (const referer of referers) {
-    for (const key of keyCandidates) {
-      try {
-        const r = await axios.get(
-          `https://${embedDomain}/embed-2/v3/e-1/getSources?id=${sourceId}&_k=${encodeURIComponent(key)}`,
-          {
-            headers: { ...commonHeaders, Referer: referer, Origin: `https://${embedDomain}` },
-            timeout: 20000,
-          }
-        );
-        const d = r.data;
-        if (d && ((Array.isArray(d.sources) && d.sources.length > 0) || (d?.encrypted && typeof d?.sources === "string"))) {
-          data = d;
-          break outer;
-        }
-      } catch (e) {
-        lastError = e.message;
-      }
-    }
-  }
-
-  if (!data) throw new Error(`MegaCloud getSources failed on all key/referer combos. Last error: ${lastError}`);
-
-  if (!data.encrypted && Array.isArray(data.sources) && data.sources.length > 0) {
-    return buildMegaCloudResult(data, embedUrl);
-  }
-
-  if (data.encrypted && typeof data.sources === "string") {
-    const megacloudKey = String(data?.key || "").trim();
-    for (const clientKey of keyCandidates) {
-      try {
-        const raw = decryptMegaCloudSources(data.sources, clientKey, megacloudKey);
-        const decrypted = JSON.parse(raw);
-        if (Array.isArray(decrypted) && decrypted.length > 0) {
-          data.sources = decrypted;
-          return buildMegaCloudResult(data, embedUrl);
-        }
-      } catch {}
-    }
-    throw new Error(`MegaCloud sources encrypted and all decryption attempts failed. megacloudKey=${megacloudKey ? "found" : "MISSING"}.`);
-  }
-
-  throw new Error(`MegaCloud returned no usable data. encrypted=${data?.encrypted}, sources type=${typeof data?.sources}.`);
 }
 
 function parsePage(value, fallback = 1) {
@@ -572,126 +427,60 @@ async function fetchWatch(episodeId, server, category) {
   const requestedServer = mapServer(server);
   const requestedCategory = mapCategory(category);
 
-  const fallbackServer =
-    requestedServer.request === HiAnime.Servers.VidStreaming
-      ? mapServer("vidcloud")
-      : mapServer("vidstreaming");
-  // T-Cloud (serverId 6) uses a different CDN — not MegaCloud.
-  const tCloudServer = mapServer("t-cloud");
-  const serversToTry = [requestedServer, fallbackServer];
+  // PRIMARY: aniwatch library's own extraction — most reliable, try first
+  try {
+    const direct = await scraper.getEpisodeSources(episodeId, requestedServer.request, requestedCategory);
+    const directSources = Array.isArray(direct?.sources) ? direct.sources : [];
+    const directTracks = Array.isArray(direct?.subtitles) ? direct.subtitles : Array.isArray(direct?.tracks) ? direct.tracks : [];
+    if (directSources.length > 0) {
+      return {
+        headers: direct?.headers || {},
+        sources: directSources,
+        subtitles: directTracks,
+        download: direct?.download || "",
+      };
+    }
+  } catch {}
 
-  // PRIMARY: aniwatch library scraper. T-Cloud skipped (not a valid HiAnime.Servers value).
-  for (const tryServer of serversToTry) {
-    try {
-      const direct = await scraper.getEpisodeSources(episodeId, tryServer.request, requestedCategory);
-      const directSources = Array.isArray(direct?.sources) ? direct.sources : [];
-      const directTracks = Array.isArray(direct?.subtitles)
-        ? direct.subtitles
-        : Array.isArray(direct?.tracks)
-        ? direct.tracks
-        : [];
-      const playable = directSources.filter(
-        (s) => s.isM3U8 || String(s.url || "").includes(".m3u8") || String(s.type || "").toLowerCase() === "hls"
-      );
-      if (playable.length > 0) {
-        return {
-          headers: direct?.headers || {},
-          sources: playable,
-          subtitles: directTracks,
-          download: direct?.download || "",
-        };
-      }
-    } catch {}
+  // SECONDARY: manual AJAX fetch + MegaCloud extraction
+  let link = "";
+  let tracks = [];
+  try {
+    const fallback = await fetchServerPayload(episodeId, requestedServer, requestedCategory);
+    link = String(fallback?.link || "").trim();
+    tracks = Array.isArray(fallback?.tracks) ? fallback.tracks : [];
+  } catch {}
+
+  if (!link) {
+    throw new Error("Hianime did not return a playable link.");
   }
 
-  // SECONDARY: manual AJAX — includes T-Cloud + StreamTape as extra options.
-  // T-Cloud (serverId 6) and StreamTape (serverId 3) do NOT use MegaCloud encryption.
-  const streamTapeServer = mapServer("streamtape");
-  const secondaryServers = [requestedServer, fallbackServer, tCloudServer, streamTapeServer];
-  for (const tryServer of secondaryServers) {
-    let link = "";
-    let tracks = [];
-    try {
-      const fallback = await fetchServerPayload(episodeId, tryServer, requestedCategory);
-      link = String(fallback?.link || "").trim();
-      tracks = Array.isArray(fallback?.tracks) ? fallback.tracks : [];
-    } catch {}
-
-    if (!link) continue;
-
-    if (link.includes("megacloud.blog") || link.includes("megacloud.tv")) {
-      try {
-        const extracted = await extractMegaCloud(link);
-        const playable = (extracted.sources || []).filter(
-          (s) => s.isM3U8 || String(s.url || "").includes(".m3u8")
-        );
-        if (playable.length > 0) {
-          if ((!extracted.subtitles || extracted.subtitles.length === 0) && tracks.length > 0) {
-            extracted.subtitles = tracks;
-          }
-          extracted.sources = playable;
-          return extracted;
+  try {
+    if (link.includes("megacloud.blog")) {
+      const extracted = await extractMegaCloud(link);
+      if (Array.isArray(extracted.sources) && extracted.sources.length > 0) {
+        if ((!extracted.subtitles || extracted.subtitles.length === 0) && tracks.length > 0) {
+          extracted.subtitles = tracks;
         }
-      } catch {}
-      continue; // MegaCloud failed — skip embed fallback for this link
-    }
-
-    // Raw HLS stream from non-MegaCloud CDN.
-    if (link.includes(".m3u8")) {
-      return {
-        headers: {},
-        sources: [{ url: link, isM3U8: true, type: "hls", quality: tryServer.label }],
-        subtitles: tracks,
-        download: "",
-      };
-    }
-
-    // Any other embed link (T-Cloud, StreamTape, etc.) — return as embed source.
-    // GRABIX player renders embed sources in an iframe.
-    if (link.startsWith("https://") || link.startsWith("http://") || link.startsWith("//")) {
-      const fullLink = link.startsWith("//") ? "https:" + link : link;
-      return {
-        headers: { Referer: siteBase + "/" },
-        sources: [{
-          url: fullLink,
-          isM3U8: false,
-          type: "embed",
-          isEmbed: true,
-          quality: tryServer.label,
-        }],
-        subtitles: tracks,
-        download: "",
-      };
-    }
-  }
-
-  // TERTIARY: try the other category (dub↔sub) as a last attempt.
-  const otherCategory = requestedCategory === "sub" ? "dub" : "sub";
-  for (const tryServer of serversToTry) {
-    try {
-      const direct = await scraper.getEpisodeSources(episodeId, tryServer.request, otherCategory);
-      const directSources = Array.isArray(direct?.sources) ? direct.sources : [];
-      const playable = directSources.filter(
-        (s) => s.isM3U8 || String(s.url || "").includes(".m3u8")
-      );
-      if (playable.length > 0) {
-        return {
-          headers: direct?.headers || {},
-          sources: playable,
-          subtitles: Array.isArray(direct?.subtitles) ? direct.subtitles : [],
-          download: direct?.download || "",
-        };
+        return extracted;
       }
-    } catch {}
-  }
+    }
+  } catch {}
 
-  // All extraction paths failed — throw a clear error instead of returning an unplayable embed URL.
-  throw new Error(
-    `fetchWatch: could not extract a playable HLS stream for episode "${episodeId}" ` +
-    `(tried: vidstreaming + vidcloud, sub + dub). ` +
-    `This usually means the aniwatch npm package is outdated or MegaCloud changed their API. ` +
-    `Run: cd consumet-local && npm update aniwatch && node server.cjs`
-  );
+  return {
+    headers: {},
+    sources: [
+      {
+        url: link,
+        quality: requestedServer.label,
+        isM3U8: false,
+        isEmbed: true,
+        type: "embed",
+      },
+    ],
+    subtitles: tracks,
+    download: "",
+  };
 }
 
 async function route(pathname, searchParams) {
@@ -868,170 +657,6 @@ async function route(pathname, searchParams) {
     };
   }
 
-  // ── Debug: full watch pipeline diagnostic ────────────────────────────────
-  if (pathname.startsWith("/anime/hianime/debug-watch/")) {
-    const episodeId = decodeURIComponent(pathname.slice("/anime/hianime/debug-watch/".length));
-    const epNumber = String(episodeId || "").split("?ep=")[1];
-    const debug = { episodeId, epNumber, steps: {} };
-    const debugHeaders = {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      Referer: `${siteBase}/watch/${episodeId}`,
-      "X-Requested-With": "XMLHttpRequest",
-    };
-
-    try {
-      // Step 1: server list
-      const sr = await axios.get(
-        `${ajaxBase}/episode/servers?episodeId=${encodeURIComponent(epNumber)}`,
-        { headers: debugHeaders, timeout: 15000 }
-      );
-      const payload = typeof sr.data === "string" ? JSON.parse(sr.data) : sr.data;
-      const $ = cheerio.load(payload?.html || "");
-      const servers = [];
-      $(".server-item").each((_, el) => {
-        servers.push({
-          type: $(el).attr("data-type"),
-          serverId: $(el).attr("data-server-id"),
-          id: $(el).attr("data-id"),
-          label: $(el).text().trim(),
-        });
-      });
-      debug.steps.step1_server_list = { ok: true, count: servers.length, servers };
-
-      if (servers.length === 0) {
-        debug.steps.step1_server_list.note = "No servers found in HTML — aniwatchtv.to may be blocking the request";
-        return { status: 200, body: debug };
-      }
-
-      // Step 2: get embed link for first available server
-      const first = servers[0];
-      const linkResp = await axios.get(
-        `${ajaxBase}/episode/sources?id=${encodeURIComponent(first.id)}`,
-        { headers: debugHeaders, timeout: 15000 }
-      );
-      const linkData = typeof linkResp.data === "string" ? JSON.parse(linkResp.data) : linkResp.data;
-      debug.steps.step2_embed_link = { ok: true, server: first, data: linkData };
-
-
-      // Steps 2.5 + 3: Scrape the live _k from MegaCloud's embed page JS, then call getSources.
-      const link = String(linkData?.link || "");
-      if (link.includes("megacloud")) {
-        const embedUrl2 = new URL(link);
-        const pathParts2 = embedUrl2.pathname.split("/").filter(Boolean);
-        const sourceId = pathParts2[pathParts2.length - 1];
-        const embedDomain = "megacloud.tv";
-        const kParam2 = embedUrl2.searchParams.get("k") || "1";
-        const embedPageUrl = `https://${embedDomain}/embed-2/v3/e-1/${sourceId}?k=${kParam2}`;
-        const fullUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-
-        // Step 2.5: Scrape live key from embed page + its JS files (capped at 8 s for debug)
-        const scraped = await Promise.race([
-          scrapeKeyFromEmbedPage(embedPageUrl, embedDomain, fullUA, `${siteBase}/`),
-          new Promise((resolve) =>
-            setTimeout(
-              () => resolve({ keysFound: [], pageStatus: "timeout", cookie: "", scriptsFetched: [], error: "debug scrape timed out after 8 s" }),
-              8000
-            )
-          ),
-        ]);
-        debug.steps.step2_5_embed_preload = {
-          url: embedPageUrl,
-          page_status: scraped.pageStatus,
-          cookies_captured: scraped.cookie ? scraped.cookie.substring(0, 200) : "NONE",
-          scripts_fetched: scraped.scriptsFetched,
-          keys_scraped: scraped.keysFound.map((k) => k.substring(0, 12) + "..."),
-          keys_scraped_count: scraped.keysFound.length,
-          error: scraped.error,
-          verdict: scraped.keysFound.length > 0
-            ? `✅ Found ${scraped.keysFound.length} key candidate(s) from embed page`
-            : "⚠️ No keys found in embed page — will fall back to static keys",
-        };
-
-        // Step 3: try scraped keys first, then static fallbacks
-        const staticKeys = await getMegaCloudKeys();
-        const staticCandidates = [staticKeys.rabbit, staticKeys.mega, staticKeys.vidstr].filter(Boolean);
-        const keyCandidates = [...new Set([...scraped.keysFound, ...staticCandidates])];
-        const referers = [embedPageUrl, `${siteBase}/`, `https://${embedDomain}/`];
-
-        const attempts = [];
-        let mcData = null;
-        let winningCombo = "";
-
-        outerDebug:
-        for (const referer of referers) {
-          for (const key of keyCandidates) {
-            const url = `https://${embedDomain}/embed-2/v3/e-1/getSources?id=${sourceId}&_k=${encodeURIComponent(key)}`;
-            try {
-              const r = await axios.get(url, {
-                headers: {
-                  "User-Agent": fullUA,
-                  "X-Requested-With": "XMLHttpRequest",
-                  "Accept": "application/json, text/plain, */*",
-                  "Accept-Language": "en-US,en;q=0.9",
-                  "Referer": referer,
-                  "Origin": `https://${embedDomain}`,
-                  "sec-fetch-dest": "empty",
-                  "sec-fetch-mode": "cors",
-                  "sec-fetch-site": "same-origin",
-                  ...(scraped.cookie ? { Cookie: scraped.cookie } : {}),
-                },
-                timeout: 10000,
-              });
-              const d = r.data;
-              if (d && ((Array.isArray(d.sources) && d.sources.length > 0) || (d?.encrypted && typeof d?.sources === "string"))) {
-                mcData = d;
-                winningCombo = `referer=${referer} key=${key.substring(0, 8)}... (${scraped.keysFound.includes(key) ? "SCRAPED" : "static"})`;
-                break outerDebug;
-              }
-              attempts.push({ referer: referer.substring(0, 60), key: key.substring(0, 8) + "...", status: "ok_but_empty" });
-            } catch (e) {
-              const errBody = e.response?.data;
-              attempts.push({
-                referer: referer.substring(0, 60),
-                key: key.substring(0, 8) + "...",
-                key_source: scraped.keysFound.includes(key) ? "SCRAPED" : "static",
-                http_status: e.response?.status,
-                error: e.message,
-                error_body: errBody
-                  ? (typeof errBody === "string" ? errBody : JSON.stringify(errBody)).substring(0, 200)
-                  : null,
-              });
-            }
-          }
-        }
-
-        debug.steps.step3_megacloud_ajax = {
-          ok: Boolean(mcData),
-          sourceId,
-          embedDomain,
-          keys_tried: keyCandidates.length,
-          keys_from_scrape: scraped.keysFound.length,
-          keys_from_static: staticCandidates.length,
-          winningCombo: winningCombo || "NONE — all failed",
-          failed_attempts: attempts,
-          encrypted: mcData?.encrypted,
-          sources_type: typeof mcData?.sources,
-          sources_count: Array.isArray(mcData?.sources) ? mcData.sources.length : "N/A",
-          has_key_field: Boolean(mcData?.key),
-          tracks_count: Array.isArray(mcData?.tracks) ? mcData.tracks.length : 0,
-          verdict: !mcData
-            ? "❌ All combinations failed — see failed_attempts[].error_body"
-            : !mcData?.encrypted && Array.isArray(mcData?.sources) && mcData.sources.length > 0
-            ? "✅ UNENCRYPTED — sources ready"
-            : mcData?.encrypted && mcData?.key
-            ? "⚠️ ENCRYPTED but server key present"
-            : "❌ Unknown state",
-        };
-      } else {
-        debug.steps.step3_megacloud_ajax = { skipped: true, reason: "Link is not a MegaCloud URL", link };
-      }
-    } catch (e) {
-      debug.steps.error = { message: e.message, stack: e.stack?.split("\n").slice(0, 4) };
-    }
-
-    return { status: 200, body: debug };
-  }
-
   if (pathname.startsWith("/anime/hianime/")) {
     const query = decodeURIComponent(pathname.slice("/anime/hianime/".length));
     const data = await scraper.search(query, parsePage(searchParams.get("page")));
@@ -1105,64 +730,6 @@ async function route(pathname, searchParams) {
     };
   }
 
-  // ── Gogoanime stream pipeline — search → info → episode sources ──────────
-  // Used as primary fallback when HiAnime/MegaCloud is broken.
-  // Gogoanime uses a different CDN (not MegaCloud) so it works independently.
-
-  if (pathname === "/anime/gogoanime/stream") {
-    const rawTitle = String(searchParams.get("title") || "").trim();
-    const epNum = parseInt(searchParams.get("episode") || "1", 10);
-    const dubbed = String(searchParams.get("dubbed") || "").toLowerCase() === "true";
-    if (!rawTitle) return { status: 400, body: { detail: "title is required" } };
-
-    const gogoanime = new ANIME.Gogoanime();
-
-    // Step 1: search — try dubbed variant first if requested
-    const searchQuery = dubbed ? `${rawTitle} (dub)` : rawTitle;
-    let results = [];
-    try {
-      const sr = await gogoanime.search(searchQuery);
-      results = Array.isArray(sr?.results) ? sr.results : [];
-    } catch {}
-    // Fallback: search plain title even if dubbed search failed
-    if (!results.length && dubbed) {
-      try {
-        const sr2 = await gogoanime.search(rawTitle);
-        results = Array.isArray(sr2?.results) ? sr2.results : [];
-      } catch {}
-    }
-    if (!results.length) {
-      throw new Error(`Gogoanime: no results for "${rawTitle}"`);
-    }
-
-    // Step 2: pick best match by title similarity
-    function simpleScore(a, b) {
-      a = a.toLowerCase().replace(/[^a-z0-9]/g, " ").trim();
-      b = b.toLowerCase().replace(/[^a-z0-9]/g, " ").trim();
-      if (a === b) return 100;
-      const bWords = new Set(b.split(" ").filter(Boolean));
-      const aWords = a.split(" ").filter(Boolean);
-      const hits = aWords.filter(w => bWords.has(w)).length;
-      return bWords.size ? (hits / bWords.size) * 100 : 0;
-    }
-    results.sort((a, b) => simpleScore(b.title || "", rawTitle) - simpleScore(a.title || "", rawTitle));
-    const best = results[0];
-
-    // Step 3: fetch episode list
-    const info = await gogoanime.fetchAnimeInfo(best.id);
-    const episodes = Array.isArray(info?.episodes) ? info.episodes : [];
-    if (!episodes.length) throw new Error(`Gogoanime: no episodes for "${rawTitle}" (id=${best.id})`);
-
-    // Match by episode number; fall back to index
-    let ep = episodes.find(e => e.number === epNum);
-    if (!ep) ep = episodes[Math.min(epNum - 1, episodes.length - 1)];
-    if (!ep) throw new Error(`Gogoanime: episode ${epNum} not found`);
-
-    // Step 4: fetch sources
-    const sources = await gogoanime.fetchEpisodeSources(ep.id);
-    return { status: 200, body: sources };
-  }
-
   // ── AnimePahe routes ───────────────────────────────────────────────────────
 
   if (pathname.startsWith("/anime/animepahe/info/")) {
@@ -1189,7 +756,6 @@ async function route(pathname, searchParams) {
       },
     };
   }
-
 
   return { status: 404, body: { detail: "Route not found." } };
 }
