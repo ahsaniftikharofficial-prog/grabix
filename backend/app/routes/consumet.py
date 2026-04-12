@@ -309,7 +309,8 @@ async def consumet_anime_stream(
     base = get_consumet_api_base()
     category = "dub" if audio.strip().lower() == "dub" else "sub"
     fallback_category = "sub" if category == "dub" else "dub"
-    servers = ["vidcloud", "vidstreaming"]
+    # vidstreaming first (MegaCloud fallback), then vidcloud, then t-cloud (different CDN — bypasses MegaCloud key issues)
+    servers = ["vidstreaming", "vidcloud", "t-cloud"]
 
     async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as client:
 
@@ -412,57 +413,55 @@ async def consumet_anime_stream(
                 },
             )
 
-        # ── Step 3: Get stream ───────────────────────────────────────────────
-        # KEY FIX: capture actual sidecar error body from every failed attempt.
+        # ── Step 3: Get stream — ALL combos run CONCURRENTLY ────────────────
+        # PREVIOUS BUG: sequential attempts (4 × up to 35 s = 140 s worst case)
+        # caused "signal timed out" on the frontend (55 s limit).
+        # FIX: run all combos in parallel; total time = max(individual times).
+        import asyncio as _asyncio
+
         attempt_errors: list[str] = []
 
-        for cat in [category, fallback_category]:
-            for srv in servers:
-                try:
-                    watch_url = f"{base}/anime/hianime/watch/{urlquote(ep_id, safe='')}"
-                    r3 = await client.get(
-                        watch_url,
-                        params={"server": srv, "category": cat},
-                        timeout=35.0,
-                    )
-
-                    if r3.status_code >= 400:
-                        sidecar_err = _safe_error_body(r3)
-                        attempt_errors.append(f"{srv}/{cat}: HTTP {r3.status_code} — {sidecar_err}")
-                        logger.warning(
-                            "anime/stream: watch HTTP %d ep=%s server=%s cat=%s — sidecar: %s",
-                            r3.status_code, ep_id, srv, cat, sidecar_err,
-                        )
-                        continue
-
-                    data3 = r3.json()
-                    sources = data3.get("sources") or []
-
-                    if not sources:
-                        inner_err = data3.get("error") or data3.get("detail") or "empty sources array"
-                        attempt_errors.append(f"{srv}/{cat}: 200 OK but no sources — {inner_err}")
-                        logger.debug(
-                            "anime/stream: empty sources for ep=%s server=%s cat=%s — %s",
-                            ep_id, srv, cat, inner_err,
-                        )
-                        continue
-
-                    data3["_anime_id"] = resolved_id
-                    data3["_episode_id"] = ep_id
-                    data3["_server_used"] = srv
-                    data3["_category_used"] = cat
-                    logger.info(
-                        "anime/stream: ✓ %d sources for '%s' ep%d via %s/%s",
-                        len(sources), title, episode, srv, cat,
-                    )
-                    return JSONResponse(content=data3)
-
-                except Exception as exc:
-                    attempt_errors.append(f"{srv}/{cat}: exception — {exc}")
+        async def _try_watch(srv: str, cat: str):
+            try:
+                watch_url = f"{base}/anime/hianime/watch/{urlquote(ep_id, safe='')}"
+                r3 = await client.get(
+                    watch_url,
+                    params={"server": srv, "category": cat},
+                    timeout=25.0,  # tight per-call; 4 run in parallel so total ≤ 25 s
+                )
+                if r3.status_code >= 400:
+                    err = _safe_error_body(r3)
                     logger.warning(
-                        "anime/stream: watch exception ep=%s server=%s cat=%s: %s",
-                        ep_id, srv, cat, exc,
+                        "anime/stream: watch HTTP %d ep=%s server=%s cat=%s — %s",
+                        r3.status_code, ep_id, srv, cat, err,
                     )
+                    return None, f"{srv}/{cat}: HTTP {r3.status_code} — {err}"
+                data3 = r3.json()
+                sources = data3.get("sources") or []
+                if not sources:
+                    inner_err = data3.get("error") or data3.get("detail") or "empty sources array"
+                    return None, f"{srv}/{cat}: 200 OK but no sources — {inner_err}"
+                data3["_anime_id"] = resolved_id
+                data3["_episode_id"] = ep_id
+                data3["_server_used"] = srv
+                data3["_category_used"] = cat
+                logger.info(
+                    "anime/stream: ✓ %d sources for '%s' ep%d via %s/%s",
+                    len(sources), title, episode, srv, cat,
+                )
+                return data3, None
+            except Exception as exc:
+                logger.warning("anime/stream: watch exception ep=%s srv=%s cat=%s: %s", ep_id, srv, cat, exc)
+                return None, f"{srv}/{cat}: exception — {exc}"
+
+        combos = [(srv, cat) for cat in [category, fallback_category] for srv in servers]
+        watch_results = await _asyncio.gather(*[_try_watch(s, c) for s, c in combos])
+
+        for data3, err in watch_results:
+            if err:
+                attempt_errors.append(err)
+            if data3:
+                return JSONResponse(content=data3)
 
         # All attempts failed
         hint = _build_sidecar_hint(attempt_errors)

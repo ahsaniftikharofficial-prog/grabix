@@ -324,8 +324,16 @@ async function extractMegaCloud(link) {
   const fullUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
   // Scrape the live _k from MegaCloud's own embed page JS — primary strategy.
-  // Stale static repos (yogesh-hacker) are a fallback only; MegaCloud rotates keys.
-  const scraped = await scrapeKeyFromEmbedPage(embedPageUrl, embedDomain, fullUA, `${siteBase}/`);
+  // Hard cap at 4 s so slow JS fetches never block the watch pipeline.
+  const scraped = await Promise.race([
+    scrapeKeyFromEmbedPage(embedPageUrl, embedDomain, fullUA, `${siteBase}/`),
+    new Promise((resolve) =>
+      setTimeout(
+        () => resolve({ keysFound: [], pageStatus: "timeout", cookie: "", scriptsFetched: [], error: "scrape timed out after 4 s" }),
+        4000
+      )
+    ),
+  ]);
 
   // Build candidate list: live scraped keys first, static fallbacks at the end
   const staticKeys = await getMegaCloudKeys();
@@ -560,14 +568,15 @@ async function fetchWatch(episodeId, server, category) {
   const requestedServer = mapServer(server);
   const requestedCategory = mapCategory(category);
 
-  // Build the ordered list of servers to try: requested first, then the other one as fallback.
   const fallbackServer =
     requestedServer.request === HiAnime.Servers.VidStreaming
       ? mapServer("vidcloud")
       : mapServer("vidstreaming");
+  // T-Cloud (serverId 6) uses a different CDN — not MegaCloud.
+  const tCloudServer = mapServer("t-cloud");
   const serversToTry = [requestedServer, fallbackServer];
 
-  // PRIMARY: aniwatch library scraper — try each server until we get real HLS sources.
+  // PRIMARY: aniwatch library scraper. T-Cloud skipped (not a valid HiAnime.Servers value).
   for (const tryServer of serversToTry) {
     try {
       const direct = await scraper.getEpisodeSources(episodeId, tryServer.request, requestedCategory);
@@ -577,7 +586,6 @@ async function fetchWatch(episodeId, server, category) {
         : Array.isArray(direct?.tracks)
         ? direct.tracks
         : [];
-      // Only accept real HLS/direct sources — reject embed or sourceless results.
       const playable = directSources.filter(
         (s) => s.isM3U8 || String(s.url || "").includes(".m3u8") || String(s.type || "").toLowerCase() === "hls"
       );
@@ -592,8 +600,10 @@ async function fetchWatch(episodeId, server, category) {
     } catch {}
   }
 
-  // SECONDARY: manual AJAX + MegaCloud extraction — try each server.
-  for (const tryServer of serversToTry) {
+  // SECONDARY: manual AJAX — includes T-Cloud as a 3rd option.
+  // T-Cloud does NOT use MegaCloud, bypassing the invalid-key problem entirely.
+  const secondaryServers = [requestedServer, fallbackServer, tCloudServer];
+  for (const tryServer of secondaryServers) {
     let link = "";
     let tracks = [];
     try {
@@ -618,13 +628,32 @@ async function fetchWatch(episodeId, server, category) {
           return extracted;
         }
       } catch {}
+      continue; // MegaCloud failed — skip embed fallback for this link
     }
 
-    // Non-MegaCloud link that looks like a direct HLS stream — trust it.
+    // Raw HLS stream from non-MegaCloud CDN.
     if (link.includes(".m3u8")) {
       return {
         headers: {},
         sources: [{ url: link, isM3U8: true, type: "hls", quality: tryServer.label }],
+        subtitles: tracks,
+        download: "",
+      };
+    }
+
+    // Any other embed link (T-Cloud, StreamTape, etc.) — return as embed source.
+    // GRABIX player renders embed sources in an iframe.
+    if (link.startsWith("https://") || link.startsWith("http://") || link.startsWith("//")) {
+      const fullLink = link.startsWith("//") ? "https:" + link : link;
+      return {
+        headers: { Referer: siteBase + "/" },
+        sources: [{
+          url: fullLink,
+          isM3U8: false,
+          type: "embed",
+          isEmbed: true,
+          quality: tryServer.label,
+        }],
         subtitles: tracks,
         download: "",
       };
@@ -890,8 +919,16 @@ async function route(pathname, searchParams) {
         const embedPageUrl = `https://${embedDomain}/embed-2/v3/e-1/${sourceId}?k=${kParam2}`;
         const fullUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-        // Step 2.5: Scrape live key from embed page + its JS files
-        const scraped = await scrapeKeyFromEmbedPage(embedPageUrl, embedDomain, fullUA, `${siteBase}/`);
+        // Step 2.5: Scrape live key from embed page + its JS files (capped at 8 s for debug)
+        const scraped = await Promise.race([
+          scrapeKeyFromEmbedPage(embedPageUrl, embedDomain, fullUA, `${siteBase}/`),
+          new Promise((resolve) =>
+            setTimeout(
+              () => resolve({ keysFound: [], pageStatus: "timeout", cookie: "", scriptsFetched: [], error: "debug scrape timed out after 8 s" }),
+              8000
+            )
+          ),
+        ]);
         debug.steps.step2_5_embed_preload = {
           url: embedPageUrl,
           page_status: scraped.pageStatus,

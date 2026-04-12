@@ -258,7 +258,22 @@ async function fetchAnimeStream(
   }
 
   const r = await fetch(`${BACKEND}/consumet/anime/stream?${params}`, {
-    signal: AbortSignal.timeout(55000), // 55s — backend itself has 40s timeout
+    signal: AbortSignal.timeout(60000), // 60 s — 4 watch calls now run in parallel
+  }).catch((err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    // AbortSignal.timeout fires with "TimeoutError" or "signal timed out"
+    if (msg.toLowerCase().includes("timeout") || msg.toLowerCase().includes("signal")) {
+      const te = new Error(
+        `Stream request timed out. The sidecar may be slow or unreachable. ` +
+        `Make sure 'node server.cjs' is running in consumet-local, then try again.`
+      ) as Error & { streamDetail?: StreamErrorDetail };
+      te.streamDetail = {
+        message: te.message,
+        sidecarHint: "Open a terminal in consumet-local and run: node server.cjs",
+      };
+      throw te;
+    }
+    throw err;
   });
 
   const data = (await r.json()) as StreamPayload;
