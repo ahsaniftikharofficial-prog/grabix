@@ -1,12 +1,14 @@
 /**
  * AnimePageV2.tsx
  *
- * Streaming logic mirrors anime.py — hits Consumet directly via
- * /consumet/watch/anime instead of the broken /providers/resolve/anime chain.
+ * Streaming mirrors anime.py step-by-step via /consumet/anime/stream:
+ *   search → best match → info/episodes → watch
  *
- * Browse/discover: same aniwatch + Jikan stack (already works)
- * Episode fetch:   /consumet/episodes/anime?id={id}&provider=hianime
- * Stream:          /consumet/watch/anime?episode_id={epId}&provider=hianime&audio={sub|en}
+ * The backend endpoint does the full anime.py pipeline server-side so CORS
+ * is never a factor (browser never touches port 3000).
+ *
+ * Browse/discover: Aniwatch + Jikan (already works)
+ * Stream:          GET /consumet/anime/stream?title=...&episode=...&audio=...
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -182,97 +184,106 @@ function toJikan(item: {
   };
 }
 
-// ─── Core streaming — mirrors anime.py exactly via a raw backend pass-through ─
+// ─── Core streaming — mirrors anime.py exactly ───────────────────────────────
 //
-// anime.py works because Python bypasses browser CORS.
-// The browser CAN'T call port 3000 directly (CORS blocks it).
-// Solution: /consumet/watch/anime/raw — a Python route that does the exact
-// same thing anime.py does (raw httpx call, no normalization, no filtering)
-// and returns whatever Consumet gives back.
+// anime.py works like this:
+//   1. Search HiAnime by title
+//   2. Pick best result
+//   3. GET /anime/hianime/info?id={animeId}  → episode list with real IDs
+//   4. Pick episode by number
+//   5. GET /anime/hianime/watch/{epId}?server=vidcloud&category=sub
+//
+// The backend endpoint /consumet/anime/stream does EXACTLY this, server-side.
+// CORS never blocks it because the browser only calls port 8000 (our backend).
+//
+// We pass:
+//   title     — the anime title shown in the UI
+//   alt_title — original/Japanese title as a search fallback
+//   anime_id  — the HiAnime ID we already have (skips the search step!)
+//   episode   — episode number
+//   audio     — "sub" or "dub"
 
-const CONSUMET_RAW_SERVERS = ["vidcloud", "vidstreaming"] as const;
-
-async function fetchDirectStream(
-  episodeId: string,
-  audio: AudioMode
-): Promise<{ sources: StreamSource[]; subtitles: Array<{ url: string; lang: string }> }> {
-  const category = audio === "dub" ? "dub" : "sub";
-
-  // Try both servers, both audio tracks — same logic as anime.py
-  const attempts = [
-    { server: "vidcloud", category },
-    { server: "vidstreaming", category },
-    { server: "vidcloud", category: category === "sub" ? "dub" : "sub" },
-    { server: "vidstreaming", category: category === "sub" ? "dub" : "sub" },
-  ];
-
-  for (const attempt of attempts) {
-    try {
-      const params = new URLSearchParams({
-        episode_id: episodeId,
-        server: attempt.server,
-        category: attempt.category,
-      });
-      const r = await fetch(`${BACKEND}/consumet/watch/anime/raw?${params}`, {
-        signal: AbortSignal.timeout(32000),
-      });
-
-      if (!r.ok) continue;
-
-      const data = (await r.json()) as {
-        sources?: Array<{ url?: string; quality?: string; isM3U8?: boolean; type?: string; isEmbed?: boolean }>;
-        subtitles?: Array<{ url?: string; lang?: string }>;
-        headers?: Record<string, string>;
-        error?: string;
-      };
-
-      if (data.error || !data.sources?.length) continue;
-
-      // Take ALL sources — including embed — unlike the old chain which discarded embeds
-      const sources: StreamSource[] = data.sources
-        .filter((s) => s.url)
-        .map((s, i) => {
-          const url = s.url!;
-          const isM3U8 = s.isM3U8 || url.includes(".m3u8");
-          const isEmbed = s.isEmbed || s.type === "embed";
-          return {
-            id: `hianime-${attempt.server}-${attempt.category}-${i}`,
-            label: s.quality || "Auto",
-            provider: "HiAnime",
-            kind: (isEmbed ? "embed" : isM3U8 ? "hls" : "direct") as StreamSource["kind"],
-            url,
-            quality: s.quality || "Auto",
-            description: `HiAnime ${attempt.category.toUpperCase()} via ${attempt.server}`,
-            requestHeaders: data.headers ?? {},
-          };
-        });
-
-      if (sources.length === 0) continue;
-
-      const subtitles = (data.subtitles ?? [])
-        .filter((s) => s.url && s.lang)
-        .map((s) => ({ url: s.url!, lang: s.lang! }));
-
-      return { sources, subtitles };
-    } catch {
-      continue;
-    }
-  }
-
-  throw new Error(
-    "No stream found.\n\n" +
-    "Tried: vidcloud + vidstreaming (SUB + DUB) via /consumet/watch/anime/raw.\n\n" +
-    "Run anime.py in your terminal to confirm the Consumet sidecar (port 3000) is alive. " +
-    "If anime.py also fails, restart the Consumet sidecar."
-  );
+interface StreamPayload {
+  sources?: Array<{
+    url?: string;
+    quality?: string;
+    isM3U8?: boolean;
+    type?: string;
+    isEmbed?: boolean;
+  }>;
+  subtitles?: Array<{ url?: string; lang?: string }>;
+  headers?: Record<string, string>;
+  error?: string;
+  _server_used?: string;
+  _category_used?: string;
+  _anime_id?: string;
+  _episode_id?: string;
 }
 
-async function fetchEpisodes(animeId: string): Promise<RawEpisode[]> {
-  const params = new URLSearchParams({ id: animeId, provider: "hianime" });
-  const r = await fetch(`${BACKEND}/consumet/episodes/anime?${params}`);
-  if (!r.ok) return [];
-  const data = (await r.json()) as { items?: RawEpisode[] };
-  return data.items ?? [];
+async function fetchAnimeStream(
+  title: string,
+  altTitle: string | undefined,
+  animeId: string | undefined,
+  animeProvider: string,
+  episodeNumber: number,
+  audio: AudioMode
+): Promise<{ sources: StreamSource[]; subtitles: Array<{ url: string; lang: string }> }> {
+  // Build query params — pass anime_id as hint only when provider is hianime
+  // (jikan IDs are MAL IDs, useless for HiAnime search)
+  const params = new URLSearchParams({
+    title,
+    episode: String(episodeNumber),
+    audio,
+  });
+
+  if (animeId && animeProvider === "hianime") {
+    params.set("anime_id", animeId);
+  }
+  if (altTitle && altTitle.trim() && altTitle.trim() !== title.trim()) {
+    params.set("alt_title", altTitle.trim());
+  }
+
+  const r = await fetch(`${BACKEND}/consumet/anime/stream?${params}`, {
+    signal: AbortSignal.timeout(55000), // 55s — backend itself has 40s timeout
+  });
+
+  const data = (await r.json()) as StreamPayload;
+
+  if (!r.ok || data.error || !data.sources?.length) {
+    const msg = data.error || `No stream found for "${title}" episode ${episodeNumber}.`;
+    throw new Error(msg);
+  }
+
+  const serverUsed = data._server_used || "vidcloud";
+  const categoryUsed = data._category_used || audio;
+
+  const sources: StreamSource[] = (data.sources ?? [])
+    .filter((s) => s.url)
+    .map((s, i) => {
+      const url = s.url!;
+      const isM3U8 = s.isM3U8 || url.includes(".m3u8");
+      const isEmbed = s.isEmbed || s.type === "embed";
+      return {
+        id: `hianime-${serverUsed}-${categoryUsed}-${i}`,
+        label: s.quality || "Auto",
+        provider: "HiAnime",
+        kind: (isEmbed ? "embed" : isM3U8 ? "hls" : "direct") as StreamSource["kind"],
+        url,
+        quality: s.quality || "Auto",
+        description: `HiAnime ${categoryUsed.toUpperCase()} via ${serverUsed}`,
+        requestHeaders: data.headers ?? {},
+      };
+    });
+
+  if (sources.length === 0) {
+    throw new Error(`No playable sources found for "${title}" episode ${episodeNumber}.`);
+  }
+
+  const subtitles = (data.subtitles ?? [])
+    .filter((s) => s.url && s.lang)
+    .map((s) => ({ url: s.url!, lang: s.lang! }));
+
+  return { sources, subtitles };
 }
 
 // ─── Main Page ───────────────────────────────────────────────────────────────
@@ -911,7 +922,7 @@ function AnimeCard({
   );
 }
 
-// ─── AnimeDetailV2 — simplified detail modal with direct streaming ────────────
+// ─── AnimeDetailV2 ────────────────────────────────────────────────────────────
 
 function AnimeDetailV2({
   anime,
@@ -935,8 +946,6 @@ function AnimeDetailV2({
   activeTab: Tab;
 }) {
   const { isFav, toggle } = useFavorites();
-  const [episodes, setEpisodes] = useState<RawEpisode[]>([]);
-  const [episodesLoading, setEpisodesLoading] = useState(true);
   const [episode, setEpisode] = useState(1);
   const [audio, setAudio] = useState<AudioMode>("sub");
   const [playing, setPlaying] = useState(false);
@@ -946,9 +955,13 @@ function AnimeDetailV2({
   const isMovie = activeTab === "movie" || rawType === "movie";
   const selectionLabel = isMovie ? "Part" : "Episode";
   const title = anime.title;
+  const altTitle = (anime as AnimeItem & { alt_title?: string }).alt_title;
   const fav = isFav(`anime-v2-${anime.provider}-${anime.id}`);
 
-  const totalEpisodes = episodes.length || anime.episodes_count || 1;
+  // Episode count from the anime object (no extra fetch needed — anime.py also
+  // uses the episode list from /info, but we use the known count for the picker
+  // and let the backend re-fetch internally when streaming)
+  const totalEpisodes = anime.episodes_count || 1;
   const episodeGroups = Math.ceil(totalEpisodes / 50);
   const selectedGroup = Math.floor((episode - 1) / 50);
   const episodeStart = selectedGroup * 50 + 1;
@@ -962,72 +975,30 @@ function AnimeDetailV2({
     [episodeStart, episodeEnd]
   );
 
-  // Load episodes when modal opens
-  useEffect(() => {
-    if (anime.provider === "jikan") {
-      // Jikan items don't have Consumet episode IDs — use number sequence
-      const count = anime.episodes_count || 12;
-      setEpisodes(
-        Array.from({ length: count }, (_, i) => ({
-          id: `jikan-${anime.id}-ep-${i + 1}`,
-          number: i + 1,
-          title: `Episode ${i + 1}`,
-        }))
-      );
-      setEpisodesLoading(false);
-      return;
-    }
-
-    setEpisodesLoading(true);
-    fetchEpisodes(anime.id)
-      .then((eps) => {
-        setEpisodes(eps.length > 0 ? eps : []);
-      })
-      .catch(() => setEpisodes([]))
-      .finally(() => setEpisodesLoading(false));
-  }, [anime.id, anime.provider]);
-
-  const getEpisodeId = (epNumber: number): string | null => {
-    const found = episodes.find((e) => e.number === epNumber);
-    return found?.id ?? null;
-  };
-
   /**
-   * Core play function — mirrors anime.py step 7.
-   * Gets episode ID → calls /consumet/watch/anime directly.
+   * resolveStream — calls the backend anime.py pipeline:
+   *   title + episode → search → info → watch → sources
+   *
+   * The backend handles all retries (vidcloud/vidstreaming, sub/dub fallback).
+   * We just pass the title, episode number, and preferred audio.
    */
   const resolveStream = async (
     epNumber: number,
     audioMode: AudioMode
   ): Promise<{ sources: StreamSource[]; subtitle: string }> => {
-    const episodeId = getEpisodeId(epNumber);
-    if (!episodeId) {
-      throw new Error(
-        `No episode ID found for ${selectionLabel} ${epNumber}. The anime may not be available on HiAnime.`
-      );
-    }
-
-    const { sources } = await fetchDirectStream(episodeId, audioMode);
-
-    if (sources.length === 0) {
-      // Try flipping audio if nothing found
-      const flipped: AudioMode = audioMode === "dub" ? "sub" : "dub";
-      const fallback = await fetchDirectStream(episodeId, flipped);
-      if (fallback.sources.length === 0) {
-        throw new Error(
-          `No playable stream found for ${selectionLabel} ${epNumber} (tried SUB + DUB). ` +
-            `HiAnime may not have this episode yet.`
-        );
-      }
-      return {
-        sources: fallback.sources,
-        subtitle: `HiAnime ${flipped.toUpperCase()} — ${selectionLabel} ${epNumber}`,
-      };
-    }
+    const { sources } = await fetchAnimeStream(
+      title,
+      altTitle,
+      // Pass HiAnime ID as a hint — backend will skip search and use it directly
+      anime.provider === "hianime" ? anime.id : undefined,
+      anime.provider,
+      epNumber,
+      audioMode,
+    );
 
     return {
       sources,
-      subtitle: `HiAnime ${audioMode.toUpperCase()} — ${selectionLabel} ${epNumber}`,
+      subtitle: `HiAnime — ${selectionLabel} ${epNumber}`,
     };
   };
 
@@ -1202,21 +1173,6 @@ function AnimeDetailV2({
             </div>
           )}
 
-          {/* Status line */}
-          <div
-            style={{
-              fontSize: 12,
-              color: episodesLoading ? "var(--text-muted)" : "var(--text-success)",
-              marginBottom: 14,
-            }}
-          >
-            {episodesLoading
-              ? "Loading episode list..."
-              : episodes.length > 0
-                ? `${episodes.length} episodes loaded from HiAnime — direct stream ready`
-                : "Episodes not found on HiAnime — playback may fail"}
-          </div>
-
           {/* Episode picker */}
           {(!isMovie || totalEpisodes > 1) && (
             <div
@@ -1299,7 +1255,7 @@ function AnimeDetailV2({
             </div>
             <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
               {audio === "dub"
-                ? "English dub — if unavailable, SUB will be used as fallback"
+                ? "English dub — SUB used as fallback if DUB unavailable"
                 : "Japanese audio with subtitles"}
             </div>
           </div>
@@ -1313,7 +1269,7 @@ function AnimeDetailV2({
               disabled={playing}
             >
               <IconPlay size={15} />
-              {playing ? "Loading stream..." : `Play ${selectionLabel} ${episode}`}
+              {playing ? "Finding stream..." : `Play ${selectionLabel} ${episode}`}
             </button>
             <button
               className="btn btn-ghost"
@@ -1340,7 +1296,7 @@ function AnimeDetailV2({
             </button>
           </div>
 
-          {/* Download hint */}
+          {/* Info hint */}
           <div
             style={{
               marginTop: 14,
@@ -1354,9 +1310,9 @@ function AnimeDetailV2({
             }}
           >
             <strong style={{ color: "var(--text-primary)" }}>How V2 streams:</strong> Calls{" "}
-            <code style={{ fontSize: 11 }}>/consumet/watch/anime</code> directly with the HiAnime
-            episode ID. The backend tries vidstreaming + vidcloud in parallel and returns the first
-            working M3U8. No provider resolution chain involved.
+            <code style={{ fontSize: 11 }}>/consumet/anime/stream</code> — the backend searches
+            HiAnime by title, resolves the episode ID, then fetches the M3U8 directly. Same flow
+            as anime.py, no browser CORS issues.
           </div>
         </div>
       </div>

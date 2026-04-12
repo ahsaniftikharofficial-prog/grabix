@@ -203,6 +203,208 @@ async def consumet_meta_info(
         return JSONResponse(status_code=502, content={"error": str(exc)})
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  /anime/stream  —  the anime.py flow, fully replicated inside the backend
+#
+#  anime.py does:
+#    1. GET /anime/hianime/{query}           → search results
+#    2. pick best match, grab anime_id
+#    3. GET /anime/hianime/info?id={id}      → episode list with real ep IDs
+#    4. pick episode, grab ep_id
+#    5. GET /anime/hianime/watch/{ep_id}?server=vidcloud&category=sub  → stream
+#
+#  This endpoint does EXACTLY that, server-side, so the browser never has to
+#  touch port 3000 and CORS is not a factor.
+#
+#  The frontend passes:
+#    title       — anime title to search for (use original/alt title too)
+#    episode     — episode number (1-based)
+#    audio       — "sub" or "dub"
+#    anime_id    — optional known HiAnime ID (skips search step if provided)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _title_score(result_title: str, query: str) -> int:
+    """Simple scoring — higher is better match."""
+    r = result_title.lower().strip()
+    q = query.lower().strip()
+    if r == q:
+        return 100
+    if r.startswith(q) or q.startswith(r):
+        return 80
+    # word overlap
+    q_words = set(q.split())
+    r_words = set(r.split())
+    overlap = len(q_words & r_words)
+    return overlap * 10
+
+
+@router.get("/anime/stream")
+async def consumet_anime_stream(
+    title: str = Query(..., min_length=1, description="Anime title to search for"),
+    episode: int = Query(1, ge=1, description="Episode number (1-based)"),
+    audio: str = Query("sub", description="'sub' or 'dub'"),
+    anime_id: str | None = Query(None, description="Optional known HiAnime ID — skips search"),
+    alt_title: str | None = Query(None, description="Alt title to try if primary search fails"),
+):
+    """
+    Full anime.py streaming pipeline, server-side.
+
+    Replicates anime.py steps 1-7 exactly:
+      search → pick best match → info/episodes → watch
+    Returns the raw Consumet payload (sources + subtitles).
+    """
+    import httpx
+    from urllib.parse import quote as urlquote
+    from app.services.consumet import get_consumet_api_base
+
+    base = get_consumet_api_base()
+    category = "dub" if audio.strip().lower() == "dub" else "sub"
+    fallback_category = "sub" if category == "dub" else "dub"
+    servers = ["vidcloud", "vidstreaming"]
+
+    async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as client:
+
+        # ── Step 1: Resolve anime ID ─────────────────────────────────────────
+        resolved_id: str | None = anime_id  # use caller's hint if present
+
+        if not resolved_id:
+            # Search by title (mirrors anime.py step 1)
+            search_titles = [title]
+            if alt_title and alt_title.strip() and alt_title.strip() != title.strip():
+                search_titles.append(alt_title.strip())
+
+            for search_term in search_titles:
+                try:
+                    r = await client.get(
+                        f"{base}/anime/hianime/{urlquote(search_term)}",
+                        timeout=15.0,
+                    )
+                    if r.status_code >= 400:
+                        continue
+                    data = r.json()
+                    results = data.get("results") or []
+                    if not results:
+                        continue
+                    # Pick best title match
+                    best = max(results, key=lambda x: _title_score(str(x.get("title", "")), search_term))
+                    resolved_id = str(best.get("id", ""))
+                    if resolved_id:
+                        logger.info("anime/stream: resolved '%s' → id=%s", search_term, resolved_id)
+                        break
+                except Exception as exc:
+                    logger.warning("anime/stream: search failed for '%s': %s", search_term, exc)
+
+        if not resolved_id:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "sources": [],
+                    "subtitles": [],
+                    "error": f"Could not find '{title}' on HiAnime. Check the title spelling.",
+                    "_step": "search",
+                },
+            )
+
+        # ── Step 2: Get episode list (mirrors anime.py step 3) ───────────────
+        ep_id: str | None = None
+        try:
+            r2 = await client.get(
+                f"{base}/anime/hianime/info",
+                params={"id": resolved_id},
+                timeout=20.0,
+            )
+            if r2.status_code < 400:
+                data2 = r2.json()
+                episodes = data2.get("episodes") or []
+                # Find by number, fallback to index
+                ep_obj = next((e for e in episodes if e.get("number") == episode), None)
+                if ep_obj is None and episodes:
+                    idx = min(episode - 1, len(episodes) - 1)
+                    ep_obj = episodes[idx]
+                if ep_obj:
+                    ep_id = str(ep_obj.get("id") or ep_obj.get("episodeId") or "")
+        except Exception as exc:
+            logger.warning("anime/stream: info fetch failed for id=%s: %s", resolved_id, exc)
+
+        if not ep_id:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "sources": [],
+                    "subtitles": [],
+                    "error": f"Episode {episode} not found for '{title}' (id={resolved_id}).",
+                    "_step": "info",
+                    "_anime_id": resolved_id,
+                },
+            )
+
+        # ── Step 3: Get stream (mirrors anime.py step 7) ─────────────────────
+        # Try preferred audio first, then fallback audio — exactly like anime.py
+        for cat in [category, fallback_category]:
+            for srv in servers:
+                try:
+                    watch_url = f"{base}/anime/hianime/watch/{urlquote(ep_id, safe='')}"
+                    r3 = await client.get(
+                        watch_url,
+                        params={"server": srv, "category": cat},
+                        timeout=35.0,
+                    )
+                    if r3.status_code >= 400:
+                        logger.debug(
+                            "anime/stream: watch HTTP %d for ep=%s server=%s cat=%s",
+                            r3.status_code, ep_id, srv, cat,
+                        )
+                        continue
+
+                    data3 = r3.json()
+                    sources = data3.get("sources") or []
+
+                    if not sources:
+                        logger.debug(
+                            "anime/stream: empty sources for ep=%s server=%s cat=%s",
+                            ep_id, srv, cat,
+                        )
+                        continue
+
+                    # ✓ Got sources — attach diagnostic fields and return
+                    data3["_anime_id"] = resolved_id
+                    data3["_episode_id"] = ep_id
+                    data3["_server_used"] = srv
+                    data3["_category_used"] = cat
+                    logger.info(
+                        "anime/stream: ✓ %d sources for '%s' ep%d via %s/%s",
+                        len(sources), title, episode, srv, cat,
+                    )
+                    return JSONResponse(content=data3)
+
+                except Exception as exc:
+                    logger.warning(
+                        "anime/stream: watch error ep=%s server=%s cat=%s: %s",
+                        ep_id, srv, cat, exc,
+                    )
+
+        # All server/category combos failed
+        return JSONResponse(
+            status_code=502,
+            content={
+                "sources": [],
+                "subtitles": [],
+                "error": (
+                    f"No playable stream found for '{title}' episode {episode}. "
+                    f"Tried vidcloud + vidstreaming ({category.upper()} + {fallback_category.upper()}). "
+                    f"The episode may not be available on HiAnime yet, or the sidecar needs a restart."
+                ),
+                "_anime_id": resolved_id,
+                "_episode_id": ep_id,
+                "_step": "watch",
+            },
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  /watch/anime/raw  —  kept as-is for backward compatibility
+# ─────────────────────────────────────────────────────────────────────────────
+
 @router.get("/watch/anime/raw")
 async def consumet_watch_anime_raw(
     episode_id: str = Query(..., min_length=1),
@@ -210,11 +412,9 @@ async def consumet_watch_anime_raw(
     category: str = Query("sub"),
 ):
     """
-    Raw pass-through of the Consumet watch call — no normalization, no filtering.
-    Mirrors anime.py exactly:
-      GET http://localhost:3000/anime/hianime/watch/{episodeId}?server=vidcloud&category=sub
-    Returns whatever Consumet gives back, including embed sources.
-    Frontend uses this to bypass the broken provider resolution chain.
+    Raw pass-through of the Consumet watch call — no normalization.
+    Use /anime/stream instead (which also handles search + episode lookup).
+    This is kept for direct episode-ID callers.
     """
     import httpx
     from urllib.parse import quote as urlquote
@@ -222,24 +422,25 @@ async def consumet_watch_anime_raw(
 
     base = get_consumet_api_base()
     url = f"{base}/anime/hianime/watch/{urlquote(episode_id, safe='')}"
-    servers_to_try = [server] if server not in ("auto", "") else ["vidcloud", "vidstreaming"]
-    if server not in servers_to_try:
-        servers_to_try.append("vidcloud" if server == "vidstreaming" else "vidstreaming")
+    servers_to_try = ["vidcloud", "vidstreaming"] if server in ("auto", "") else [server]
+    if server not in ("auto", "") and server == "vidcloud":
+        servers_to_try = ["vidcloud", "vidstreaming"]
+    elif server not in ("auto", "") and server == "vidstreaming":
+        servers_to_try = ["vidstreaming", "vidcloud"]
 
     last_error = ""
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=35.0, follow_redirects=True) as client:
         for srv in servers_to_try:
             try:
                 r = await client.get(url, params={"server": srv, "category": category})
                 if r.status_code >= 400:
-                    last_error = f"Consumet returned HTTP {r.status_code} for server={srv}"
+                    last_error = f"HTTP {r.status_code} from server={srv}"
                     continue
                 data = r.json()
                 sources = data.get("sources") or []
                 if not sources:
-                    last_error = f"No sources from server={srv}"
+                    last_error = f"Empty sources from server={srv}"
                     continue
-                # Return raw Consumet payload with server info attached
                 data["_server_used"] = srv
                 data["_category_used"] = category
                 return JSONResponse(content=data)
@@ -247,14 +448,12 @@ async def consumet_watch_anime_raw(
                 last_error = str(exc)
                 continue
 
-    # All servers failed — return empty payload with diagnostic info
     return JSONResponse(
         status_code=502,
         content={
             "sources": [],
             "subtitles": [],
             "error": last_error or "No sources found",
-            "_tried_servers": servers_to_try,
             "_episode_id": episode_id,
         },
     )
@@ -264,12 +463,7 @@ async def consumet_watch_anime_raw(
 async def consumet_proxy(
     url: str = Query(..., min_length=8),
 ):
-    """Proxy external CDN images/resources through the backend to avoid CORS issues.
-
-    Returns a 502 JSON response (with CORS headers intact) instead of crashing
-    the server when the upstream CDN is unreachable, which would otherwise strip
-    the Access-Control-Allow-Origin header before it reaches the browser.
-    """
+    """Proxy external CDN images/resources to avoid CORS issues."""
     try:
         content, media_type = await fetch_proxy_response(url)
         return Response(content=content, media_type=media_type or "application/octet-stream")
