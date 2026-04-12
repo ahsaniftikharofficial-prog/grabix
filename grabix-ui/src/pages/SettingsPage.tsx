@@ -60,6 +60,13 @@ export default function SettingsPage() {
   const [startupDiagnostics, setStartupDiagnostics] = useState<StartupDiagnosticsPayload | null>(null);
   const [diagnosticsLogs, setDiagnosticsLogs] = useState<DiagnosticsLogsPayload | null>(null);
 
+  // TMDB token state
+  const [tmdbToken, setTmdbToken] = useState("");
+  const [tmdbTokenVisible, setTmdbTokenVisible] = useState(false);
+  const [tmdbConfigured, setTmdbConfigured] = useState<boolean | null>(null);
+  const [tmdbSaving, setTmdbSaving] = useState(false);
+  const [tmdbSaveMsg, setTmdbSaveMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
   useEffect(() => {
     backendJson<Record<string, unknown>>(`${BACKEND_API}/settings`)
       .then((data: Record<string, unknown>) => {
@@ -84,6 +91,11 @@ export default function SettingsPage() {
         setAria2Available(Boolean(aria2?.available));
       })
       .catch(() => setAria2Available(false));
+
+    // Check TMDB token status on load
+    backendJson<{ configured: boolean; source: string }>(`${BACKEND_API}/tmdb-status`)
+      .then((data) => setTmdbConfigured(data.configured))
+      .catch(() => setTmdbConfigured(false));
 
     void fetchStartupDiagnostics().then((payload) => setStartupDiagnostics(payload));
     void fetchDiagnosticsLogs(12).then((payload) => setDiagnosticsLogs(payload)).catch(() => setDiagnosticsLogs(null));
@@ -114,6 +126,34 @@ export default function SettingsPage() {
         setSaveError(true);
         setTimeout(() => setSaveError(false), 3000);
       });
+  };
+
+  const saveTmdbToken = async () => {
+    setTmdbSaving(true);
+    setTmdbSaveMsg(null);
+    try {
+      const result = await backendJson<{ ok: boolean; configured: boolean }>(
+        `${BACKEND_API}/tmdb-token`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: tmdbToken }),
+        }
+      );
+      setTmdbConfigured(result.configured);
+      setTmdbToken("");
+      setTmdbSaveMsg({
+        ok: true,
+        text: result.configured
+          ? "Token saved. Movies will load now — no restart needed."
+          : "Token cleared successfully.",
+      });
+    } catch {
+      setTmdbSaveMsg({ ok: false, text: "Could not save token. Is the backend running?" });
+    } finally {
+      setTmdbSaving(false);
+      setTimeout(() => setTmdbSaveMsg(null), 5000);
+    }
   };
 
   const handleAdultUnlock = async () => {
@@ -250,6 +290,113 @@ export default function SettingsPage() {
           </SettingRow>
         </div>
 
+        {/* ── API KEYS ──────────────────────────────────────────────── */}
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>API Keys</div>
+        <div className="card card-padded" style={{ marginBottom: 20 }}>
+          <div style={{ padding: "14px 0", borderBottom: "1px solid var(--border)" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 500 }}>TMDB Bearer Token</div>
+                <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
+                  Required for Movies and TV Series pages. Free at{" "}
+                  <a
+                    href="https://www.themoviedb.org/settings/api"
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ color: "var(--accent)", textDecoration: "none" }}
+                  >
+                    themoviedb.org/settings/api
+                  </a>
+                </div>
+              </div>
+              {/* Status badge */}
+              <div style={{
+                fontSize: 11,
+                fontWeight: 600,
+                padding: "3px 10px",
+                borderRadius: 99,
+                background: tmdbConfigured === null
+                  ? "var(--bg-surface2)"
+                  : tmdbConfigured
+                  ? "rgba(34,197,94,0.12)"
+                  : "rgba(239,68,68,0.12)",
+                color: tmdbConfigured === null
+                  ? "var(--text-muted)"
+                  : tmdbConfigured
+                  ? "var(--text-success)"
+                  : "var(--text-danger)",
+                flexShrink: 0,
+                marginLeft: 12,
+              }}>
+                {tmdbConfigured === null ? "checking…" : tmdbConfigured ? "✓ Active" : "✗ Missing"}
+              </div>
+            </div>
+
+            {/* Token input row */}
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <div style={{ position: "relative", flex: 1 }}>
+                <input
+                  className="input-base"
+                  type={tmdbTokenVisible ? "text" : "password"}
+                  value={tmdbToken}
+                  onChange={(e) => setTmdbToken(e.target.value)}
+                  placeholder={tmdbConfigured ? "Paste new token to replace…" : "Paste your TMDB Bearer Token (starts with ey…)"}
+                  style={{ width: "100%", paddingRight: 36, fontFamily: "var(--font-mono)", fontSize: 11 }}
+                  onKeyDown={(e) => { if (e.key === "Enter" && tmdbToken.trim() && !tmdbSaving) void saveTmdbToken(); }}
+                />
+                {/* Show/hide toggle inside input */}
+                <button
+                  onClick={() => setTmdbTokenVisible((v) => !v)}
+                  style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", fontSize: 11, padding: 0 }}
+                  tabIndex={-1}
+                  title={tmdbTokenVisible ? "Hide token" : "Show token"}
+                >
+                  {tmdbTokenVisible ? "Hide" : "Show"}
+                </button>
+              </div>
+              <button
+                className="btn btn-primary"
+                style={{ fontSize: 12, height: 34, flexShrink: 0 }}
+                onClick={() => void saveTmdbToken()}
+                disabled={tmdbSaving || !tmdbToken.trim()}
+              >
+                {tmdbSaving ? "Saving…" : "Save"}
+              </button>
+              {tmdbConfigured && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ fontSize: 12, height: 34, flexShrink: 0, color: "var(--text-danger)" }}
+                  onClick={() => { setTmdbToken(""); void (async () => { setTmdbSaving(true); try { await backendJson(`${BACKEND_API}/tmdb-token`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: "" }) }); setTmdbConfigured(false); setTmdbSaveMsg({ ok: true, text: "Token removed." }); } catch { setTmdbSaveMsg({ ok: false, text: "Could not remove token." }); } finally { setTmdbSaving(false); setTimeout(() => setTmdbSaveMsg(null), 3000); } })(); }}
+                  disabled={tmdbSaving}
+                  title="Remove the saved TMDB token"
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+
+            {/* Feedback message */}
+            {tmdbSaveMsg && (
+              <div style={{ marginTop: 8, fontSize: 12, color: tmdbSaveMsg.ok ? "var(--text-success)" : "var(--text-danger)" }}>
+                {tmdbSaveMsg.text}
+              </div>
+            )}
+
+            {/* How-to hint when token is missing */}
+            {!tmdbConfigured && tmdbConfigured !== null && (
+              <div style={{ marginTop: 10, padding: "10px 12px", borderRadius: "var(--radius-sm)", background: "var(--bg-surface2)", fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                <strong>How to get your free token:</strong><br />
+                1. Go to <a href="https://www.themoviedb.org/signup" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>themoviedb.org/signup</a> — create a free account<br />
+                2. Go to Settings → API → click <strong>Create</strong> → choose Developer<br />
+                3. Fill the form (say personal/learning use) → submit<br />
+                4. Copy the <strong>API Read Access Token</strong> (the long one starting with <code>ey…</code>)<br />
+                5. Paste it above and click Save. Movies will load instantly.
+              </div>
+            )}
+          </div>
+        </div>
+        {/* ── END API KEYS ─────────────────────────────────────────── */}
+
         <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>Content Filter</div>
         <div className="card card-padded" style={{ marginBottom: 20 }}>
           <SettingRow
@@ -343,7 +490,7 @@ export default function SettingsPage() {
                 {diagnosticsLogs.events.slice().reverse().map((entry, index) => (
                   <div key={`${entry.timestamp}-${index}`} style={{ border: "1px solid var(--border)", borderRadius: 10, padding: "10px 12px", background: "var(--bg-surface)" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", fontSize: 11, color: "var(--text-muted)" }}>
-                      <span>{entry.service} â€¢ {entry.level}</span>
+                      <span>{entry.service} • {entry.level}</span>
                       <span>{entry.timestamp}</span>
                     </div>
                     <div style={{ marginTop: 4, fontSize: 12, fontWeight: 600 }}>{entry.message}</div>
