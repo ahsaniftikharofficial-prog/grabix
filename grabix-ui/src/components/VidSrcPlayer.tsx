@@ -382,16 +382,16 @@ const PLAYER_STYLES = `
 
   /* Icon buttons */
   .gx-btn {
-    width: 32px; height: 32px;
+    width: 40px; height: 40px;
     display: flex; align-items: center; justify-content: center;
-    background: transparent; border: none; border-radius: 6px;
+    background: transparent; border: none; border-radius: 8px;
     color: #fff; cursor: pointer;
     transition: background var(--player-transition);
     flex-shrink: 0;
   }
   .gx-btn:hover { background: rgba(255,255,255,0.1); }
   .gx-btn:disabled { opacity: 0.35; cursor: default; }
-  .gx-btn.lg { width: 36px; height: 36px; border-radius: 8px; }
+  .gx-btn.lg { width: 44px; height: 44px; border-radius: 10px; }
   .gx-btn.dim { color: rgba(255,255,255,0.4); }
   .gx-btn.dim:hover { color: #fff; }
 
@@ -402,11 +402,12 @@ const PLAYER_STYLES = `
     transform: translateX(-50%);
     background: var(--player-surface);
     border: 1px solid var(--player-border);
-    border-radius: 8px; padding: 12px 10px;
+    border-radius: 10px; padding: 14px 12px 10px;
     backdrop-filter: blur(20px);
     opacity: 0; pointer-events: none;
     transition: opacity var(--player-transition);
     z-index: 50;
+    min-width: 44px;
   }
   .gx-volume-wrap:hover .gx-volume-slider-container,
   .gx-volume-slider-container:hover { opacity: 1; pointer-events: auto; }
@@ -423,6 +424,22 @@ const PLAYER_STYLES = `
     width: 12px; height: 12px;
     background: #fff; border-radius: 50%;
   }
+  .gx-boost-divider { height: 1px; background: var(--player-border); margin: 10px 0 8px; }
+  .gx-boost-label { font-size: 9px; color: var(--player-text-dimmer); text-transform: uppercase; letter-spacing: 0.08em; text-align: center; margin-bottom: 6px; }
+  .gx-boost-slider {
+    writing-mode: vertical-lr; direction: rtl;
+    width: 4px; height: 60px;
+    appearance: none; -webkit-appearance: none;
+    background: var(--player-progress-bg);
+    border-radius: 99px; cursor: pointer; outline: none;
+    accent-color: rgba(255,255,255,0.7);
+  }
+  .gx-boost-slider::-webkit-slider-thumb {
+    appearance: none; -webkit-appearance: none;
+    width: 10px; height: 10px;
+    background: rgba(255,255,255,0.7); border-radius: 50%;
+  }
+  .gx-boost-val { font-size: 9px; color: var(--player-text-dim); text-align: center; margin-top: 4px; }
 
   /* Settings panel */
   .gx-settings-wrap { position: relative; }
@@ -583,14 +600,12 @@ const PLAYER_STYLES = `
   /* Skip buttons */
   .gx-skip-btn {
     background: none; border: none; color: #fff;
-    width: 32px; height: 32px; border-radius: 6px;
+    width: 40px; height: 40px; border-radius: 8px;
     display: flex; align-items: center; justify-content: center;
-    font-size: 11px; font-weight: 700; cursor: pointer; flex-shrink: 0;
+    cursor: pointer; flex-shrink: 0;
     transition: background var(--player-transition);
-    position: relative;
   }
   .gx-skip-btn:hover { background: rgba(255,255,255,0.1); }
-  .gx-skip-btn svg { position: absolute; }
 
   /* Speed label chip */
   .gx-speed-label {
@@ -644,6 +659,8 @@ export default function VidSrcPlayer({
   const previewVideoRef = useRef<HTMLVideoElement>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
   const previewThrottleRef = useRef<number>(0);
+  const previewHoveringRef = useRef(false);
+  const previewSeekedCleanupRef = useRef<(() => void) | null>(null);
 
   const [activeSubtitleText, setActiveSubtitleText] = useState(subtitle || "");
   const [activeSearchTitle, setActiveSearchTitle] = useState(subtitleSearchTitle || title);
@@ -750,6 +767,13 @@ export default function VidSrcPlayer({
       if (hideChromeTimeoutRef.current) window.clearTimeout(hideChromeTimeoutRef.current);
     }
   }, [isPlaying, errorText]);
+
+  // Auto-dismiss floating notice after 4 seconds
+  useEffect(() => {
+    if (!fallbackNotice) return;
+    const t = window.setTimeout(() => setFallbackNotice(""), 4000);
+    return () => window.clearTimeout(t);
+  }, [fallbackNotice]);
 
   // Fullscreen listener
   useEffect(() => {
@@ -878,7 +902,6 @@ export default function VidSrcPlayer({
         const nextUrl = shouldKeepHlsProxied(activeSource) ? buildStreamProxyUrl(API, best.url, activeSource.requestHeaders) : best.url;
         writePlaybackCache(`variant:${sourceKey}`, nextUrl, VARIANT_CACHE_TTL_MS);
         setResolvedPlaybackUrl(nextUrl);
-        setFallbackNotice(`Using the strongest ${best.label || "HLS"} variant${best.bandwidth ? ` (${Math.round(Number(best.bandwidth) / 1000)} kbps)` : ""}.`);
       } catch { if (!cancelled) setResolvedPlaybackUrl(""); }
     };
     void resolveBestVariant();
@@ -1307,12 +1330,13 @@ export default function VidSrcPlayer({
     if (volumeMenuOpen) setVolumeMenuOpen(false);
     if (subtitleMenuOpen) setSubtitleMenuOpen(false);
     if (episodeMenuOpen) setEpisodeMenuOpen(false);
-    if (isDirectEngine && (target.tagName === "VIDEO" || target === rootRef.current)) { togglePlayback(); return; }
+    if (isDirectEngine) { togglePlayback(); return; }
     showControls();
   };
 
   // Progress bar hover (thumbnail preview)
   const handleProgressHover = (e: React.MouseEvent<HTMLDivElement>) => {
+    previewHoveringRef.current = true;
     if (!duration) return;
     const rect = e.currentTarget.getBoundingClientRect();
     progressBarWidthRef.current = rect.width;
@@ -1336,8 +1360,12 @@ export default function VidSrcPlayer({
     const canvas = previewCanvasRef.current;
     if (!pv || !canvas) { setHoverPreview({ x, time: hoverTime, dataUrl: "", visible: true }); return; }
 
+    // Cancel any pending seeked listener to avoid stale frame updates
+    if (previewSeekedCleanupRef.current) { previewSeekedCleanupRef.current(); previewSeekedCleanupRef.current = null; }
+
     pv.currentTime = hoverTime;
     const onSeeked = () => {
+      if (!previewHoveringRef.current) { pv.removeEventListener("seeked", onSeeked); previewSeekedCleanupRef.current = null; return; }
       try {
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
@@ -1347,16 +1375,25 @@ export default function VidSrcPlayer({
         setHoverPreview({ x, time: hoverTime, dataUrl, visible: true });
       } catch { setHoverPreview({ x, time: hoverTime, dataUrl: "", visible: true }); }
       pv.removeEventListener("seeked", onSeeked);
+      previewSeekedCleanupRef.current = null;
     };
     pv.addEventListener("seeked", onSeeked);
+    previewSeekedCleanupRef.current = () => pv.removeEventListener("seeked", onSeeked);
   };
 
-  const handleProgressLeave = () => setHoverPreview(null);
+  const handleProgressLeave = () => {
+    previewHoveringRef.current = false;
+    if (previewSeekedCleanupRef.current) { previewSeekedCleanupRef.current(); previewSeekedCleanupRef.current = null; }
+    setHoverPreview(null);
+  };
 
   // Settings helpers
   const currentQualityLabel = selectedHlsLevel === -1
     ? "Auto"
     : hlsLevels[selectedHlsLevel]?.height ? `${hlsLevels[selectedHlsLevel].height}p` : "Auto";
+
+  const isAnimeQualityMode = allSources.length > 1 && allSources.every(s => Boolean(s.quality) && !s.provider.toLowerCase().includes("moviebox"));
+  const hasQualityOptions = hlsLevels.length > 1 || isMovieBoxQualityMode || isAnimeQualityMode;
 
   const currentServerLabel = (() => {
     if (sourceOptions && sourceOptions.length > 0) {
@@ -1406,7 +1443,6 @@ export default function VidSrcPlayer({
           poster={poster}
           onClick={(event) => { event.stopPropagation(); setShowSubtitlePanel(false); setServerMenuOpen(false); setVolumeMenuOpen(false); setSubtitleMenuOpen(false); setSettingsOpen(false); togglePlayback(); }}
         >
-          {subtitleUrl && <track key={subtitleUrl} default kind="subtitles" label={subtitleName || "Subtitles"} src={subtitleUrl} />}
         </video>
       )}
 
@@ -1490,7 +1526,7 @@ export default function VidSrcPlayer({
         title="Back"
         aria-label="Back"
       >
-        <IconArrowLeft size={16} color="currentColor" />
+        <IconArrowLeft size={18} color="currentColor" />
       </button>
 
       {/* ============================================================
@@ -1545,34 +1581,34 @@ export default function VidSrcPlayer({
           {/* Controls row */}
           <div className="gx-ctrl-row">
 
-            {/* Left group: skip-back | play/pause | skip-forward | volume */}
+            {/* Left group: play/pause | skip-back | skip-forward | volume */}
             <div className="gx-ctrl-left">
               {isDirectEngine && (
                 <>
-                  {/* Skip back 10s */}
-                  <button className="gx-skip-btn" title="Back 10s" onClick={() => { const v = videoRef.current; if (v) v.currentTime = Math.max(v.currentTime - 10, 0); }}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-                      <path d="M3 3v5h5"/>
-                    </svg>
-                    <span style={{ position: "absolute", fontSize: 7, fontWeight: 800, lineHeight: 1, top: "58%", left: "50%", transform: "translate(-50%,-50%)" }}>10</span>
+                  {/* Play/Pause — leftmost, largest */}
+                  <button className="gx-btn" onClick={togglePlayback} title={isPlaying ? "Pause" : "Play"} aria-label={isPlaying ? "Pause" : "Play"} style={{ width: 44, height: 44 }}>
+                    {isPlaying
+                      ? <IconPause size={22} color="currentColor" />
+                      : <IconPlay size={22} color="currentColor" />
+                    }
                   </button>
 
-                  {/* Play/Pause */}
-                  <button className="gx-btn" onClick={togglePlayback} title={isPlaying ? "Pause" : "Play"} aria-label={isPlaying ? "Pause" : "Play"} style={{ width: 34, height: 34 }}>
-                    {isPlaying
-                      ? <IconPause size={15} color="currentColor" />
-                      : <IconPlay size={15} color="currentColor" />
-                    }
+                  {/* Skip back 10s */}
+                  <button className="gx-skip-btn" title="Back 10s" onClick={() => { const v = videoRef.current; if (v) v.currentTime = Math.max(v.currentTime - 10, 0); }}>
+                    <svg width="26" height="26" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M13 4.5C8.3 4.5 4.5 8.3 4.5 13S8.3 21.5 13 21.5 21.5 17.7 21.5 13" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+                      <path d="M13 4.5L9 2M13 4.5L9 7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                      <text x="13.2" y="15" textAnchor="middle" fill="currentColor" fontSize="7.5" fontWeight="700" fontFamily="system-ui,-apple-system,sans-serif">10</text>
+                    </svg>
                   </button>
 
                   {/* Skip forward 10s */}
                   <button className="gx-skip-btn" title="Forward 10s" onClick={() => { const v = videoRef.current; if (v) v.currentTime = Math.min(v.currentTime + 10, duration); }}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/>
-                      <path d="M21 3v5h-5"/>
+                    <svg width="26" height="26" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M13 4.5C17.7 4.5 21.5 8.3 21.5 13S17.7 21.5 13 21.5 4.5 17.7 4.5 13" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+                      <path d="M13 4.5L17 2M13 4.5L17 7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                      <text x="12.8" y="15" textAnchor="middle" fill="currentColor" fontSize="7.5" fontWeight="700" fontFamily="system-ui,-apple-system,sans-serif">10</text>
                     </svg>
-                    <span style={{ position: "absolute", fontSize: 7, fontWeight: 800, lineHeight: 1, top: "58%", left: "50%", transform: "translate(-50%,-50%)" }}>10</span>
                   </button>
 
                   {/* Volume */}
@@ -1583,20 +1619,35 @@ export default function VidSrcPlayer({
                       onClick={() => { const v = videoRef.current; if (v) { v.muted = !v.muted; setIsMuted(v.muted); } }}
                     >
                       {isMuted || volume === 0
-                        ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+                        ? <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
                         : volume < 0.5
-                          ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-                          : <IconAudio size={14} color="currentColor" />
+                          ? <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+                          : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
                       }
                     </button>
                     <div className="gx-volume-slider-container">
-                      <input
-                        type="range" min={0} max={1} step={0.02}
-                        value={isMuted ? 0 : volume}
-                        className="gx-volume-slider"
-                        onChange={(e) => { const v = videoRef.current; if (v) { v.volume = Number(e.target.value); v.muted = Number(e.target.value) === 0; } }}
-                        onClick={e => e.stopPropagation()}
-                      />
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+                        <input
+                          type="range" min={0} max={1} step={0.02}
+                          value={isMuted ? 0 : volume}
+                          className="gx-volume-slider"
+                          onChange={(e) => { const v = videoRef.current; if (v) { v.volume = Number(e.target.value); v.muted = Number(e.target.value) === 0; } }}
+                          onClick={e => e.stopPropagation()}
+                        />
+                        {isDirectEngine && (
+                          <>
+                            <div className="gx-boost-divider" />
+                            <div className="gx-boost-label">Boost</div>
+                            <input
+                              type="range" min={100} max={500} step={25} value={volumeBoost}
+                              className="gx-boost-slider"
+                              onChange={(e) => setVolumeBoost(Number(e.target.value))}
+                              onClick={e => e.stopPropagation()}
+                            />
+                            <div className="gx-boost-val">{volumeBoost}%</div>
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </>
@@ -1618,7 +1669,7 @@ export default function VidSrcPlayer({
                 title={subtitlesEnabled ? "CC On" : "CC Off"}
                 onClick={() => { toggleSubtitles(); }}
               >
-                <IconSubtitle size={14} color="currentColor" />
+                <IconSubtitle size={20} color="currentColor" />
               </button>
 
               {/* Episode picker */}
@@ -1627,9 +1678,9 @@ export default function VidSrcPlayer({
                   <button
                     className="gx-btn"
                     title={episodeLabel}
-                    onClick={(e) => { e.stopPropagation(); setEpisodeMenuOpen(open => !open); }}
+                    onClick={(e) => { e.stopPropagation(); setSettingsOpen(false); setSettingsScreen("main"); setEpisodeMenuOpen(open => !open); }}
                   >
-                    <IconList size={14} color="currentColor" />
+                    <IconList size={20} color="currentColor" />
                   </button>
                   {episodeMenuOpen && (
                     <div className="gx-ep-panel">
@@ -1656,20 +1707,20 @@ export default function VidSrcPlayer({
                   className="gx-btn"
                   title="Settings"
                   aria-label="Settings"
-                  onClick={(e) => { e.stopPropagation(); setSettingsOpen(open => !open); setSettingsScreen("main"); }}
+                  onClick={(e) => { e.stopPropagation(); setEpisodeMenuOpen(false); setSettingsOpen(open => !open); setSettingsScreen("main"); }}
                 >
-                  <IconSettings size={14} color="currentColor" />
+                  <IconSettings size={20} color="currentColor" />
                 </button>
 
                 {settingsOpen && (
                   <div className="gx-settings-panel" style={{ bottom: "calc(100% + 8px)", top: "auto", right: 0 }} data-settings="true">
                     {settingsScreen === "main" && (
                       <div className="gx-settings-screen" style={{ padding: "4px 0 6px" }}>
-                        {(hlsLevels.length > 1 || isMovieBoxQualityMode) && (
+                        {hasQualityOptions && (
                           <div className="gx-settings-row" onClick={() => setSettingsScreen("quality")}>
                             <span>Quality</span>
                             <div className="gx-settings-row-val">
-                              <span>{currentQualityLabel}</span>
+                              <span>{isAnimeQualityMode ? (allSources[activeIndex]?.quality ?? "Auto") : currentQualityLabel}</span>
                               <span className="gx-settings-chevron">›</span>
                             </div>
                           </div>
@@ -1709,17 +1760,6 @@ export default function VidSrcPlayer({
                           </div>
                         )}
                         <div className="gx-settings-divider" />
-                        <div style={{ padding: "6px 16px 4px" }}>
-                          <div style={{ fontSize: 11, color: "var(--player-text-dimmer)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.08em" }}>Volume boost</div>
-                          <input
-                            type="range" min={0} max={500} step={25} value={volumeBoost}
-                            onChange={(e) => setVolumeBoost(Number(e.target.value))}
-                            style={{ width: "100%", accentColor: "#fff" }}
-                            onClick={e => e.stopPropagation()}
-                          />
-                          <div style={{ fontSize: 11, color: "var(--player-text-dim)", marginTop: 4, textAlign: "right" }}>{volumeBoost}%</div>
-                        </div>
-                        <div className="gx-settings-divider" />
                         <div className="gx-settings-row" onClick={() => { void handleDownloadCurrent(); setSettingsOpen(false); }}>
                           <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
                             <IconDownload size={13} color="currentColor" />
@@ -1742,7 +1782,7 @@ export default function VidSrcPlayer({
                           Quality
                         </div>
                         <div className="gx-settings-list">
-                          {isMovieBoxQualityMode ? (
+                          {(isMovieBoxQualityMode || isAnimeQualityMode) ? (
                             allSources.map((source, index) => (
                               <div key={source.id} className={`gx-settings-item${index === activeIndex ? " active" : ""}`} onClick={() => { handleSourceSwitch(index); setSettingsScreen("main"); }}>
                                 <span>{source.quality || source.label}</span>
@@ -1868,7 +1908,7 @@ export default function VidSrcPlayer({
 
               {/* Fullscreen */}
               <button className="gx-btn" onClick={toggleFullscreen} title="Fullscreen" aria-label="Fullscreen">
-                <IconExpand size={14} color="currentColor" />
+                <IconExpand size={20} color="currentColor" />
               </button>
             </div>
           </div>
