@@ -3204,6 +3204,81 @@ def _estimate_total_bytes_for_request(info: dict | None, dl_type: str, quality: 
     return total
 
 
+def _start_aria2_rpc_monitor(
+    dl_id: str,
+    rpc_port: int,
+    expected_total_bytes: int = 0,
+) -> tuple[threading.Event, threading.Thread]:
+    """
+    Monitor download progress by polling aria2's JSON-RPC API.
+    Returns (stop_event, thread). Caller must set stop_event when done.
+    Handles the gap between yt-dlp starting aria2 and aria2 accepting RPC connections.
+    Also handles the stream-switch gap (video stream finishes, audio stream starts).
+    """
+    stop_event = threading.Event()
+
+    def worker():
+        # Wait up to 5 seconds for aria2's RPC server to come up
+        for _ in range(25):
+            if stop_event.is_set():
+                return
+            if _aria2_poll_rpc(rpc_port) is not None:
+                break
+            time.sleep(0.2)
+
+        finished_stream_bytes = 0   # bytes credited from completed streams
+        last_completed = 0          # last polled completedLength (for the current stream)
+        smoothed_speed = 0.0
+
+        while not stop_event.is_set():
+            try:
+                rpc = _aria2_poll_rpc(rpc_port)
+                if rpc is not None:
+                    # aria2 is active — use RPC data
+                    current_completed = rpc["completed"]
+                    total_this_stream = rpc["total"]
+                    speed_bps = rpc["speed"]
+
+                    # Detect stream switch: new stream starts at 0 while previous was larger
+                    if current_completed < last_completed and last_completed > 0:
+                        finished_stream_bytes += last_completed
+
+                    last_completed = current_completed
+                    cumulative = finished_stream_bytes + current_completed
+                    total_known = expected_total_bytes or (finished_stream_bytes + total_this_stream)
+
+                    pct = min(round(cumulative / total_known * 100, 1), 99.9) if total_known else 0
+
+                    if speed_bps > 0:
+                        smoothed_speed = speed_bps if smoothed_speed <= 0 else (smoothed_speed * 0.6 + speed_bps * 0.4)
+                    speed_label = f"{_format_bytes(int(smoothed_speed))}/s" if smoothed_speed > 0 else downloads[dl_id].get("speed", "")
+                    remaining = max(total_known - cumulative, 0)
+                    eta_label = _format_eta(remaining / smoothed_speed) if smoothed_speed > 0 else downloads[dl_id].get("eta", "")
+
+                    # Don't overwrite "processing" status (set by progress_hook when a stream finishes)
+                    if downloads[dl_id].get("progress_mode") != "processing":
+                        downloads[dl_id].update({
+                            "percent": pct,
+                            "downloaded": _format_bytes(cumulative),
+                            "total": _format_bytes(total_known) if total_known else "",
+                            "size": _format_bytes(total_known or cumulative),
+                            "bytes_downloaded": cumulative,
+                            "bytes_total": total_known,
+                            "progress_mode": "determinate" if total_known else "activity",
+                            "stage_label": "Downloading",
+                            "speed": speed_label,
+                            "eta": eta_label,
+                        })
+                        _persist_download_record(dl_id)
+            except Exception:
+                pass
+            stop_event.wait(0.5)
+
+    monitor = threading.Thread(target=worker, daemon=True)
+    monitor.start()
+    return stop_event, monitor
+
+
 def _start_external_downloader_progress_monitor(
     dl_id: str,
     base_dir: str | Path,
@@ -3568,6 +3643,43 @@ def _download_direct_subtitle(
     return output_path
 
 
+def _aria2_find_free_port() -> int:
+    """Find an available localhost port for aria2's RPC server."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _aria2_poll_rpc(port: int) -> dict | None:
+    """
+    Poll aria2's JSON-RPC API for live download progress.
+    Returns dict with 'completed', 'total', 'speed' (all in bytes) or None on failure.
+    """
+    try:
+        payload = json.dumps({
+            "jsonrpc": "2.0", "id": "p",
+            "method": "aria2.tellActive",
+            "params": [["completedLength", "totalLength", "downloadSpeed"]],
+        }).encode("utf-8")
+        req = URLRequest(
+            f"http://127.0.0.1:{port}/jsonrpc",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=1) as resp:
+            data = json.loads(resp.read())
+        tasks = data.get("result", [])
+        if not tasks:
+            return None
+        completed = sum(int(t.get("completedLength", 0)) for t in tasks)
+        total    = sum(int(t.get("totalLength",    0)) for t in tasks)
+        speed    = sum(int(t.get("downloadSpeed",  0)) for t in tasks)
+        return {"completed": completed, "total": total, "speed": speed}
+    except Exception:
+        return None
+
+
 def _download_via_aria2(
     dl_id: str,
     url: str,
@@ -3617,6 +3729,8 @@ def _download_via_aria2(
     })
     _persist_download_record(dl_id, force=True)
 
+    rpc_port = _aria2_find_free_port()
+
     command = [
         ARIA2_PATH,
         "--allow-overwrite=true",
@@ -3625,8 +3739,12 @@ def _download_via_aria2(
         "--max-connection-per-server=8",
         "--split=8",
         "--min-split-size=1M",
+        "--file-allocation=none",
+        "--enable-rpc=true",
+        f"--rpc-listen-port={rpc_port}",
+        "--rpc-allow-origin-all=true",
         "--summary-interval=0",
-        "--console-log-level=warn",
+        "--console-log-level=error",
         "--dir",
         str(output_dir or DOWNLOAD_DIR),
         "--out",
@@ -3649,8 +3767,9 @@ def _download_via_aria2(
     controls["process"] = process
     controls["process_kind"] = "aria2"
     last_error_lines: list[str] = []
-    last_size_sample = 0
-    last_sample_ts = time.monotonic()
+
+    # Give aria2's RPC server a moment to start accepting connections
+    time.sleep(0.6)
 
     try:
         while True:
@@ -3675,35 +3794,32 @@ def _download_via_aria2(
                         if len(last_error_lines) > 8:
                             last_error_lines.pop(0)
 
-            current_size = 0
-            try:
-                current_size = Path(output_path).stat().st_size
-            except Exception:
-                current_size = 0
-
-            pct = round((current_size / total_bytes) * 100, 1) if total_bytes else 0
-            now = time.monotonic()
-            elapsed = max(now - last_sample_ts, 0.001)
-            delta = max(0, current_size - last_size_sample)
-            speed = downloads[dl_id].get("speed", "")
-            if delta > 0 and elapsed >= 0.5:
-                speed = f"{_format_bytes(delta / elapsed)}/s"
-                last_size_sample = current_size
-                last_sample_ts = now
-            eta = ""
-            if total_bytes > 0 and delta > 0 and elapsed > 0:
-                bytes_per_second = delta / elapsed
-                remaining = max(total_bytes - current_size, 0)
-                eta = _format_eta(remaining / bytes_per_second) if bytes_per_second > 0 else ""
+            # Poll aria2's RPC for accurate multi-connection progress
+            rpc = _aria2_poll_rpc(rpc_port)
+            if rpc is not None:
+                completed  = rpc["completed"]
+                total      = rpc["total"] or total_bytes
+                speed_bps  = rpc["speed"]
+                pct        = round(completed / total * 100, 1) if total else 0
+                speed      = f"{_format_bytes(speed_bps)}/s" if speed_bps else downloads[dl_id].get("speed", "")
+                remaining  = max(total - completed, 0)
+                eta        = _format_eta(remaining / speed_bps) if speed_bps > 0 else downloads[dl_id].get("eta", "")
+            else:
+                # RPC not ready yet — keep showing 0 until it connects
+                completed  = 0
+                total      = total_bytes
+                pct        = 0.0
+                speed      = downloads[dl_id].get("speed", "")
+                eta        = downloads[dl_id].get("eta", "")
 
             downloads[dl_id].update({
                 "percent": pct,
-                "downloaded": _format_bytes(current_size),
-                "total": _format_bytes(total_bytes),
-                "size": _format_bytes(total_bytes or current_size),
-                "bytes_downloaded": current_size,
-                "bytes_total": total_bytes,
-                "progress_mode": "determinate" if total_bytes > 0 else "activity",
+                "downloaded": _format_bytes(completed),
+                "total": _format_bytes(total),
+                "size": _format_bytes(total or completed),
+                "bytes_downloaded": completed,
+                "bytes_total": total,
+                "progress_mode": "determinate" if total > 0 else "activity",
                 "stage_label": "Downloading",
                 "speed": speed,
                 "eta": eta,
@@ -3711,7 +3827,7 @@ def _download_via_aria2(
                 "partial_file_path": output_path,
             })
             _persist_download_record(dl_id)
-            time.sleep(0.25)
+            time.sleep(0.4)
 
         return_code = process.wait()
         if return_code != 0:
@@ -5617,13 +5733,15 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         if controls["cancel"].is_set():
             raise RuntimeError("Download canceled")
 
-        # aria2-backed yt-dlp downloads are tracked by the external file monitor.
-        # Mixing yt-dlp's per-stream events with that monitor causes progress jumps.
+        # For aria2+yt-dlp, yt-dlp's ExternalFD never fills in downloaded_bytes.
+        # Progress is tracked by the RPC monitor thread started below.
+        # We only need to update the file_path so the UI shows the right file.
         if effective_engine == "aria2" and dl_type in {"video", "audio"}:
             if d["status"] == "downloading":
                 filename = d.get("filename", "")
                 if filename:
                     downloads[dl_id]["file_path"] = filename
+                    downloads[dl_id]["partial_file_path"] = filename
                     downloads[dl_id]["stage_label"] = "Downloading"
                     _persist_download_record(dl_id)
             elif d["status"] == "finished":
@@ -5681,6 +5799,7 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         "windowsfilenames": True,
     }
     if effective_engine == "aria2" and has_aria2():
+        _ytdlp_aria2_rpc_port = _aria2_find_free_port()
         opts["external_downloader"] = ARIA2_PATH
         opts["external_downloader_args"] = {
             "default": [
@@ -5688,11 +5807,16 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
                 "--split=16",
                 "--min-split-size=1M",
                 "--file-allocation=none",
-                "--summary-interval=1",
+                "--enable-rpc=true",
+                f"--rpc-listen-port={_ytdlp_aria2_rpc_port}",
+                "--rpc-allow-origin-all=true",
+                "--summary-interval=0",
                 "--download-result=hide",
-                "--console-log-level=warn",
+                "--console-log-level=error",
             ]
         }
+    else:
+        _ytdlp_aria2_rpc_port = 0
     monitor_stop_event: threading.Event | None = None
     monitor_thread: threading.Thread | None = None
 
@@ -5757,19 +5881,12 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
 
         yt_dlp = _get_yt_dlp()
         with yt_dlp.YoutubeDL(opts) as ydl:
-            if effective_engine == "aria2" and dl_type in {"video", "audio"}:
-                try:
-                    monitor_stop_event, monitor_thread = _start_external_downloader_progress_monitor(
-                        dl_id,
-                        workspace,
-                        expected_total_bytes=estimated_total_bytes,
-                    )
-                except Exception:
-                    monitor_stop_event, monitor_thread = _start_external_downloader_progress_monitor(
-                        dl_id,
-                        workspace,
-                        expected_total_bytes=estimated_total_bytes,
-                    )
+            if effective_engine == "aria2" and dl_type in {"video", "audio"} and _ytdlp_aria2_rpc_port:
+                monitor_stop_event, monitor_thread = _start_aria2_rpc_monitor(
+                    dl_id,
+                    _ytdlp_aria2_rpc_port,
+                    expected_total_bytes=estimated_total_bytes,
+                )
             ydl.download([url])
 
         preferred_ext = ""
