@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -264,6 +265,25 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 runtime_state = RuntimeStateRegistry()
 downloads: dict = runtime_state.downloads
 download_controls: dict = runtime_state.download_controls
+
+
+def _terminate_all_aria2_processes() -> None:
+    """Kill every active aria2 subprocess on backend shutdown.
+    This is the Windows fallback — on Unix, --stop-with-process handles it cleanly.
+    atexit handlers run on sys.exit() and normal termination; SIGKILL bypasses them,
+    but Tauri typically sends SIGTERM first, which triggers atexit on Python.
+    """
+    for ctrl in list(download_controls.values()):
+        if ctrl.get("process_kind") == "aria2":
+            proc = ctrl.get("process")
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+
+atexit.register(_terminate_all_aria2_processes)
 FFMPEG_PATH = shutil.which("ffmpeg")
 ARIA2_PATH = shutil.which("aria2c")
 SELF_BASE_URL = public_base_url()
@@ -3254,6 +3274,13 @@ def _start_aria2_rpc_monitor(
                     speed_bps = rpc["speed"]
                     segments = rpc.get("segments", [])
 
+                    # Store gid in controls as soon as we have it (for pause/resume)
+                    _rpc_gid = rpc.get("gid", "")
+                    if _rpc_gid:
+                        _ctrl = download_controls.get(dl_id)
+                        if _ctrl is not None and not _ctrl.get("aria2_gid"):
+                            _ctrl["aria2_gid"] = _rpc_gid
+
                     # Detect stream switch: new stream starts at 0 while previous was larger
                     if current_completed < last_completed and last_completed > 0:
                         finished_stream_bytes += last_completed
@@ -3732,6 +3759,40 @@ def _aria2_poll_rpc(port: int) -> dict | None:
         return None
 
 
+def _aria2_poll_rpc_stopped(port: int) -> dict | None:
+    """
+    Check aria2's stopped/completed task list via JSON-RPC.
+    Called when tellActive returns empty — aria2 may have finished and moved to stopped state
+    (file assembly, checksum) while the process is still technically running.
+    Returns dict with 'completed', 'total' if a completed task is found, else None.
+    """
+    try:
+        payload = json.dumps({
+            "jsonrpc": "2.0", "id": "stopped",
+            "method": "aria2.tellStopped",
+            "params": [0, 1, ["gid", "completedLength", "totalLength", "status"]],
+        }).encode("utf-8")
+        req = URLRequest(
+            f"http://127.0.0.1:{port}/jsonrpc",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read())
+        tasks = data.get("result", [])
+        if not tasks:
+            return None
+        task = tasks[0]
+        if task.get("status") == "complete":
+            total     = int(task.get("totalLength",     0))
+            completed = int(task.get("completedLength", total))
+            return {"completed": completed or total, "total": total}
+    except Exception:
+        pass
+    return None
+
+
 def _aria2_rpc_pause(port: int, gid: str) -> bool:
     """Send aria2.pause via RPC. Returns True on success."""
     try:
@@ -3844,6 +3905,10 @@ def _download_via_aria2(
         "--out",
         Path(output_path).name,
     ]
+    # On Unix: tell aria2 to self-terminate when this Python process exits.
+    # This prevents zombie aria2 processes when GRABIX is force-closed.
+    if os.name != "nt":
+        command.append(f"--stop-with-process={os.getpid()}")
     for key, value in request_headers.items():
         command.extend(["--header", f"{key}: {value}"])
     command.append(url)
@@ -3860,6 +3925,7 @@ def _download_via_aria2(
     )
     controls["process"] = process
     controls["process_kind"] = "aria2"
+    controls["aria2_rpc_port"] = rpc_port
     last_error_lines: list[str] = []
 
     # Give aria2's RPC server a moment to start accepting connections
@@ -3909,6 +3975,7 @@ def _download_via_aria2(
             if rpc is not None:
                 if rpc.get("gid") and not aria2_gid:
                     aria2_gid = rpc["gid"]
+                    controls["aria2_gid"] = aria2_gid
                 completed  = rpc["completed"]
                 total      = rpc["total"] or total_bytes
                 speed_bps  = rpc["speed"]
@@ -3918,13 +3985,24 @@ def _download_via_aria2(
                 remaining  = max(total - completed, 0)
                 eta        = _format_eta(remaining / speed_bps) if speed_bps > 0 else downloads[dl_id].get("eta", "")
             else:
-                # RPC not ready yet — keep showing 0 until it connects
-                completed  = 0
-                total      = total_bytes
-                pct        = 0.0
-                speed      = downloads[dl_id].get("speed", "")
-                eta        = downloads[dl_id].get("eta", "")
-                segments   = []
+                # tellActive returned empty — aria2 may be in final assembly/checksum phase.
+                # Check tellStopped to see if a task completed cleanly so we can push to 100%.
+                stopped = _aria2_poll_rpc_stopped(rpc_port)
+                if stopped is not None:
+                    completed = stopped["completed"]
+                    total     = stopped["total"] or total_bytes or completed
+                    pct       = 100.0 if total > 0 else downloads[dl_id].get("percent", 0)
+                    speed     = ""
+                    eta       = ""
+                    segments  = []
+                else:
+                    # RPC not ready yet or mid-transition — keep last known values
+                    completed = downloads[dl_id].get("bytes_downloaded", 0)
+                    total     = total_bytes or downloads[dl_id].get("bytes_total", 0)
+                    pct       = downloads[dl_id].get("percent", 0.0)
+                    speed     = downloads[dl_id].get("speed", "")
+                    eta       = downloads[dl_id].get("eta", "")
+                    segments  = []
 
             downloads[dl_id].update({
                 "percent": pct,
@@ -4390,6 +4468,8 @@ def _create_download_controls() -> dict:
         "thread": None,
         "process": None,
         "process_kind": "",
+        "aria2_rpc_port": 0,
+        "aria2_gid": "",
     }
 
 
@@ -4466,6 +4546,7 @@ def _public_download(d: dict) -> dict:
         "progress_mode": d.get("progress_mode", "activity"),
         "stage_label": d.get("stage_label", ""),
         "variant_label": d.get("variant_label", (d.get("params") or {}).get("variant_label", "")),
+        "aria2_segments": d.get("aria2_segments", []),
     }
 
 
@@ -4907,7 +4988,13 @@ def download_action(dl_id: str, action: str):
             raise HTTPException(status_code=400, detail="Pause is not supported for this download type")
         controls["pause"].set()
         process = controls.get("process")
-        if process is not None and process.poll() is None:
+        if controls.get("process_kind") == "aria2":
+            # aria2: use RPC pause — OS-level suspend doesn't work for aria2
+            _port = controls.get("aria2_rpc_port", 0)
+            _gid  = controls.get("aria2_gid", "")
+            if _port and _gid:
+                _aria2_rpc_pause(_port, _gid)
+        elif process is not None and process.poll() is None:
             _set_ffmpeg_process_state(process.pid, suspend=True)
         if item["status"] in {"downloading", "processing"}:
             item["paused_from"] = item["status"]
@@ -4922,7 +5009,13 @@ def download_action(dl_id: str, action: str):
             raise HTTPException(status_code=400, detail="Resume is not supported for this download type")
         controls["pause"].clear()
         process = controls.get("process")
-        if process is not None and process.poll() is None:
+        if controls.get("process_kind") == "aria2":
+            # aria2: use RPC unpause — OS-level resume doesn't work for aria2
+            _port = controls.get("aria2_rpc_port", 0)
+            _gid  = controls.get("aria2_gid", "")
+            if _port and _gid:
+                _aria2_rpc_unpause(_port, _gid)
+        elif process is not None and process.poll() is None:
             _set_ffmpeg_process_state(process.pid, suspend=False)
         worker = controls.get("thread")
         if (worker is None or not worker.is_alive()) and item["status"] == "paused":
@@ -5910,6 +6003,10 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
     }
     if effective_engine == "aria2" and has_aria2():
         _ytdlp_aria2_rpc_port = _aria2_find_free_port()
+        controls = download_controls.get(dl_id)
+        if controls is not None:
+            controls["aria2_rpc_port"] = _ytdlp_aria2_rpc_port
+            controls["process_kind"] = "aria2"
         opts["external_downloader"] = ARIA2_PATH
         opts["external_downloader_args"] = {
             "default": [
@@ -5923,7 +6020,7 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
                 "--summary-interval=0",
                 "--download-result=hide",
                 "--console-log-level=error",
-            ]
+            ] + ([] if os.name == "nt" else [f"--stop-with-process={os.getpid()}"])
         }
     else:
         _ytdlp_aria2_rpc_port = 0

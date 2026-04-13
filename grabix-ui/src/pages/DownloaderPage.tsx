@@ -1200,74 +1200,112 @@ function QueueCard({
       </div>
 
       {/* ── Row 2: Progress bar + stats ── */}
-      {(isActive || isPaused) && (
-        <div style={{ marginTop: 10 }}>
-          {/* Progress bar */}
-          <div className="progress-bar-bg">
-            <div
-              className={`progress-bar-fill${showProcessingProgress ? " indeterminate" : ""}`}
-              style={{ width: showDeterminateProgress ? `${item.percent}%` : `${activityFillPercent}%`, opacity: isPaused ? 0.5 : 1 }}
-            />
-          </div>
-          {/* Aria2 segment bar — IDM-style per-connection visualization */}
-          {item.downloadEngine === "aria2" && item.aria2Segments.length > 0 && (
-            <div style={{
-              display: "flex", gap: 1, height: 5, marginTop: 4,
-              borderRadius: 3, overflow: "hidden", background: "var(--bg-surface2)",
-            }}>
-              {item.aria2Segments.map((val, i) => (
-                <div key={i} style={{
-                  flex: 1,
-                  height: "100%",
-                  backgroundColor: val >= 240
-                    ? "var(--success, #4ade80)"
-                    : val > 0
-                    ? `rgba(138, 180, 248, ${0.3 + (val / 255) * 0.7})`
-                    : "transparent",
-                  transition: "background-color 0.3s",
-                }} />
-              ))}
-            </div>
-          )}
-          {/* Stats row */}
-          <div style={{ display: "flex", alignItems: "center", gap: 0, marginTop: 6 }}>
-            {/* Percent pill */}
-            <span style={{
-              fontSize: 11, fontWeight: 700, color: "var(--text-accent)",
-              background: "var(--accent-light)", padding: "2px 7px", borderRadius: 99, marginRight: 8,
-            }}>
-              {progressLabel}
-            </span>
-            {/* Downloaded / Total */}
-            {item.downloaded && (
-              <span style={{ fontSize: 11, color: "var(--text-secondary)", marginRight: 6 }}>
-                {item.downloaded}{item.total ? ` / ${item.total}` : ""}
-              </span>
+      {(isActive || isPaused) && (() => {
+        const hasSegmentBar = item.downloadEngine === "aria2" && (isActive || isPaused);
+
+        // Bucket segments into max 80 visual blocks to avoid rendering thousands of divs
+        const VISUAL_BLOCKS = 80;
+        const bucketedSegments: number[] = [];
+        if (hasSegmentBar) {
+          const raw = item.aria2Segments;
+          const blockSize = Math.max(1, Math.ceil(raw.length / VISUAL_BLOCKS));
+          for (let b = 0; b < VISUAL_BLOCKS; b++) {
+            const slice = raw.slice(b * blockSize, (b + 1) * blockSize);
+            if (slice.length === 0) break;
+            bucketedSegments.push(Math.round(slice.reduce((a, v) => a + v, 0) / slice.length));
+          }
+        }
+
+        return (
+          <div style={{ marginTop: 10 }}>
+            {/* Main overall progress bar */}
+            {hasSegmentBar && (
+              <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", color: "var(--text-muted)", marginBottom: 3, textTransform: "uppercase" }}>
+                Overall
+              </div>
             )}
-            {/* Speed */}
-            {cleanSpeed && (
+            <div className="progress-bar-bg">
+              <div
+                className={`progress-bar-fill${showProcessingProgress ? " indeterminate" : ""}`}
+                style={{ width: showDeterminateProgress ? `${item.percent}%` : `${activityFillPercent}%`, opacity: isPaused ? 0.5 : 1 }}
+              />
+            </div>
+
+            {/* Aria2 segment bar — IDM-style per-connection visualization */}
+            {hasSegmentBar && (
+              <>
+                <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", color: "var(--text-muted)", marginTop: 6, marginBottom: 3, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 5 }}>
+                  Connections
+                  <span style={{ fontSize: 9, color: "var(--accent)", background: "var(--accent-light)", padding: "0px 5px", borderRadius: 99, fontWeight: 700 }}>
+                    aria2
+                  </span>
+                </div>
+                <div
+                  className={bucketedSegments.length === 0 && !isPaused ? "aria2-segment-scanning" : ""}
+                  style={{
+                    display: "flex", gap: 1.5, height: 7,
+                    borderRadius: 4, overflow: "hidden",
+                    background: bucketedSegments.length > 0 ? "var(--bg-surface2)" : undefined,
+                    opacity: isPaused ? 0.45 : 1,
+                    transition: "opacity 0.3s",
+                  }}
+                >
+                  {bucketedSegments.map((val, i) => (
+                    <div key={i} style={{
+                      flex: 1,
+                      height: "100%",
+                      backgroundColor: val >= 240
+                        ? "var(--success, #4ade80)"
+                        : val > 0
+                        ? `rgba(138, 180, 248, ${0.25 + (val / 255) * 0.75})`
+                        : "transparent",
+                      transition: "background-color 0.4s",
+                    }} />
+                  ))}
+                </div>
+              </>
+            )}
+
+            {/* Stats row */}
+            <div style={{ display: "flex", alignItems: "center", gap: 0, marginTop: 6 }}>
+              {/* Percent pill */}
               <span style={{
-                fontSize: 11, fontWeight: 600, color: "var(--text-primary)",
-                background: "var(--bg-surface2)", padding: "1px 6px", borderRadius: 5, marginRight: 6,
+                fontSize: 11, fontWeight: 700, color: "var(--text-accent)",
+                background: "var(--accent-light)", padding: "2px 7px", borderRadius: 99, marginRight: 8,
               }}>
-                ↓ {cleanSpeed}
+                {progressLabel}
               </span>
-            )}
-            {/* ETA */}
-            {item.eta && item.eta !== "0s" && (
-              <span style={{ fontSize: 11, color: "var(--text-muted)", marginLeft: "auto", display: "flex", alignItems: "center", gap: 3 }}>
-                <IconClock size={11} /> {item.eta}
-              </span>
+              {/* Downloaded / Total */}
+              {item.downloaded && (
+                <span style={{ fontSize: 11, color: "var(--text-secondary)", marginRight: 6 }}>
+                  {item.downloaded}{item.total ? ` / ${item.total}` : ""}
+                </span>
+              )}
+              {/* Speed */}
+              {cleanSpeed && (
+                <span style={{
+                  fontSize: 11, fontWeight: 600, color: "var(--text-primary)",
+                  background: "var(--bg-surface2)", padding: "1px 6px", borderRadius: 5, marginRight: 6,
+                }}>
+                  ↓ {cleanSpeed}
+                </span>
+              )}
+              {/* ETA */}
+              {item.eta && item.eta !== "0s" && (
+                <span style={{ fontSize: 11, color: "var(--text-muted)", marginLeft: "auto", display: "flex", alignItems: "center", gap: 3 }}>
+                  <IconClock size={11} /> {item.eta}
+                </span>
+              )}
+            </div>
+            {/* File path while downloading */}
+            {item.filePath && (
+              <div style={{ marginTop: 4, fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {item.filePath}
+              </div>
             )}
           </div>
-          {/* File path while downloading */}
-          {item.filePath && (
-            <div style={{ marginTop: 4, fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {item.filePath}
-            </div>
-          )}
-        </div>
-      )}
+        );
+      })()}
 
       {/* ── Done: compact summary ── */}
       {isDone && (

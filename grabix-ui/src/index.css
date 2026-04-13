@@ -307,6 +307,23 @@ html, body, #root {
   100% { transform: translateX(320%); }
 }
 
+/* ─── ARIA2 SEGMENT BAR ─── */
+/* Scanning shimmer shown while aria2 is connecting and no pieces are complete yet */
+@keyframes aria2-scan {
+  0%   { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+.aria2-segment-scanning {
+  background: linear-gradient(
+    90deg,
+    var(--bg-surface2) 25%,
+    color-mix(in srgb, var(--accent) 18%, transparent) 50%,
+    var(--bg-surface2) 75%
+  );
+  background-size: 200% 100%;
+  animation: aria2-scan 1.8s linear infinite;
+}
+
 /* ─── STATUS DOT ─── */
 .status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .status-dot.online { background: var(--success); }

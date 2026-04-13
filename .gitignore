@@ -92,3 +92,6 @@ grabix-ui/src-tauri/backend-staging/
 grabix-ui/src-tauri/consumet-staging/
 grabix-ui/src-tauri/generated/
 debug-backend.bat
+1. Backend.bat
+2. Frontend.bat
+3. Comsumet_api.bat
