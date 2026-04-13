@@ -720,6 +720,7 @@ export default function AnimePage() {
           poster={player.poster}
           sources={player.sources}
           mediaType={player.mediaType ?? "tv"}
+          disableSubtitleSearch={true}
           currentEpisode={player.currentEpisode}
           episodeOptions={player.episodeOptions}
           episodeLabel={player.episodeLabel}

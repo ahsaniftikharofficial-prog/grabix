@@ -14,14 +14,28 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import { IconSearch, IconX, IconPlay } from "../components/Icons";
 import { type StreamSource } from "../lib/streamProviders";
+import { fetchBackendPing } from "../lib/api";
 
 // ─── Consumet URL — persisted so it survives page refreshes ──────────────────
 const LS_KEY = "animev2:consumet_url";
+const FALLBACK_URL = "http://127.0.0.1:3000";
 function getSavedUrl(): string {
-  try { return localStorage.getItem(LS_KEY) || "http://127.0.0.1:3000"; } catch { return "http://127.0.0.1:3000"; }
+  try { return localStorage.getItem(LS_KEY) || FALLBACK_URL; } catch { return FALLBACK_URL; }
 }
 function saveUrl(url: string) {
   try { localStorage.setItem(LS_KEY, url.trim().replace(/\/$/, "")); } catch {}
+}
+
+/** Ask the backend what URL Consumet is actually running on.
+ *  Works in both dev mode (port 3000) and packaged mode (port 3100) automatically. */
+async function detectConsumetUrl(): Promise<string | null> {
+  try {
+    const ping = await fetchBackendPing();
+    if (ping?.consumet_url) return ping.consumet_url.replace(/\/$/, "");
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -334,6 +348,7 @@ export default function AnimePageV2() {
       {showSettings && <SettingsModal current={consumetUrl} onSave={applySettings} onClose={() => setShowSettings(false)} />}
       <VidSrcPlayer title={player.title} subtitle={player.subtitle} poster={player.poster} sources={player.sources}
         mediaType="tv" currentEpisode={player.currentEpisode} episodeOptions={player.episodeOptions} episodeLabel="Ep"
+        disableSubtitleSearch={true}
         onSelectEpisode={player.onSelectEpisode} onClose={() => setScreen("info")}
         onDownload={async (url) => { await navigator.clipboard.writeText(url); }} />
     </>

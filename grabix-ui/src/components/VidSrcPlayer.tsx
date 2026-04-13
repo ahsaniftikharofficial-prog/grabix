@@ -46,6 +46,9 @@ interface Props {
     subtitleSearchTitle?: string;
   }>;
   mediaType?: "movie" | "tv";
+  /** When true the CC button only toggles embedded subs on/off — never opens the subtitle search panel.
+   *  Pass this for anime pages where the stream already carries its own subtitle tracks. */
+  disableSubtitleSearch?: boolean;
   onClose: () => void;
   onDownload?: (url: string, title: string) => Promise<void> | void;
   onDownloadSource?: (source: StreamSource, title: string) => Promise<void> | void;
@@ -77,6 +80,20 @@ const VARIANT_CACHE_TTL_MS = 1000 * 60 * 10;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Map raw API provider IDs to their proper display names. */
+function formatProviderName(provider: string): string {
+  const map: Record<string, string> = {
+    hianime: "HiAnime",
+    consumet: "Consumet",
+    aniwatch: "AniWatch",
+    gogoanime: "GogoAnime",
+    zoro: "Zoro",
+    "9anime": "9Anime",
+  };
+  const key = provider.trim().toLowerCase();
+  return map[key] ?? provider;
+}
 
 function failureLabel(kind: FailureKind): string {
   switch (kind) {
@@ -276,6 +293,7 @@ export default function VidSrcPlayer({
   onSelectSourceOption,
   onSelectEpisode,
   mediaType = "movie",
+  disableSubtitleSearch = false,
   onClose,
   onDownload,
   onDownloadSource,
@@ -1135,6 +1153,11 @@ export default function VidSrcPlayer({
       if (firstSubtitle?.url) {
         handleSubtitleSelect(firstSubtitle.url, firstSubtitle.label);
       }
+      return;
+    }
+    // If anime mode (disableSubtitleSearch), never open the search panel
+    if (disableSubtitleSearch) {
+      setSubtitleHint("No subtitles available for this source.");
       return;
     }
     setShowSubtitlePanel((open) => !open);
@@ -2018,7 +2041,7 @@ export default function VidSrcPlayer({
               <div className="player-right-note">
                 <span>
                   {activeSource
-                    ? `${activeSource.provider} · ${statusText}`
+                    ? `${formatProviderName(activeSource.provider)} · ${statusText}`
                     : "Waiting for source"}
                 </span>
                 {subtitleName && (
