@@ -59,10 +59,16 @@ if not exist "%BACKEND%\venv\Scripts\activate.bat" (
     python -m venv "%BACKEND%\venv"
 )
 
-if not exist "%BACKEND%\venv\Lib\site-packages\httpx" (
-    echo  [SETUP] Installing Python packages ^(first time only^)...
-    call "%BACKEND%\venv\Scripts\activate.bat"
-    pip install -r "%BACKEND%\requirements.txt" python-multipart --quiet
+echo  [SETUP] Verifying Python packages...
+"%BACKEND%\venv\Scripts\python.exe" -c "import fastapi,uvicorn,yt_dlp,httpx,bcrypt,multipart" >nul 2>&1
+if errorlevel 1 (
+    echo  [SETUP] Installing missing packages ^(this may take a minute^)...
+    "%BACKEND%\venv\Scripts\pip.exe" install -r "%BACKEND%\requirements.txt" python-multipart --quiet
+    if errorlevel 1 (
+        echo  [ERROR] Package install failed. Check internet connection and try again.
+        pause
+        exit /b 1
+    )
     echo  [SETUP] Python packages installed.
 )
 
@@ -118,7 +124,7 @@ start "GRABIX Backend" /min cmd /c call "%SCRIPTS%\start-backend.cmd" "%BACKEND%
 
 echo  [WAIT] Waiting for backend health...
 powershell -NoProfile -Command ^
-  "$ready=$false; for($i=0;$i -lt 80;$i++){ Start-Sleep -Milliseconds 400; try { $r=Invoke-RestMethod -Uri '%BACKEND_BASE%/health/ping' -TimeoutSec 2; if($r.ok -and $r.core_ready){$ready=$true; break} } catch {} }; if(-not $ready){ exit 1 }"
+  "$ready=$false; for($i=0;$i -lt 150;$i++){ Start-Sleep -Milliseconds 400; try { $r=Invoke-RestMethod -Uri '%BACKEND_BASE%/health/ping' -TimeoutSec 3; if($r.ok -and $r.core_ready){$ready=$true; break} } catch {} }; if(-not $ready){ exit 1 }"
 if errorlevel 1 (
     echo  [ERROR] Backend did not become ready in time.
     echo  [INFO] Showing last backend log lines:

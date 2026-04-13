@@ -55,6 +55,7 @@ interface QueueItem {
   progressMode: ProgressMode;
   stageLabel: string;
   variantLabel: string;
+  aria2Segments: number[];
 }
 
 interface RuntimeDependency {
@@ -99,6 +100,7 @@ function toQueueItem(serverItem: any, previous?: QueueItem): QueueItem {
     progressMode: (serverItem.progress_mode as ProgressMode) ?? previous?.progressMode ?? "activity",
     stageLabel: serverItem.stage_label ?? previous?.stageLabel ?? "",
     variantLabel: serverItem.variant_label ?? previous?.variantLabel ?? "",
+    aria2Segments: Array.isArray(serverItem.aria2_segments) ? serverItem.aria2_segments : previous?.aria2Segments ?? [],
   };
 }
 
@@ -383,6 +385,7 @@ export default function DownloaderPage() {
       progressMode: "activity",
       stageLabel: "Queued",
       variantLabel,
+      aria2Segments: [],
     };
     setQueue(prev => [newItem, ...prev]);
 
@@ -464,6 +467,7 @@ export default function DownloaderPage() {
         progressMode: "activity",
         stageLabel: "Queued",
         variantLabel,
+        aria2Segments: [],
       };
       setQueue(prev => [newItem, ...prev]);
       try {
@@ -1205,6 +1209,26 @@ function QueueCard({
               style={{ width: showDeterminateProgress ? `${item.percent}%` : `${activityFillPercent}%`, opacity: isPaused ? 0.5 : 1 }}
             />
           </div>
+          {/* Aria2 segment bar — IDM-style per-connection visualization */}
+          {item.downloadEngine === "aria2" && item.aria2Segments.length > 0 && (
+            <div style={{
+              display: "flex", gap: 1, height: 5, marginTop: 4,
+              borderRadius: 3, overflow: "hidden", background: "var(--bg-surface2)",
+            }}>
+              {item.aria2Segments.map((val, i) => (
+                <div key={i} style={{
+                  flex: 1,
+                  height: "100%",
+                  backgroundColor: val >= 240
+                    ? "var(--success, #4ade80)"
+                    : val > 0
+                    ? `rgba(138, 180, 248, ${0.3 + (val / 255) * 0.7})`
+                    : "transparent",
+                  transition: "background-color 0.3s",
+                }} />
+              ))}
+            </div>
+          )}
           {/* Stats row */}
           <div style={{ display: "flex", alignItems: "center", gap: 0, marginTop: 6 }}>
             {/* Percent pill */}

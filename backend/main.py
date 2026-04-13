@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -216,7 +217,19 @@ def _ensure_moviebox():
     _moviebox_loaded = False  # allow retry after cooldown
     return False
 
-app = FastAPI()
+@asynccontextmanager
+async def _grabix_lifespan(app: FastAPI):
+    """
+    FastAPI lifespan handler — replaces deprecated @app.on_event("startup").
+    Captures the running event loop and completes the runtime bootstrap.
+    """
+    global _app_event_loop
+    _app_event_loop = asyncio.get_running_loop()
+    ensure_runtime_bootstrap()
+    yield
+
+
+app = FastAPI(lifespan=_grabix_lifespan)
 LOCAL_APP_ORIGINS = list(DEFAULT_LOCAL_APP_ORIGINS)
 app.add_middleware(
     CORSMiddleware,
@@ -3229,6 +3242,7 @@ def _start_aria2_rpc_monitor(
         finished_stream_bytes = 0   # bytes credited from completed streams
         last_completed = 0          # last polled completedLength (for the current stream)
         smoothed_speed = 0.0
+        processing_since: float = 0.0  # timestamp when "processing" mode was first detected
 
         while not stop_event.is_set():
             try:
@@ -3238,6 +3252,7 @@ def _start_aria2_rpc_monitor(
                     current_completed = rpc["completed"]
                     total_this_stream = rpc["total"]
                     speed_bps = rpc["speed"]
+                    segments = rpc.get("segments", [])
 
                     # Detect stream switch: new stream starts at 0 while previous was larger
                     if current_completed < last_completed and last_completed > 0:
@@ -3255,21 +3270,33 @@ def _start_aria2_rpc_monitor(
                     remaining = max(total_known - cumulative, 0)
                     eta_label = _format_eta(remaining / smoothed_speed) if smoothed_speed > 0 else downloads[dl_id].get("eta", "")
 
-                    # Don't overwrite "processing" status (set by progress_hook when a stream finishes)
-                    if downloads[dl_id].get("progress_mode") != "processing":
-                        downloads[dl_id].update({
-                            "percent": pct,
-                            "downloaded": _format_bytes(cumulative),
-                            "total": _format_bytes(total_known) if total_known else "",
-                            "size": _format_bytes(total_known or cumulative),
-                            "bytes_downloaded": cumulative,
-                            "bytes_total": total_known,
-                            "progress_mode": "determinate" if total_known else "activity",
-                            "stage_label": "Downloading",
-                            "speed": speed_label,
-                            "eta": eta_label,
-                        })
-                        _persist_download_record(dl_id)
+                    # Allow overriding "processing" mode after 2s to unblock stuck progress
+                    current_mode = downloads[dl_id].get("progress_mode")
+                    if current_mode == "processing":
+                        if processing_since == 0.0:
+                            processing_since = time.monotonic()
+                        stuck_secs = time.monotonic() - processing_since
+                        # If still in "processing" after 2s and aria2 is actively downloading, override it
+                        if stuck_secs < 2.0:
+                            stop_event.wait(0.5)
+                            continue
+                    else:
+                        processing_since = 0.0
+
+                    downloads[dl_id].update({
+                        "percent": pct,
+                        "downloaded": _format_bytes(cumulative),
+                        "total": _format_bytes(total_known) if total_known else "",
+                        "size": _format_bytes(total_known or cumulative),
+                        "bytes_downloaded": cumulative,
+                        "bytes_total": total_known,
+                        "progress_mode": "determinate" if total_known else "activity",
+                        "stage_label": "Downloading",
+                        "speed": speed_label,
+                        "eta": eta_label,
+                        "aria2_segments": segments,
+                    })
+                    _persist_download_record(dl_id)
             except Exception:
                 pass
             stop_event.wait(0.5)
@@ -3650,16 +3677,39 @@ def _aria2_find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _aria2_parse_bitfield(tasks: list) -> list[int]:
+    """
+    Parse aria2's hex bitfield into a flat list of 0/255 values per piece.
+    255 = piece complete, 0 = not started. Returns [] if no bitfield data.
+    """
+    try:
+        for task in tasks:
+            bitfield_hex = task.get("bitfield", "")
+            num_pieces = int(task.get("numPieces", 0))
+            if bitfield_hex and num_pieces > 0:
+                segments: list[int] = []
+                for i in range(0, len(bitfield_hex), 2):
+                    byte_val = int(bitfield_hex[i:i + 2], 16)
+                    for bit in range(7, -1, -1):
+                        if len(segments) >= num_pieces:
+                            break
+                        segments.append(255 if (byte_val >> bit) & 1 else 0)
+                return segments
+    except Exception:
+        pass
+    return []
+
+
 def _aria2_poll_rpc(port: int) -> dict | None:
     """
     Poll aria2's JSON-RPC API for live download progress.
-    Returns dict with 'completed', 'total', 'speed' (all in bytes) or None on failure.
+    Returns dict with 'completed', 'total', 'speed', 'segments', 'gid' or None on failure.
     """
     try:
         payload = json.dumps({
             "jsonrpc": "2.0", "id": "p",
             "method": "aria2.tellActive",
-            "params": [["completedLength", "totalLength", "downloadSpeed"]],
+            "params": [["gid", "completedLength", "totalLength", "downloadSpeed", "bitfield", "numPieces"]],
         }).encode("utf-8")
         req = URLRequest(
             f"http://127.0.0.1:{port}/jsonrpc",
@@ -3675,9 +3725,53 @@ def _aria2_poll_rpc(port: int) -> dict | None:
         completed = sum(int(t.get("completedLength", 0)) for t in tasks)
         total    = sum(int(t.get("totalLength",    0)) for t in tasks)
         speed    = sum(int(t.get("downloadSpeed",  0)) for t in tasks)
-        return {"completed": completed, "total": total, "speed": speed}
+        gid      = tasks[0].get("gid", "") if tasks else ""
+        segments = _aria2_parse_bitfield(tasks)
+        return {"completed": completed, "total": total, "speed": speed, "segments": segments, "gid": gid}
     except Exception:
         return None
+
+
+def _aria2_rpc_pause(port: int, gid: str) -> bool:
+    """Send aria2.pause via RPC. Returns True on success."""
+    try:
+        payload = json.dumps({
+            "jsonrpc": "2.0", "id": "pause",
+            "method": "aria2.pause",
+            "params": [gid] if gid else [],
+        }).encode("utf-8")
+        req = URLRequest(
+            f"http://127.0.0.1:{port}/jsonrpc",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read())
+        return "result" in data
+    except Exception:
+        return False
+
+
+def _aria2_rpc_unpause(port: int, gid: str) -> bool:
+    """Send aria2.unpause via RPC. Returns True on success."""
+    try:
+        payload = json.dumps({
+            "jsonrpc": "2.0", "id": "unpause",
+            "method": "aria2.unpause",
+            "params": [gid] if gid else [],
+        }).encode("utf-8")
+        req = URLRequest(
+            f"http://127.0.0.1:{port}/jsonrpc",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read())
+        return "result" in data
+    except Exception:
+        return False
 
 
 def _download_via_aria2(
@@ -3771,10 +3865,26 @@ def _download_via_aria2(
     # Give aria2's RPC server a moment to start accepting connections
     time.sleep(0.6)
 
+    aria2_gid = ""           # filled on first successful RPC poll
+    was_paused = False       # track pause state to send RPC pause/unpause
+
     try:
         while True:
-            while controls["pause"].is_set() and not controls["cancel"].is_set():
+            # ── Pause handling: use aria2 RPC pause/unpause instead of just sleeping ──
+            if controls["pause"].is_set() and not controls["cancel"].is_set():
+                if not was_paused and aria2_gid:
+                    _aria2_rpc_pause(rpc_port, aria2_gid)
+                    was_paused = True
+                    downloads[dl_id].update({"status": "paused", "speed": "", "eta": ""})
                 time.sleep(0.2)
+                continue
+            if was_paused:
+                # Resuming — tell aria2 to unpause
+                if aria2_gid:
+                    _aria2_rpc_unpause(rpc_port, aria2_gid)
+                was_paused = False
+                downloads[dl_id].update({"status": "downloading", "stage_label": "Downloading"})
+
             if controls["cancel"].is_set():
                 try:
                     process.terminate()
@@ -3794,12 +3904,15 @@ def _download_via_aria2(
                         if len(last_error_lines) > 8:
                             last_error_lines.pop(0)
 
-            # Poll aria2's RPC for accurate multi-connection progress
+            # Poll aria2's RPC for accurate multi-connection progress + segments
             rpc = _aria2_poll_rpc(rpc_port)
             if rpc is not None:
+                if rpc.get("gid") and not aria2_gid:
+                    aria2_gid = rpc["gid"]
                 completed  = rpc["completed"]
                 total      = rpc["total"] or total_bytes
                 speed_bps  = rpc["speed"]
+                segments   = rpc.get("segments", [])
                 pct        = round(completed / total * 100, 1) if total else 0
                 speed      = f"{_format_bytes(speed_bps)}/s" if speed_bps else downloads[dl_id].get("speed", "")
                 remaining  = max(total - completed, 0)
@@ -3811,6 +3924,7 @@ def _download_via_aria2(
                 pct        = 0.0
                 speed      = downloads[dl_id].get("speed", "")
                 eta        = downloads[dl_id].get("eta", "")
+                segments   = []
 
             downloads[dl_id].update({
                 "percent": pct,
@@ -3825,6 +3939,7 @@ def _download_via_aria2(
                 "eta": eta,
                 "file_path": output_path,
                 "partial_file_path": output_path,
+                "aria2_segments": segments,
             })
             _persist_download_record(dl_id)
             time.sleep(0.4)
@@ -4718,11 +4833,6 @@ def ensure_runtime_bootstrap() -> None:
         )
 
 
-@app.on_event("startup")
-async def _runtime_startup_event():
-    global _app_event_loop
-    _app_event_loop = asyncio.get_running_loop()
-    ensure_runtime_bootstrap()
 
 
 # FIX 2 + FIX 3 (Library): Proper error handling so "no such table" never reaches the UI
@@ -6728,9 +6838,14 @@ def run_server() -> None:
 
     ensure_runtime_bootstrap()
 
-    # Windows: SelectorEventLoop works on any thread; ProactorEventLoop does not.
-    if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    # On Windows, SelectorEventLoop is required when running on a non-main thread
+    # (e.g. when embedded via PyO3). We create it directly instead of using
+    # set_event_loop_policy which is deprecated in Python 3.14+ and removed in 3.16.
+    if os.name == "nt":
+        loop = asyncio.SelectorEventLoop()
+    else:
+        loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     config = uvicorn.Config(
         app,
@@ -6744,8 +6859,6 @@ def run_server() -> None:
     # Disable signal-handler installation — not allowed outside the main thread.
     server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(server.serve())
     finally:

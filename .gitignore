@@ -91,3 +91,4 @@ grabix-ui/src-tauri/python-runtime/
 grabix-ui/src-tauri/backend-staging/
 grabix-ui/src-tauri/consumet-staging/
 grabix-ui/src-tauri/generated/
+debug-backend.bat
