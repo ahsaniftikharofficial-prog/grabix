@@ -760,7 +760,7 @@ if ($SkipPythonSetup -and (Test-Path (Join-Path $pythonRuntime "python.exe"))) {
     if (-not (Test-Path -LiteralPath $setupScript)) {
         throw "Setup script not found: $setupScript"
     }
-    & powershell -ExecutionPolicy Bypass -File $setupScript
+    & "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -ExecutionPolicy Bypass -File $setupScript
     if ($LASTEXITCODE -ne 0) {
         throw "Python runtime setup failed."
     }
