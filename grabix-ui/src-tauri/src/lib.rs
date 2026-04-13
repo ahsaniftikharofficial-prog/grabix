@@ -1117,6 +1117,11 @@ pub fn run() {
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             let runtime_config_sync = sync_packaged_runtime_config(app.handle());
             apply_backend_runtime_env(&desktop_auth);
+            // Tell the Python backend where Tauri's bundled resources live so it
+            // can find aria2c.exe (and any other bundled tools) without downloading.
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                std::env::set_var("GRABIX_RESOURCE_DIR", resource_dir.display().to_string());
+            }
             if let Ok(mut state) = app.state::<DesktopAuthState>().context.lock() {
                 *state = desktop_auth.clone();
             }

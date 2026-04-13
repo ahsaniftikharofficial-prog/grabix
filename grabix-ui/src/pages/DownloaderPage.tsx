@@ -407,7 +407,7 @@ export default function DownloaderPage() {
             ? {
                 ...q,
                 status: pd.status,
-                percent: pd.percent ?? 0,
+                percent: pd.percent ?? q.percent,
                 speed: pd.speed ?? "",
                 eta: pd.eta ?? "",
                 downloaded: pd.downloaded ?? "",
@@ -483,7 +483,7 @@ export default function DownloaderPage() {
               ? {
                   ...q,
                   status: pd.status,
-                  percent: pd.percent ?? 0,
+                  percent: pd.percent ?? q.percent,
                   speed: pd.speed ?? "",
                   eta: pd.eta ?? "",
                   downloaded: pd.downloaded ?? "",
@@ -1092,7 +1092,7 @@ function QueueCard({
   const activityBytes = item.bytesDownloaded || parseDisplayedBytes(item.downloaded || item.size);
   const activityFillPercent = activityBytes > 0
     ? Math.min(92, Math.max(12, 92 * (1 - Math.exp(-activityBytes / (96 * 1024 * 1024)))))
-    : 28;
+    : 0;
   const progressLabel = showDeterminateProgress
     ? `${item.percent}%`
     : item.stageLabel || (showProcessingProgress ? "Processing" : item.status === "queued" ? "Queued" : "Downloading");

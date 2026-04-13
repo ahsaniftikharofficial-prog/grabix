@@ -186,6 +186,12 @@ def runtime_tools_dir() -> Path:
     return app_state_root() / "runtime-tools"
 
 
+def bundled_tools_dir() -> Path | None:
+    """Return the path to tools bundled inside the Tauri installer, or None in dev mode."""
+    resource_dir = os.getenv("GRABIX_RESOURCE_DIR", "").strip()
+    return Path(resource_dir) / "tools" if resource_dir else None
+
+
 def tmdb_bearer_token() -> str:
     for env_key in TMDB_TOKEN_ENV_CANDIDATES:
         value = str(os.getenv(env_key, "")).strip()

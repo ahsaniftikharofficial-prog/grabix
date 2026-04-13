@@ -30,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app.services.logging_utils import get_logger, log_event
-from app.services.runtime_config import db_path, default_download_dir, settings_path
+from app.services.runtime_config import db_path, default_download_dir, settings_path, runtime_tools_dir, bundled_tools_dir
 
 # ── Path constants (single source of truth) ──────────────────────────────────
 DOWNLOAD_DIR = str(default_download_dir())
@@ -363,9 +363,24 @@ def _guess_dl_type_from_path(file_path: str) -> str:
     return "file"
 
 
+def _managed_binary_exists(tool_id: str, names: list) -> bool:
+    """Return True if a binary exists in either the bundled tools dir or the managed runtime dir."""
+    # Check installer-bundled tools first
+    bundled = bundled_tools_dir()
+    if bundled:
+        bundled_dir = bundled / tool_id
+        if bundled_dir.exists() and any(bundled_dir.rglob(name) for name in names):
+            return True
+    # Fall back to the user-managed runtime dir
+    managed_dir = runtime_tools_dir() / tool_id
+    if managed_dir.exists() and any(managed_dir.rglob(name) for name in names):
+        return True
+    return False
+
+
 def has_ffmpeg() -> bool:
-    return shutil.which("ffmpeg") is not None
+    return shutil.which("ffmpeg") is not None or _managed_binary_exists("ffmpeg", ["ffmpeg.exe", "ffmpeg"])
 
 
 def has_aria2() -> bool:
-    return shutil.which("aria2c") is not None
+    return shutil.which("aria2c") is not None or _managed_binary_exists("aria2", ["aria2c.exe", "aria2c"])

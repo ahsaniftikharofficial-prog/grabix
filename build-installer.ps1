@@ -815,6 +815,50 @@ Write-Host "      backend_resource_hash = $backendSourceHash"
 Write-Host "      consumet_node_runtime = $stagedNodeExe"
 Write-Host "      runtime_config = $tauriRuntimeConfig"
 
+# ── Bundle aria2 ──────────────────────────────────────────────────────────────
+# aria2c.exe is downloaded at build time and bundled inside the installer so
+# users never need to install or download anything after setup.
+$tauriToolsAria2Dir = Join-Path $tauriDir "tools\aria2"
+$bundledAria2Exe    = Join-Path $tauriToolsAria2Dir "aria2c.exe"
+
+if (Test-Path -LiteralPath $bundledAria2Exe) {
+    Write-Host "[3b/6] Bundled aria2c.exe already present – skipping download." -ForegroundColor Green
+} else {
+    Write-Host "[3b/6] Downloading aria2 to bundle into installer..." -ForegroundColor Yellow
+    New-Item -ItemType Directory -Path $tauriToolsAria2Dir -Force | Out-Null
+
+    try {
+        $aria2ApiUrl  = "https://api.github.com/repos/aria2/aria2/releases/latest"
+        $aria2Release = Invoke-RestMethod -Uri $aria2ApiUrl -Headers @{ "User-Agent" = "GRABIX-build/1.0" }
+        $aria2Asset   = $aria2Release.assets | Where-Object { $_.name -like "*win-64bit*.zip" } | Select-Object -First 1
+        if (-not $aria2Asset) { throw "No win-64bit zip asset found in latest aria2 release." }
+
+        $aria2ZipPath = Join-Path $env:TEMP "grabix-aria2-build.zip"
+        Write-Host "      Downloading $($aria2Asset.name)..." -ForegroundColor Gray
+        Invoke-WebRequest -Uri $aria2Asset.browser_download_url -OutFile $aria2ZipPath -UseBasicParsing
+
+        $aria2ExtractDir = Join-Path $env:TEMP "grabix-aria2-extract"
+        if (Test-Path $aria2ExtractDir) { Remove-Item $aria2ExtractDir -Recurse -Force }
+        Expand-Archive -Path $aria2ZipPath -DestinationPath $aria2ExtractDir -Force
+
+        $aria2cExe = Get-ChildItem -Path $aria2ExtractDir -Filter "aria2c.exe" -Recurse | Select-Object -First 1
+        if (-not $aria2cExe) { throw "aria2c.exe not found inside the downloaded archive." }
+
+        Copy-Item -LiteralPath $aria2cExe.FullName -Destination $bundledAria2Exe -Force
+
+        Remove-Item $aria2ZipPath    -Force -ErrorAction SilentlyContinue
+        Remove-Item $aria2ExtractDir -Recurse -Force -ErrorAction SilentlyContinue
+
+        Write-Host "[3b/6] aria2c.exe bundled successfully." -ForegroundColor Green
+        Write-Host "       Destination: $bundledAria2Exe" -ForegroundColor Gray
+    } catch {
+        Write-Warning "[3b/6] aria2 download failed: $_"
+        Write-Warning "       The installer will be built without a bundled aria2."
+        Write-Warning "       Re-run the build with internet access to include aria2."
+    }
+}
+# ─────────────────────────────────────────────────────────────────────────────
+
 Write-Host "[4/6] Building GRABIX with Tauri + PyO3..." -ForegroundColor Yellow
 Write-Host "      PYO3_PYTHON = $pythonExe"
 Write-Host "      GRABIX_BUILD_ID = $buildId"

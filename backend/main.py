@@ -34,6 +34,7 @@ from app.services.route_registry import register_route_handlers
 from app.services.runtime_config import (
     app_state_root,
     backend_port,
+    bundled_tools_dir,
     db_path as runtime_db_path,
     default_download_dir,
     public_base_url,
@@ -330,11 +331,23 @@ def refresh_runtime_tools() -> None:
 
 
 def _resolve_runtime_binary(tool_id: str, names: list[str]) -> str | None:
+    # 1. Check the bundled tools dir shipped inside the installer (highest priority).
+    bundled = bundled_tools_dir()
+    if bundled:
+        bundled_tool_dir = bundled / tool_id
+        if bundled_tool_dir.exists():
+            for name in names:
+                candidates = list(bundled_tool_dir.rglob(name))
+                if candidates:
+                    return str(candidates[0])
+
+    # 2. Check system PATH (covers user-installed or winget-installed versions).
     for name in names:
         found = shutil.which(name)
         if found:
             return found
 
+    # 3. Check the managed runtime dir (previously downloaded via the Install button).
     managed_dir = RUNTIME_TOOLS_DIR / tool_id
     if managed_dir.exists():
         for name in names:
