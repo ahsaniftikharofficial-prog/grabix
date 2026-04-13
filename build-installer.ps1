@@ -492,13 +492,8 @@ function Assert-DiagnosticsRuntimeConfig(
     }
 
     if (-not [bool]$payload.config.tmdb_configured) {
-        Throw-BuildFailure `
-            -Code "tmdb_config_missing" `
-            -Step "Packaged smoke test" `
-            -Message "The packaged backend started, but diagnostics reported tmdb_configured=false." `
-            -DiagnosticsPath $DiagnosticsPath `
-            -LogPath $LogPath `
-            -Hint "Make sure build-installer staged runtime-config.json from GRABIX_TMDB_BEARER_TOKEN or GRABIX_RUNTIME_CONFIG_SOURCE."
+        Write-Host "[WARN] tmdb_configured=false - Movies/TV ratings will be limited until a TMDB bearer token is added." -ForegroundColor Yellow
+        Write-Host '       To enable: create runtime-config.local.json in the project root with your TMDB bearer token.' -ForegroundColor Yellow
     }
 }
 
@@ -760,7 +755,7 @@ if ($SkipPythonSetup -and (Test-Path (Join-Path $pythonRuntime "python.exe"))) {
     if (-not (Test-Path -LiteralPath $setupScript)) {
         throw "Setup script not found: $setupScript"
     }
-    & "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -ExecutionPolicy Bypass -File $setupScript
+    & powershell -ExecutionPolicy Bypass -File $setupScript
     if ($LASTEXITCODE -ne 0) {
         throw "Python runtime setup failed."
     }

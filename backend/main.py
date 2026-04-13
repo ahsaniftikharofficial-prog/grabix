@@ -6252,9 +6252,12 @@ async def runtime_health_ping():
     # Ultra-lightweight — intentionally does NO blocking DB or filesystem work.
     # Heavy checks (DB, downloads folder) are available at /health/capabilities.
     # Keeping this instant prevents false "Backend crashed" watchdog alerts.
+    import os as _os
+    _consumet_url = _os.environ.get("CONSUMET_API_BASE", "").strip().rstrip("/") or "http://127.0.0.1:3000"
     return {
         "ok": True,
         "core_ready": True,
+        "consumet_url": _consumet_url,
         "services": {
             "backend": _service_payload("backend", "online", "Backend is responding.", False),
         },

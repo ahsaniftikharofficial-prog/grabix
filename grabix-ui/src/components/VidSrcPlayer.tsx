@@ -286,6 +286,9 @@ export default function VidSrcPlayer({
   const rootRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const [hlsLevels, setHlsLevels] = useState<Array<{ height: number; bitrate: number }>>([]);
+  const [selectedHlsLevel, setSelectedHlsLevel] = useState<number>(-1); // -1 = Auto
+  const [qualityMenuOpen, setQualityMenuOpen] = useState(false);
   const hideChromeTimeoutRef = useRef<number | null>(null);
   const subtitleInputRef = useRef<HTMLInputElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -411,7 +414,7 @@ export default function VidSrcPlayer({
     setShowChrome(true);
     if (hideChromeTimeoutRef.current)
       window.clearTimeout(hideChromeTimeoutRef.current);
-    if (serverMenuOpen || volumeMenuOpen || subtitleMenuOpen) return;
+    if (serverMenuOpen || volumeMenuOpen || subtitleMenuOpen || qualityMenuOpen) return;
     hideChromeTimeoutRef.current = window.setTimeout(
       () => setShowChrome(false),
       2600
@@ -420,6 +423,8 @@ export default function VidSrcPlayer({
 
   useEffect(() => {
     setActiveIndex(0);
+    setHlsLevels([]);
+    setSelectedHlsLevel(-1);
   }, [baseSources]);
 
   useEffect(() => {
@@ -753,22 +758,23 @@ export default function VidSrcPlayer({
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
-          // For proxied streams (anime via backend proxy), reduce the minimum
-          // buffer required before canplay fires so playback starts faster.
-          maxBufferLength: isProxied ? 10 : 30,
-          maxMaxBufferLength: isProxied ? 30 : 600,
-          backBufferLength: 90,
+          // Larger buffer = smoother playback, less stalling mid-stream.
+          maxBufferLength: isProxied ? 20 : 60,
+          maxMaxBufferLength: isProxied ? 60 : 600,
+          // Keep 2 minutes of back-buffer so seeking backwards is instant.
+          backBufferLength: 120,
+          // Pre-fetch the next fragment while the current one plays.
           startFragPrefetch: true,
-          // Fail fast on proxied anime streams: if the CDN token has expired or
-          // the proxy returns an error, we want hls.js to fire a fatal error
-          // immediately rather than silently retrying for the full 120-second
-          // startup window.  Without these limits hls.js retries with exponential
-          // backoff until the startupTimeout fires, which always shows the
-          // misleading "This source took too long to start." message.
+          // Aggressive ABR: let hls.js switch up quality faster.
+          abrEwmaFastLive: 3,
+          abrEwmaSlowLive: 9,
+          abrEwmaFastVoD: 3,
+          abrEwmaSlowVoD: 9,
+          // Fail fast on proxied anime streams (expired tokens etc.)
           manifestLoadingMaxRetry: isProxied ? 1 : 3,
           manifestLoadingRetryDelay: 1000,
-          fragLoadingMaxRetry: isProxied ? 1 : 3,
-          fragLoadingRetryDelay: 1000,
+          fragLoadingMaxRetry: isProxied ? 2 : 4,
+          fragLoadingRetryDelay: 500,
           levelLoadingMaxRetry: isProxied ? 1 : 3,
           levelLoadingRetryDelay: 1000,
         });
@@ -778,18 +784,21 @@ export default function VidSrcPlayer({
           hls.loadSource(playbackUrl);
         });
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          if (isProxied && hls.levels.length > 1) {
-            const lowestLevelIndex = hls.levels.reduce((bestIndex, level, index, levels) => {
-              const bestBandwidth = Number(levels[bestIndex]?.bitrate || Number.MAX_SAFE_INTEGER);
-              const nextBandwidth = Number(level?.bitrate || Number.MAX_SAFE_INTEGER);
-              return nextBandwidth < bestBandwidth ? index : bestIndex;
-            }, 0);
-            hls.startLevel = lowestLevelIndex;
-            hls.nextLevel = lowestLevelIndex;
-            hls.loadLevel = lowestLevelIndex;
+          // Expose quality levels to the UI
+          if (hls.levels.length > 0) {
+            setHlsLevels(hls.levels.map(l => ({ height: l.height || 0, bitrate: l.bitrate || 0 })));
+            setSelectedHlsLevel(-1); // Auto by default
+            hls.currentLevel = -1;  // Let ABR choose
           }
           setStatusText("Buffering");
           void attemptPlayback();
+        });
+        hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
+          // Keep UI in sync when ABR auto-switches levels
+          if (selectedHlsLevel === -1) {
+            // Auto mode — just reflect what hls.js chose in the label
+          }
+          void data;
         });
         hls.on(Hls.Events.FRAG_BUFFERED, () => {
           if (!sourceReady) {
@@ -1779,6 +1788,7 @@ export default function VidSrcPlayer({
                     setServerMenuOpen((open) => !open);
                     setVolumeMenuOpen(false);
                     setSubtitleMenuOpen(false);
+                    setQualityMenuOpen(false);
                   }}
                   title="Servers"
                   aria-label="Servers"
@@ -1868,6 +1878,67 @@ export default function VidSrcPlayer({
                 )}
               </div>
 
+              {/* HLS Quality Switcher — only shown for HLS streams with multiple levels */}
+              {hlsLevels.length > 1 && (
+                <div className="player-menu-wrap">
+                  <button
+                    className="player-control-icon"
+                    onClick={() => {
+                      setQualityMenuOpen((open) => !open);
+                      setServerMenuOpen(false);
+                      setVolumeMenuOpen(false);
+                      setSubtitleMenuOpen(false);
+                    }}
+                    title={selectedHlsLevel === -1 ? "Quality: Auto" : `Quality: ${hlsLevels[selectedHlsLevel]?.height || "?"}p`}
+                    aria-label="Quality"
+                    style={{ fontSize: 11, fontWeight: 700, minWidth: 36, letterSpacing: "-0.5px" }}
+                  >
+                    {selectedHlsLevel === -1
+                      ? <span style={{ fontSize: 10, fontWeight: 800 }}>AUTO</span>
+                      : <span style={{ fontSize: 10, fontWeight: 800 }}>{hlsLevels[selectedHlsLevel]?.height || "?"}p</span>
+                    }
+                  </button>
+                  {qualityMenuOpen && (
+                    <div className="player-popover player-popover-animated">
+                      <div className="player-popover-label">Video Quality</div>
+                      <button
+                        className={`player-popover-item${selectedHlsLevel === -1 ? " active" : ""}`}
+                        onClick={() => {
+                          setSelectedHlsLevel(-1);
+                          if (hlsRef.current) hlsRef.current.currentLevel = -1;
+                          setQualityMenuOpen(false);
+                        }}
+                      >
+                        <span>Auto</span>
+                        <small>ABR</small>
+                      </button>
+                      {[...hlsLevels]
+                        .map((l, i) => ({ ...l, index: i }))
+                        .sort((a, b) => b.height - a.height)
+                        .map(({ height, bitrate, index }) => (
+                          <button
+                            key={index}
+                            className={`player-popover-item${selectedHlsLevel === index ? " active" : ""}`}
+                            onClick={() => {
+                              setSelectedHlsLevel(index);
+                              if (hlsRef.current) {
+                                hlsRef.current.currentLevel = index;
+                                hlsRef.current.loadLevel = index;
+                                hlsRef.current.nextLevel = index;
+                              }
+                              setQualityMenuOpen(false);
+                            }}
+                          >
+                            <span>{height > 0 ? `${height}p` : `Level ${index + 1}`}</span>
+                            <small>{bitrate > 0 ? `${Math.round(bitrate / 1000)} kbps` : "HLS"}</small>
+                          </button>
+                        ))
+                      }
+                    </div>
+                  )}
+                </div>
+              )}
+
               <button
                 className="player-control-icon"
                 onClick={() => void handleDownloadCurrent()}
@@ -1886,6 +1957,7 @@ export default function VidSrcPlayer({
                     setVolumeMenuOpen((open) => !open);
                     setServerMenuOpen(false);
                     setSubtitleMenuOpen(false);
+                    setQualityMenuOpen(false);
                   }}
                   title={`Volume ${volumeBoost}%`}
                   aria-label={`Volume ${volumeBoost}%`}

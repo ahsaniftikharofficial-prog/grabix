@@ -47,6 +47,7 @@ export interface RuntimeHealthPayload {
 export interface BackendPingPayload {
   ok: boolean;
   core_ready: boolean;
+  consumet_url?: string;
   services: Record<string, RuntimeServiceStatus>;
 }
 

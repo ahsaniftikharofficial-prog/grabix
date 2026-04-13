@@ -90,10 +90,6 @@ if not exist "%CONSUMET%\node_modules\axios" (
     echo  [SETUP] HiAnime packages installed.
 )
 
-echo  [UPDATE] Updating aniwatch in background ^(MegaCloud streaming fix^)...
-cd /d "%CONSUMET%"
-start "" /b cmd /c npm.cmd update aniwatch --silent
-
 set "BACKEND_BASE=http://127.0.0.1:%BACKEND_PORT%"
 set "FRONTEND_BASE=http://127.0.0.1:%FRONTEND_PORT%"
 set "CONSUMET_BASE=http://127.0.0.1:%CONSUMET_PORT%"
@@ -104,12 +100,16 @@ set "RUNTIME_CONFIG_FILE=%ROOT%runtime-config.local.json"
     echo VITE_GRABIX_API_BASE=%BACKEND_BASE%
 )
 
+echo  [UPDATE] Checking aniwatch package ^(streaming fix^)...
+cd /d "%CONSUMET%"
+powershell -NoProfile -Command "try { $j = Start-Job { Set-Location '%CONSUMET%'; npm update aniwatch --silent 2>&1 }; $done = Wait-Job $j -Timeout 30; if ($done) { Write-Host '  [UPDATE] aniwatch update complete.' } else { Stop-Job $j; Write-Host '  [UPDATE] aniwatch update skipped (timeout).' } } catch { Write-Host '  [UPDATE] aniwatch update skipped.' }"
+
 echo  [START] Launching HiAnime gateway on %CONSUMET_BASE%
 start "GRABIX HiAnime" /min cmd /c call "%SCRIPTS%\start-consumet.cmd" "%CONSUMET%" "%CONSUMET_PORT%" "%CONSUMET_LOG%"
 
 echo  [WAIT] Waiting for HiAnime gateway...
 powershell -NoProfile -Command ^
-  "$ready=$false; for($i=0;$i -lt 60;$i++){ Start-Sleep -Milliseconds 500; try { $r=Invoke-WebRequest -Uri '%CONSUMET_BASE%' -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200){$ready=$true; break} } catch {} }; if($ready){ Write-Host '  [OK] HiAnime gateway ready.' } else { Write-Host '  [WARN] HiAnime gateway slow to start, continuing anyway.' }"
+  "$ready=$false; $dots=''; for($i=0;$i -lt 60;$i++){ Start-Sleep -Milliseconds 500; $dots+='.'; Write-Host -NoNewLine ('`r  [WAIT] Waiting for HiAnime gateway' + $dots + '   '); try { $r=Invoke-WebRequest -Uri '%CONSUMET_BASE%' -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200){$ready=$true; break} } catch {} }; Write-Host ''; if($ready){ Write-Host '  [OK] HiAnime gateway ready.' } else { Write-Host '  [WARN] HiAnime gateway slow to start, continuing anyway.' }"
 
 set "CONSUMET_API_BASE=%CONSUMET_BASE%"
 
@@ -153,4 +153,13 @@ echo.
 timeout /t 3 /nobreak >nul
 start %FRONTEND_BASE%
 
+echo.
+echo  ==========================================
+echo    GRABIX is running!
+echo    All services launched in the background.
+echo    Close this window any time — services
+echo    will keep running in minimized windows.
+echo  ==========================================
+echo.
+pause
 exit /b 0

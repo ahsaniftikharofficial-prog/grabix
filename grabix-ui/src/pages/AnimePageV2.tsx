@@ -246,6 +246,19 @@ export default function AnimePageV2() {
 
   const searchRef = useRef<HTMLInputElement>(null);
 
+  // Auto-detect consumet URL from backend on first mount (works in dev + packaged)
+  useEffect(() => {
+    const saved = getSavedUrl();
+    detectConsumetUrl().then((detected) => {
+      if (!detected) return;
+      // Only auto-apply if the user hasn't manually changed it to something custom
+      if (saved === FALLBACK_URL || saved === detected) {
+        saveUrl(detected);
+        setConsumetUrl(detected);
+      }
+    });
+  }, []); // eslint-disable-line
+
   // Ping consumet on mount / URL change
   useEffect(() => {
     setConsumetOk(null);

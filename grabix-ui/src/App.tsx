@@ -252,7 +252,7 @@ function Inner() {
   };
   return (
     <div style={{ display: "flex", height: "100vh", width: "100vw", overflow: "hidden" }}>
-      <OfflineBanner offlineState={offlineState} />
+      <OfflineBanner offlineState={bootstrapping ? { isOffline: false, reason: null, since: null } : offlineState} />
       <WatchdogBanner status={watchdog.status} isBannerVisible={watchdog.isBannerVisible} />
       <Sidebar page={page} setPage={navigateToPage} activeDownloads={activeDownloads} runtimeState={runtimeState} runtimeHealth={runtimeHealth} />
       <main
@@ -263,7 +263,7 @@ function Inner() {
           display: "flex",
           flexDirection: "column",
           background: "var(--bg-app)",
-          paddingTop: (offlineState.isOffline ? 32 : 0) + (watchdog.isBannerVisible && watchdog.status !== "idle" ? 32 : 0),
+          paddingTop: watchdog.isBannerVisible && watchdog.status !== "idle" ? 32 : 0,
           transition: "padding-top 0.2s ease",
         }}
       >
