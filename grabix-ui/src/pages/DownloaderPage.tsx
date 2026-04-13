@@ -283,11 +283,8 @@ export default function DownloaderPage() {
         setStatus("error");
       }
     } catch {
-      // Backend offline — use mock data so UI is always testable
-      setInfo(MOCK_INFO);
-      setTrimStart(0);
-      setTrimEnd(MOCK_INFO.duration);
-      setStatus("ok");
+      setErrMsg("Could not reach the backend. Make sure the app is running and try again.");
+      setStatus("error");
     }
   }, []);
 
@@ -391,9 +388,11 @@ export default function DownloaderPage() {
 
     try {
       const trimEnabled = trimOpen && trimEnd - trimStart < info!.duration;
-      const res = await backendFetch(`${API}/download?url=${encodeURIComponent(url)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`, undefined, { sensitive: true });
+      const res = await backendFetch(`${API}/download?url=${encodeURIComponent(url)}&title=${encodeURIComponent(info.title)}&thumbnail=${encodeURIComponent(info.thumbnail)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`, undefined, { sensitive: true });
       if (!res.ok) {
-        throw new Error(`Download request failed with ${res.status}`);
+        let errMsg = `Download failed (${res.status})`;
+        try { const errData = await res.json(); errMsg = errData.detail || errData.error || errMsg; } catch {}
+        throw new Error(errMsg);
       }
       const data = await res.json();
       const serverTaskId = data.task_id ?? taskId;
@@ -434,16 +433,11 @@ export default function DownloaderPage() {
       }, 1000);
       pollingRef.current.set(serverTaskId, interval);
 
-    } catch {
-      let pct = 0;
-      const sim = setInterval(() => {
-        pct = Math.min(100, pct + Math.random() * 8);
-        setQueue(prev => prev.map(q => q.id === taskId
-          ? { ...q, status: pct >= 100 ? "done" : "downloading", percent: Math.round(pct) }
-          : q
-        ));
-        if (pct >= 100) clearInterval(sim);
-      }, 400);
+    } catch (err) {
+      setQueue(prev => prev.map(q => q.id === taskId
+        ? { ...q, status: "error", error: err instanceof Error ? err.message : "Download failed. Please try again." }
+        : q
+      ));
     }
   };
 
@@ -513,17 +507,12 @@ export default function DownloaderPage() {
           } catch { clearInterval(interval); }
         }, 1000);
         pollingRef.current.set(serverTaskId, interval);
-      } catch {
-        let pct = 0;
-        const sim = setInterval(() => {
-          pct = Math.min(100, pct + Math.random() * 8);
+      } catch (err) {
           setQueue(prev => prev.map(q => q.id === taskId
-            ? { ...q, status: pct >= 100 ? "done" : "downloading", percent: Math.round(pct) }
+            ? { ...q, status: "error", error: err instanceof Error ? err.message : "Download failed. Please try again." }
             : q
           ));
-          if (pct >= 100) clearInterval(sim);
-        }, 400);
-      }
+        }
     }
     setBatchUrls("");
     setBatchMode(false);

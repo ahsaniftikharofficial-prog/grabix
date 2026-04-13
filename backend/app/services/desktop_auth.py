@@ -54,16 +54,21 @@ def validate_desktop_auth_request(request: Request) -> dict[str, Any] | None:
 
     expected = desktop_auth_token()
     if not expected:
-        return {
-            "status_code": 503,
-            "payload": {
-                "code": "desktop_auth_unavailable",
-                "message": "Desktop auth is not initialized for this install.",
-                "retryable": True,
-                "service": "security",
-                "user_action": "Restart GRABIX so the local backend trust token can be created again.",
-            },
-        }
+        # No token configured at all. In packaged mode this is a real problem;
+        # in dev mode (run.bat) the token env var is simply never set.
+        if is_desktop_auth_required():
+            return {
+                "status_code": 503,
+                "payload": {
+                    "code": "desktop_auth_unavailable",
+                    "message": "Desktop auth is not initialized for this install.",
+                    "retryable": True,
+                    "service": "security",
+                    "user_action": "Restart GRABIX so the local backend trust token can be created again.",
+                },
+            }
+        # Not required and no token = dev/source mode. Allow through.
+        return None
 
     provided = str(request.headers.get(DESKTOP_AUTH_HEADER, "")).strip()
     if provided == expected:

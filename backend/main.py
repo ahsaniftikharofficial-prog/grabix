@@ -4352,7 +4352,7 @@ def start_download(
             db_insert(meta)
         else:
             yt_dlp = _get_yt_dlp()
-            with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True, "noplaylist": True}) as ydl:
+            with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True, "noplaylist": True, "socket_timeout": 8}) as ydl:
                 info = ydl.extract_info(safe_url, download=False)
                 meta = {
                     "id": dl_id, "url": safe_url,

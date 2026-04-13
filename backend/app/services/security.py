@@ -64,6 +64,23 @@ DEFAULT_APPROVED_MEDIA_HOSTS = (
     "animepahe",           # AnimePahe images
     "animekai",            # AnimeKai images
     "kickassanime",        # KickAssAnime images
+    # Common video platforms supported by yt-dlp
+    "crunchyroll.com",     # Crunchyroll anime
+    "funimation.com",      # Funimation
+    "twitter.com",         # Twitter/X video
+    "x.com",               # X (Twitter)
+    "twitch.tv",           # Twitch
+    "dailymotion.com",     # Dailymotion
+    "facebook.com",        # Facebook video
+    "instagram.com",       # Instagram video
+    "tiktok.com",          # TikTok
+    "reddit.com",          # Reddit video
+    "soundcloud.com",      # SoundCloud audio
+    "bilibili.com",        # Bilibili
+    "nicovideo.jp",        # NicoNico
+    "twimg.com",           # Twitter media CDN
+    "fbcdn.net",           # Facebook CDN
+    "cdninstagram.com",    # Instagram CDN
 )
 
 
