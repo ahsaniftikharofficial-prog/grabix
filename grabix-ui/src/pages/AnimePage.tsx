@@ -1411,8 +1411,18 @@ function AnimeDetail({
             const watchData = await r.json() as {
               sources?: Array<{ url: string; quality?: string; isM3U8?: boolean }>;
               subtitles?: Array<{ lang?: string; url?: string }>;
+              headers?: Record<string, string>;
             };
             if (watchData.sources && watchData.sources.length > 0) {
+              // HiAnime CDN (MegaCloud/BunnyCDN) rejects segment requests that
+              // lack a Referer header. The consumet server returns the required
+              // headers in watchData.headers — we must forward them as
+              // requestHeaders so shouldKeepHlsProxied() returns true and the
+              // player routes all HLS traffic through the backend proxy.
+              const requestHeaders: Record<string, string> =
+                watchData.headers && Object.keys(watchData.headers).length > 0
+                  ? watchData.headers
+                  : { Referer: "https://megacloud.blog/" };
               const subs = (watchData.subtitles ?? []).map((s, si) => ({
                 id: s.lang ?? `sub-${si}`,
                 label: s.lang ?? "Subtitle",
@@ -1426,6 +1436,7 @@ function AnimeDetail({
                 kind: src.isM3U8 ? "hls" : "direct",
                 url: src.url,
                 quality: src.quality,
+                requestHeaders,
                 subtitles: subs,
               }));
               // Cache so instant-play works on subsequent clicks
