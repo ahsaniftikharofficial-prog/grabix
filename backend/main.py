@@ -117,35 +117,21 @@ except Exception:
     bcrypt = None
     BCRYPT_AVAILABLE = False
 
-# --- LAZY SELENIUM LOADER ---
-# Selenium is NOT imported at startup. Imported on first use only.
-# Saves ~1-2 seconds of startup time.
-_selenium_loaded = False
+# --- SELENIUM REMOVED ---
+# Browser-based capture via Selenium/Edge has been removed.
+# It was unreliable (required Edge installed at specific Windows paths)
+# and used ~300MB RAM for a simple URL fetch. The fallback provider chain
+# handles unavailable streams instead.
+_selenium_loaded = True
 webdriver = None
 By = None
 EdgeOptions = None
 SELENIUM_AVAILABLE = False
-SELENIUM_IMPORT_ERROR = ""
+SELENIUM_IMPORT_ERROR = "Selenium support has been removed"
 
 def _ensure_selenium():
-    """Load selenium on first use. Safe to call multiple times."""
-    global _selenium_loaded, webdriver, By, EdgeOptions, SELENIUM_AVAILABLE, SELENIUM_IMPORT_ERROR
-    if _selenium_loaded:
-        return SELENIUM_AVAILABLE
-    _selenium_loaded = True
-    try:
-        from selenium import webdriver as _wd
-        from selenium.webdriver.common.by import By as _By
-        from selenium.webdriver.edge.options import Options as _EdgeOptions
-        webdriver = _wd
-        By = _By
-        EdgeOptions = _EdgeOptions
-        SELENIUM_AVAILABLE = True
-        SELENIUM_IMPORT_ERROR = ""
-    except Exception as exc:
-        SELENIUM_AVAILABLE = False
-        SELENIUM_IMPORT_ERROR = str(exc)
-    return SELENIUM_AVAILABLE
+    """Selenium has been removed. This is a no-op stub."""
+    pass
 
 # --- LAZY MOVIEBOX LOADER ---
 # moviebox_api is NOT imported at startup. Imported on first use only.
@@ -294,17 +280,7 @@ ADULT_UNLOCK_WINDOW_SECONDS = 300
 ADULT_UNLOCK_MAX_ATTEMPTS = 5
 adult_unlock_attempts: dict[str, list[float]] = runtime_state.adult_unlock_attempts
 APPROVED_MEDIA_HOSTS = DEFAULT_APPROVED_MEDIA_HOSTS
-EDGE_BINARY_PATH = next(
-    (
-        path
-        for path in (
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-        )
-        if os.path.exists(path)
-    ),
-    "",
-)
+EDGE_BINARY_PATH = None  # Browser-based capture removed
 ANIME_RESOLVE_CACHE_TTL_SECONDS = 1500
 anime_resolve_cache: dict[str, tuple[float, dict]] = runtime_state.anime_resolve_cache
 CONSUMET_HEALTH_CACHE_TTL_SECONDS = 15
@@ -1426,61 +1402,17 @@ def _extract_hianime_embed_source(
 
 
 def _capture_hianime_stream_via_edge(embed_url: str, watch_url: str, server: str, tried: list[dict]) -> dict | None:
-    _ensure_selenium()
-    if not SELENIUM_AVAILABLE:
-        raise RuntimeError(f"Selenium is unavailable: {SELENIUM_IMPORT_ERROR}")
-    if not EDGE_BINARY_PATH:
-        raise RuntimeError("Microsoft Edge is not installed.")
-
-    options = EdgeOptions()
-    options.binary_location = EDGE_BINARY_PATH
-    options.add_argument("--headless=new")
-    options.add_argument("--autoplay-policy=no-user-gesture-required")
-    options.add_argument("--disable-features=msEdgeSidebarV2")
-    options.add_argument("--mute-audio")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-background-networking")
-    options.add_argument("--disable-renderer-backgrounding")
-    options.add_argument("--no-first-run")
-    options.add_argument("--no-default-browser-check")
-    options.add_argument("--disable-popup-blocking")
-    options.add_argument("--disable-dev-shm-usage")
-
-    driver = webdriver.Edge(options=options)
-    try:
-        driver.set_window_position(-2000, 0)
-        driver.set_window_size(1280, 720)
-        driver.get(watch_url or embed_url)
-        time.sleep(6)
-        if embed_url and embed_url not in driver.current_url:
-            driver.get(embed_url)
-            time.sleep(6)
-
-        for _ in range(12):
-            entries = driver.execute_script(
-                """
-                return performance.getEntriesByType('resource')
-                  .map((entry) => entry.name)
-                  .filter((name) => name.includes('.m3u8') || name.includes('.mp4'));
-                """
-            ) or []
-            if entries:
-                url = str(entries[-1])
-                return _normalize_resolved_source(
-                    source_url=url,
-                    kind="hls" if ".m3u8" in url.lower() else "direct",
-                    provider="HiAnime",
-                    selected_server=server,
-                    strategy="hianime-browser-capture",
-                    headers={"Referer": watch_url or embed_url},
-                    subtitles=[],
-                    tried=tried,
-                )
-            time.sleep(1.5)
-        return None
-    finally:
-        driver.quit()
+    """
+    Browser-based capture has been removed.
+    The Selenium/Edge dependency is unreliable on most systems.
+    The fallback provider chain handles unavailable streams instead.
+    """
+    tried.append({
+        "server": server,
+        "stage": "hianime-browser-capture",
+        "detail": "Browser-based capture is disabled. Falling back to provider chain.",
+    })
+    return None
 
 
 def _fallback_embed_sources(tmdb_id: int | None, season: int, episode: int) -> list[dict]:
@@ -6127,13 +6059,16 @@ def delete_library_file(path: str):
 
 @app.get("/ratings")
 async def get_ratings(title: str):
-    import subprocess, sys
-    # Auto-install cinemagoer into whichever Python is running the backend
     try:
         from imdb import Cinemagoer
     except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "cinemagoer", "-q"])
-        from imdb import Cinemagoer
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Ratings service unavailable",
+                "detail": "cinemagoer is not installed. Run: pip install cinemagoer"
+            }
+        )
 
     try:
         ia = Cinemagoer()

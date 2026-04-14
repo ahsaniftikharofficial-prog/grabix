@@ -369,105 +369,11 @@ def stream_variants(url: str, headers_json: str = ""):
 # ── Browser-based stream extractor (unchanged) ────────────────────────────────
 
 def _extract_stream_url_via_browser(url: str) -> tuple[str, str] | None:
-    import main as _m  # deferred
-
-    _m._ensure_selenium()
-    if not _m.SELENIUM_AVAILABLE or not _m.EDGE_BINARY_PATH:
-        return None
-
-    options = _m.EdgeOptions()
-    options.binary_location = _m.EDGE_BINARY_PATH
-    options.page_load_strategy = "eager"
-    options.add_argument("--headless=new")
-    options.add_argument("--window-size=1280,720")
-    options.add_argument("--autoplay-policy=no-user-gesture-required")
-    options.add_argument("--disable-features=msEdgeSidebarV2")
-    options.add_argument("--mute-audio")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-background-networking")
-    options.add_argument("--disable-renderer-backgrounding")
-    options.add_argument("--no-first-run")
-    options.add_argument("--no-default-browser-check")
-    options.add_argument("--disable-popup-blocking")
-    options.add_argument("--disable-dev-shm-usage")
-    options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
-    options.set_capability("ms:loggingPrefs",   {"performance": "ALL"})
-
-    driver = None
-    try:
-        driver = _m.webdriver.Edge(options=options)
-        driver.set_page_load_timeout(20)
-        driver.set_script_timeout(10)
-        driver.set_window_position(-2000, 0)
-        try:
-            target_url = _resolve_embed_target(url)
-        except Exception:
-            target_url = url
-        driver.get(target_url or url)
-
-        deadline   = time.time() + 10
-        seen_urls: set[str] = set()
-
-        while time.time() < deadline:
-            try:
-                entries = driver.execute_script(
-                    "return performance.getEntriesByType('resource').map(e=>e.name).filter(Boolean);"
-                ) or []
-            except Exception:
-                entries = []
-
-            for candidate in entries:
-                candidate_url = str(candidate or "").strip()
-                if not candidate_url or candidate_url in seen_urls:
-                    continue
-                seen_urls.add(candidate_url)
-                if _looks_like_playable_media_url(candidate_url):
-                    return candidate_url, ("hls" if ".m3u8" in candidate_url.lower() else "direct")
-
-            try:
-                performance_logs = driver.get_log("performance")
-            except Exception:
-                performance_logs = []
-
-            for entry in performance_logs:
-                try:
-                    message = json.loads(entry["message"]).get("message", {})
-                    if message.get("method", "") not in _NETWORK_METHODS:
-                        continue
-                    params = message.get("params", {})
-                    request_url = (
-                        params.get("request", {}).get("url")
-                        or params.get("response", {}).get("url")
-                        or ""
-                    )
-                    request_url = str(request_url).strip()
-                    if not request_url or request_url in seen_urls:
-                        continue
-                    seen_urls.add(request_url)
-                    if _looks_like_playable_media_url(request_url):
-                        return request_url, ("hls" if ".m3u8" in request_url.lower() else "direct")
-                except Exception:
-                    continue
-
-            time.sleep(0.35)
-
-    except Exception as exc:
-        import main as _m2
-        _m2.log_event(
-            _m2.playback_logger,
-            logging.ERROR,
-            event="browser_stream_resolver_failed",
-            message="Browser stream resolver failed.",
-            details={"error": str(exc), "url": url[:180]},
-        )
-    finally:
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
-
+    """
+    Browser-based stream extraction has been removed.
+    Selenium/Edge is unreliable and not worth the dependency.
+    Returns None so callers fall through to the next strategy.
+    """
     return None
 
 
