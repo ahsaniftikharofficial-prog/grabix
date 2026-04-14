@@ -121,11 +121,31 @@ function parseTimestamp(value: string): number {
   return parts[0] ?? 0;
 }
 
+// Strip VTT/HTML inline tags (e.g. <c.white>, <i>, <b>, <00:00:01.000>, &amp; etc.)
+// so raw cue text can be rendered safely as plain text.
+function stripVttTags(text: string): string {
+  return text
+    .replace(/<[^>]+>/g, "")      // remove all HTML/VTT tags
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, "\"")
+    .trim();
+}
+
 function parseSubtitleText(content: string): SubtitleCue[] {
   const normalized = (content || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
   if (!normalized) return [];
-  const blocks = normalized
-    .replace(/^WEBVTT\s*\n/i, "")
+
+  // Strip the WEBVTT header line (may include optional description: "WEBVTT - My file")
+  // and any leading NOTE / STYLE / REGION blocks before the first cue.
+  const withoutHeader = /^WEBVTT/i.test(normalized)
+    ? normalized.replace(/^WEBVTT[^\n]*\n((?:(?!-->)[^\n]*\n)*\n)*/i, "")
+    : normalized;
+
+  const blocks = withoutHeader
     .split(/\n\s*\n/)
     .map((block) => block.trim())
     .filter(Boolean);
@@ -142,7 +162,9 @@ function parseSubtitleText(content: string): SubtitleCue[] {
     const end = parseTimestamp(endRaw.split(" ")[0]);
     const textLines = lines.slice(timeLineIndex + 1);
     if (!textLines.length) continue;
-    cues.push({ start, end, text: textLines.join("\n") });
+    const text = stripVttTags(textLines.join("\n"));
+    if (!text) continue; // skip empty cues after tag-stripping
+    cues.push({ start, end, text });
   }
   return cues;
 }
@@ -1068,7 +1090,43 @@ export default function VidSrcPlayer({
   useEffect(() => {
     if (!subtitleUrl || subtitleUrl.startsWith("blob:")) return;
     let cancelled = false;
-    fetch(subtitleUrl).then((response) => { if (!response.ok) throw new Error(`Subtitle load failed with ${response.status}`); return response.text(); }).then((content) => { if (cancelled) return; const cues = parseSubtitleText(content); setSubtitleCues(cues); if (cues.length > 0) setSubtitleHint(`Subtitles loaded. Next line at ${formatTime(cues[0].start)}.`); }).catch(() => { if (!cancelled) setSubtitleCues([]); });
+
+    const fetchSubtitleContent = async (): Promise<string> => {
+      // Fast path: try fetching the subtitle URL directly.
+      // This works for CORS-permissive sources (e.g. OpenSubtitles, local blobs).
+      try {
+        const directCtrl = new AbortController();
+        const directTimer = window.setTimeout(() => directCtrl.abort(), 6000);
+        try {
+          const res = await fetch(subtitleUrl, { signal: directCtrl.signal });
+          if (res.ok) return await res.text();
+        } finally {
+          window.clearTimeout(directTimer);
+        }
+      } catch {
+        // CORS policy, missing Referer, or network error —
+        // HiAnime / MegaCloud CDN subtitles always land here.
+      }
+
+      // Backend proxy path: the server has no CORS restrictions and forwards
+      // the correct Referer/headers to CDN subtitle endpoints.
+      const proxyUrl =
+        `${API}/subtitles/download?url=${encodeURIComponent(subtitleUrl)}` +
+        `&title=subtitle&language=en&type=anime&source=player&format=vtt`;
+      const res = await fetch(proxyUrl);
+      if (!res.ok) throw new Error(`Subtitle proxy failed with ${res.status}`);
+      return await res.text();
+    };
+
+    fetchSubtitleContent()
+      .then((content) => {
+        if (cancelled) return;
+        const cues = parseSubtitleText(content);
+        setSubtitleCues(cues);
+        if (cues.length > 0) setSubtitleHint(`Subtitles loaded. Next line at ${formatTime(cues[0].start)}.`);
+      })
+      .catch(() => { if (!cancelled) setSubtitleCues([]); });
+
     return () => { cancelled = true; };
   }, [subtitleUrl]);
 
@@ -1175,9 +1233,25 @@ export default function VidSrcPlayer({
 
   const toggleSubtitles = () => {
     if (activeSubtitles.length > 0 || subtitleUrl) {
-      if (subtitlesEnabled) { clearSubtitles(); return; }
+      if (subtitlesEnabled) {
+        // Turn subtitles OFF — clear everything
+        clearSubtitles();
+        return;
+      }
+      // Turn subtitles ON — reload the first available track.
+      // We always clear cues first so the fetch useEffect re-runs even if
+      // the URL hasn't changed (e.g. toggling off then on again).
       const firstSubtitle = activeSubtitles[0];
-      if (firstSubtitle?.url) handleSubtitleSelect(firstSubtitle.url, firstSubtitle.label);
+      if (firstSubtitle?.url) {
+        if (subtitleUrl.startsWith("blob:") && subtitleUrl !== firstSubtitle.url) URL.revokeObjectURL(subtitleUrl);
+        setSubtitleUrl("");                         // force useEffect to re-fire on next tick
+        setSubtitleCues([]); setCurrentCue("");
+        setTimeout(() => {
+          setSubtitleUrl(firstSubtitle.url);
+          setSubtitleName(firstSubtitle.label);
+          setSubtitlesEnabled(true);
+        }, 0);
+      }
       return;
     }
     if (disableSubtitleSearch) { setSubtitleHint("No subtitles available for this source."); return; }
