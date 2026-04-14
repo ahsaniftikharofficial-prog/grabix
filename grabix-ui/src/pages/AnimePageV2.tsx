@@ -15,6 +15,7 @@ import VidSrcPlayer from "../components/VidSrcPlayer";
 import { IconSearch, IconX, IconPlay } from "../components/Icons";
 import { type StreamSource } from "../lib/streamProviders";
 import { fetchBackendPing } from "../lib/api";
+import { queueVideoDownload } from "../lib/downloads";
 
 // ─── Consumet URL — persisted so it survives page refreshes ──────────────────
 const LS_KEY = "animev2:consumet_url";
@@ -350,7 +351,17 @@ export default function AnimePageV2() {
         mediaType="tv" currentEpisode={player.currentEpisode} episodeOptions={player.episodeOptions} episodeLabel="Ep"
         disableSubtitleSearch={true}
         onSelectEpisode={player.onSelectEpisode} onClose={() => setScreen("info")}
-        onDownload={async (url) => { await navigator.clipboard.writeText(url); }} />
+        onDownload={async (url) => {
+          await queueVideoDownload({ url, title: player.title, forceHls: true });
+        }}
+        onDownloadSource={async (source) => {
+          await queueVideoDownload({
+            url: source.url,
+            title: player.title,
+            headers: source.requestHeaders,
+            forceHls: source.kind === "hls",
+          });
+        }} />
     </>
   );
 

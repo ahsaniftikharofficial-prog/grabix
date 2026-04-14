@@ -4401,8 +4401,10 @@ def _download_hls_media(
     command.extend([
         "-protocol_whitelist", "file,http,https,tcp,tls,crypto,data",
         "-allowed_extensions", "ALL",
-        "-allowed_segment_extensions", "ALL",
-        "-extension_picky", "0",
+        "-timeout", "30000000",         # 30 s per HTTP op (µs) — prevents CDN stall hang
+        "-reconnect", "1",              # auto-reconnect on transient errors
+        "-reconnect_streamed", "1",     # reconnect for HLS/streamed content
+        "-reconnect_delay_max", "5",    # max 5 s between reconnect attempts
         "-stats_period", "1",
         "-i", url,
         "-c", "copy",
@@ -4443,6 +4445,34 @@ def _download_hls_media(
         speed_factor = 0.0
         last_size_sample = 0
         last_sample_ts = time.monotonic()
+
+        # ── Watchdog: kill FFmpeg if no new bytes written in 3 minutes ───────
+        # readline() blocks forever when the CDN stalls; the watchdog escapes it
+        # by terminating FFmpeg, which closes the pipe and unblocks readline().
+        _WD_TIMEOUT_S = 180  # 3 minutes of zero byte progress = hung download
+        _wd_stop = threading.Event()
+        _wd_last_size: list[int] = [0]
+        _wd_last_ts: list[float] = [time.monotonic()]
+
+        def _wd_run() -> None:
+            while not _wd_stop.wait(15):        # check every 15 s
+                if controls["cancel"].is_set():
+                    break
+                try:
+                    sz = Path(output_path).stat().st_size
+                except Exception:
+                    sz = 0
+                if sz > _wd_last_size[0]:
+                    _wd_last_size[0] = sz
+                    _wd_last_ts[0] = time.monotonic()
+                elif time.monotonic() - _wd_last_ts[0] > _WD_TIMEOUT_S:
+                    if process.poll() is None:
+                        process.terminate()         # unblocks readline() via EOF
+                    break
+
+        _wd_thread = threading.Thread(target=_wd_run, daemon=True)
+        _wd_thread.start()
+        # ─────────────────────────────────────────────────────────────────────
 
         try:
             while True:
@@ -4510,6 +4540,7 @@ def _download_hls_media(
                 downloads[dl_id]["stage_label"] = "Downloading"
                 _persist_download_record(dl_id)
         finally:
+            _wd_stop.set()
             controls["process"] = None
             controls["process_kind"] = ""
             if process.stderr:
