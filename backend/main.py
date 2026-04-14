@@ -117,22 +117,6 @@ except Exception:
     bcrypt = None
     BCRYPT_AVAILABLE = False
 
-# --- SELENIUM REMOVED ---
-# Browser-based capture via Selenium/Edge has been removed.
-# It was unreliable (required Edge installed at specific Windows paths)
-# and used ~300MB RAM for a simple URL fetch. The fallback provider chain
-# handles unavailable streams instead.
-_selenium_loaded = True
-webdriver = None
-By = None
-EdgeOptions = None
-SELENIUM_AVAILABLE = False
-SELENIUM_IMPORT_ERROR = "Selenium support has been removed"
-
-def _ensure_selenium():
-    """Selenium has been removed. This is a no-op stub."""
-    pass
-
 # --- LAZY MOVIEBOX LOADER ---
 # moviebox_api is NOT imported at startup. Imported on first use only.
 # Also uses a 60-second cooldown so a broken install never hammers imports.
@@ -280,7 +264,6 @@ ADULT_UNLOCK_WINDOW_SECONDS = 300
 ADULT_UNLOCK_MAX_ATTEMPTS = 5
 adult_unlock_attempts: dict[str, list[float]] = runtime_state.adult_unlock_attempts
 APPROVED_MEDIA_HOSTS = DEFAULT_APPROVED_MEDIA_HOSTS
-EDGE_BINARY_PATH = None  # Browser-based capture removed
 ANIME_RESOLVE_CACHE_TTL_SECONDS = 1500
 anime_resolve_cache: dict[str, tuple[float, dict]] = runtime_state.anime_resolve_cache
 CONSUMET_HEALTH_CACHE_TTL_SECONDS = 15
