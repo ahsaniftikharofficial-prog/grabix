@@ -3267,6 +3267,8 @@ def _start_aria2_rpc_monitor(
         processing_since: float = 0.0  # timestamp when "processing" mode was first detected
         aria2_done_since: float = 0.0  # timestamp when aria2 first reported all downloads finished
         stream_file_sizes: set[int] = set()  # sizes of completed stream files (to exclude them from merge tracking)
+        merge_active_ts: float = 0.0   # last time the merge output file was observed growing
+        _last_merge_size: int = 0      # last observed merge output file size (for growth detection)
 
         while not stop_event.is_set():
             try:
@@ -3418,6 +3420,12 @@ def _start_aria2_rpc_monitor(
                                             "downloaded": _format_bytes(merge_size),
                                         })
                                         _persist_download_record(dl_id)
+                                    # Reset the stale-clock whenever the output file grows.
+                                    # This prevents false timeouts while ffmpeg is actively
+                                    # writing — even if it takes longer than the base threshold.
+                                    if merge_size > _last_merge_size:
+                                        _last_merge_size = merge_size
+                                        merge_active_ts = time.monotonic()
                         except Exception:
                             pass
 
@@ -3426,13 +3434,20 @@ def _start_aria2_rpc_monitor(
                     # keeps firing even after aria2's RPC server shuts down (once aria2
                     # exits the RPC becomes unreachable and stopped is always None, but
                     # aria2_done_since remains set from when we first saw completion).
+                    #
+                    # We measure staleness from the last time the merge output file grew
+                    # (merge_active_ts) rather than from when aria2 finished.  This avoids
+                    # false-positive timeouts on large files where ffmpeg legitimately runs
+                    # for longer than 3 minutes.  The clock only fires if there has been
+                    # ZERO output-file growth for 5 minutes — a reliable sign of a hung merge.
                     if aria2_done_since > 0:
                         cur_st = downloads[dl_id].get("status", "")
-                        stuck_seconds = time.monotonic() - aria2_done_since
-                        if stuck_seconds > 180 and cur_st not in ("done", "failed", "canceled", "error"):
+                        _ref_ts = merge_active_ts if merge_active_ts > 0 else aria2_done_since
+                        stuck_seconds = time.monotonic() - _ref_ts
+                        if stuck_seconds > 300 and cur_st not in ("done", "failed", "canceled", "error"):
                             downloads[dl_id].update({
                                 "status": "failed",
-                                "error": "Post-processing timed out (3 min) after aria2 finished. The merge step may be hung — please retry.",
+                                "error": "Post-processing timed out (5 min with no progress) after aria2 finished. The merge step may be hung — please retry.",
                                 "stage_label": "Failed",
                                 "progress_mode": "activity",
                                 "recoverable": True,
@@ -6294,14 +6309,9 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         "windowsfilenames": True,
     }
     if effective_engine == "aria2" and has_aria2():
-        # Allocate a fresh port for each download so each yt-dlp+aria2 session gets
-        # its own RPC endpoint. This avoids the Windows TIME_WAIT port-reuse conflict
-        # that occurred when both streams (video + audio) shared a fixed port.
-        _ytdlp_aria2_rpc_port = _aria2_find_free_port()
         controls = download_controls.get(dl_id)
         if controls is not None:
             controls["process_kind"] = "aria2"
-            controls["aria2_rpc_port"] = _ytdlp_aria2_rpc_port
         opts["external_downloader"] = ARIA2_PATH
         opts["external_downloader_args"] = {
             "default": [
@@ -6312,17 +6322,17 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
                 "--summary-interval=0",
                 "--download-result=hide",
                 "--console-log-level=error",
-                # RPC enabled with a unique port per download.
-                # Our _start_aria2_rpc_monitor polls this port for real byte progress
-                # and per-connection segment data (IDM-style bars).
-                # The port overrides yt-dlp's Aria2cFD default so we stay in control.
-                "--enable-rpc=true",
-                f"--rpc-listen-port={_ytdlp_aria2_rpc_port}",
-                "--rpc-allow-origin-all=true",
+                # NOTE: --enable-rpc is intentionally NOT set here.
+                # With --enable-rpc, aria2c enters server mode and does NOT exit
+                # after completing the download — it waits for an aria2.shutdown RPC
+                # command.  yt-dlp's external_downloader subprocess management calls
+                # process.wait(), which then blocks forever, leaving the job stuck
+                # in "Processing / Merging" indefinitely.
+                # Progress is tracked via file-size polling instead (no port conflicts).
             ] + ([] if os.name == "nt" else [f"--stop-with-process={os.getpid()}"])
         }
-    else:
-        _ytdlp_aria2_rpc_port = 0
+    # Always 0 for yt-dlp+aria2 path: file-size polling handles progress, no RPC needed.
+    _ytdlp_aria2_rpc_port = 0
     monitor_stop_event: threading.Event | None = None
     monitor_thread: threading.Thread | None = None
 
@@ -6396,8 +6406,9 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
                     workspace_path=str(workspace),
                 )
             elif effective_engine == "aria2" and dl_type in {"video", "audio"}:
-                # Fallback: RPC unavailable (has_aria2() returned False mid-run or
-                # port allocation failed). Use file-size polling so the bar stays live.
+                # Primary path for yt-dlp+aria2: track progress by polling file sizes.
+                # RPC is not used here because --enable-rpc prevents aria2c from exiting
+                # after the download completes, causing ydl.download() to hang forever.
                 monitor_stop_event, monitor_thread = _start_external_downloader_progress_monitor(
                     dl_id,
                     workspace,
