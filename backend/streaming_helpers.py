@@ -265,6 +265,47 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
     if range_header:
         request_headers["Range"] = range_header
 
+    # ── Segment vs manifest detection ────────────────────────────────────────
+    # Video/audio segments (.ts, .m4s, .aac …) are streamed in 64 KB chunks so
+    # the browser receives the first bytes in ~50 ms instead of waiting for the
+    # entire 1–3 MB segment to buffer server-side first.
+    # HLS manifests (.m3u8) must still be fully buffered so we can rewrite URLs.
+    clean_path = url.split("?")[0].lower()
+    is_segment = any(
+        clean_path.endswith(ext)
+        for ext in (".ts", ".m4s", ".cmfa", ".cmfv", ".aac", ".m4a", ".mp4")
+    )
+
+    if is_segment:
+        # ── Chunked streaming path (fast) ─────────────────────────────────────
+        # httpx.stream keeps the upstream connection open and yields data as it
+        # arrives; no full-body buffer needed.
+        def _iter_segment():
+            try:
+                with httpx.stream(
+                    "GET", url,
+                    headers=request_headers,
+                    follow_redirects=True,
+                    timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0),
+                ) as r:
+                    if r.status_code not in (200, 206):
+                        return  # HLS.js will retry / failover
+                    for chunk in r.iter_bytes(65536):  # 64 KB chunks
+                        yield chunk
+            except Exception:
+                return  # client disconnected or CDN error — just stop
+
+        return StreamingResponse(
+            _iter_segment(),
+            status_code=200,
+            media_type="video/mp2t",
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "no-store",
+            },
+        )
+
+    # ── Full-buffer path for manifests and other resources ───────────────────
     try:
         with httpx.Client(timeout=20.0, follow_redirects=True) as client:
             upstream = client.get(url, headers=request_headers)

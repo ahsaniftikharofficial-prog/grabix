@@ -552,10 +552,17 @@ def _map_consumet_watch_payload(provider: str, payload: dict[str, Any]) -> list[
     if not headers:
         headers = {"Referer": "https://megacloud.blog/"}
 
+    # HiAnime / consumet returns subtitles at the TOP LEVEL of the payload,
+    # NOT inside each individual source object.  Using source.get("subtitles")
+    # always yields [] and makes the CC button say "off" even for sub episodes.
+    payload_subtitles: list[dict[str, Any]] = list(payload.get("subtitles") or [])
+
     mapped: list[dict[str, Any]] = []
     for index, source in enumerate(payload.get("sources") or []):
         if not isinstance(source, dict) or not source.get("url"):
             continue
+        # Prefer any source-level subtitles (rare), fall back to payload-level.
+        effective_subtitles = list(source.get("subtitles") or []) or payload_subtitles
         mapped.append(
             _stream_source(
                 source_id=str(source.get("id") or f"{provider}-watch-{index}"),
@@ -568,7 +575,7 @@ def _map_consumet_watch_payload(provider: str, payload: dict[str, Any]) -> list[
                 mime_type=str(source.get("mimeType") or ""),
                 external_url=str(source.get("externalUrl") or source.get("url") or ""),
                 can_extract=bool(source.get("canExtract", False)),
-                subtitles=list(source.get("subtitles") or []),
+                subtitles=effective_subtitles,
                 request_headers=headers,
                 language=str(source.get("language") or ""),
             )
