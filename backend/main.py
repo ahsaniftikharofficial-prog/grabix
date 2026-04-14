@@ -1731,7 +1731,6 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
 
     _set_cached_anime_resolution(payload, resolution)
     return resolution
-    )
 
 
 @app.get("/check-link")
