@@ -3380,6 +3380,10 @@ def _start_external_downloader_progress_monitor(
                         path.name.endswith(".part")
                         or ".part." in path.name
                         or path.suffix in {".ytdl", ".part"}
+                        # aria2 writes the real file directly (no .part suffix) and keeps
+                        # a sibling <filename>.aria2 metadata file while the download is
+                        # in progress. Detect that pattern so the monitor can see the data.
+                        or Path(str(path) + ".aria2").exists()
                     )
                 ]
                 total_downloaded = 0
@@ -6105,10 +6109,14 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         "windowsfilenames": True,
     }
     if effective_engine == "aria2" and has_aria2():
-        _ytdlp_aria2_rpc_port = 0   # RPC disabled for yt-dlp (see external_downloader_args comment)
+        # Allocate a fresh port for each download so each yt-dlp+aria2 session gets
+        # its own RPC endpoint. This avoids the Windows TIME_WAIT port-reuse conflict
+        # that occurred when both streams (video + audio) shared a fixed port.
+        _ytdlp_aria2_rpc_port = _aria2_find_free_port()
         controls = download_controls.get(dl_id)
         if controls is not None:
             controls["process_kind"] = "aria2"
+            controls["aria2_rpc_port"] = _ytdlp_aria2_rpc_port
         opts["external_downloader"] = ARIA2_PATH
         opts["external_downloader_args"] = {
             "default": [
@@ -6119,13 +6127,13 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
                 "--summary-interval=0",
                 "--download-result=hide",
                 "--console-log-level=error",
-                # NOTE: --enable-rpc is intentionally omitted here.
-                # yt-dlp invokes aria2 once per stream (video + audio for 1080p).
-                # Both calls use the same port. On Windows, the first aria2's port
-                # enters TIME_WAIT after exit, causing the second invocation to fail
-                # to bind the port and exit with an error, hanging yt-dlp in a
-                # retry loop. Progress for yt-dlp downloads is tracked via
-                # yt-dlp's own progress_hook instead.
+                # RPC enabled with a unique port per download.
+                # Our _start_aria2_rpc_monitor polls this port for real byte progress
+                # and per-connection segment data (IDM-style bars).
+                # The port overrides yt-dlp's Aria2cFD default so we stay in control.
+                "--enable-rpc=true",
+                f"--rpc-listen-port={_ytdlp_aria2_rpc_port}",
+                "--rpc-allow-origin-all=true",
             ] + ([] if os.name == "nt" else [f"--stop-with-process={os.getpid()}"])
         }
     else:
@@ -6195,9 +6203,18 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         yt_dlp = _get_yt_dlp()
         with yt_dlp.YoutubeDL(opts) as ydl:
             if effective_engine == "aria2" and dl_type in {"video", "audio"} and _ytdlp_aria2_rpc_port:
+                # RPC is now enabled — start our monitor for real % + IDM segment bars.
                 monitor_stop_event, monitor_thread = _start_aria2_rpc_monitor(
                     dl_id,
                     _ytdlp_aria2_rpc_port,
+                    expected_total_bytes=estimated_total_bytes,
+                )
+            elif effective_engine == "aria2" and dl_type in {"video", "audio"}:
+                # Fallback: RPC unavailable (has_aria2() returned False mid-run or
+                # port allocation failed). Use file-size polling so the bar stays live.
+                monitor_stop_event, monitor_thread = _start_external_downloader_progress_monitor(
+                    dl_id,
+                    workspace,
                     expected_total_bytes=estimated_total_bytes,
                 )
             ydl.download([url])
