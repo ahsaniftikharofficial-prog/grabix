@@ -1,5 +1,5 @@
 import Hls from "hls.js";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconAlert,
   IconArrowLeft,
@@ -79,17 +79,17 @@ const VARIANT_CACHE_TTL_MS = 1000 * 60 * 10;
 // Helpers
 // ---------------------------------------------------------------------------
 
+const PROVIDER_NAME_MAP: Record<string, string> = {
+  hianime: "HiAnime",
+  consumet: "Consumet",
+  aniwatch: "AniWatch",
+  gogoanime: "GogoAnime",
+  zoro: "Zoro",
+  "9anime": "9Anime",
+};
+
 function formatProviderName(provider: string): string {
-  const map: Record<string, string> = {
-    hianime: "HiAnime",
-    consumet: "Consumet",
-    aniwatch: "AniWatch",
-    gogoanime: "GogoAnime",
-    zoro: "Zoro",
-    "9anime": "9Anime",
-  };
-  const key = provider.trim().toLowerCase();
-  return map[key] ?? provider;
+  return PROVIDER_NAME_MAP[provider.trim().toLowerCase()] ?? provider;
 }
 
 function failureLabel(kind: FailureKind): string {
@@ -121,37 +121,15 @@ function parseTimestamp(value: string): number {
   return parts[0] ?? 0;
 }
 
-// Strip VTT/HTML inline tags (e.g. <c.white>, <i>, <b>, <00:00:01.000>, &amp; etc.)
-// so raw cue text can be rendered safely as plain text.
-function stripVttTags(text: string): string {
-  return text
-    .replace(/<[^>]+>/g, "")      // remove all HTML/VTT tags
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&#39;/g, "'")
-    .replace(/&quot;/g, "\"")
-    .trim();
-}
-
 function parseSubtitleText(content: string): SubtitleCue[] {
   const normalized = (content || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
   if (!normalized) return [];
-
-  // Strip the WEBVTT header line (may include optional description: "WEBVTT - My file")
-  // and any leading NOTE / STYLE / REGION blocks before the first cue.
-  const withoutHeader = /^WEBVTT/i.test(normalized)
-    ? normalized.replace(/^WEBVTT[^\n]*\n((?:(?!-->)[^\n]*\n)*\n)*/i, "")
-    : normalized;
-
-  const blocks = withoutHeader
-    .split(/\n\s*\n/)
-    .map((block) => block.trim())
-    .filter(Boolean);
+  const rawBlocks = normalized.replace(/^WEBVTT[^\n]*\n/i, "").split(/\n\s*\n/);
   const cues: SubtitleCue[] = [];
-  for (const block of blocks) {
-    const lines = block.split("\n").map((line) => line.trimEnd()).filter(Boolean);
+  for (const block of rawBlocks) {
+    const trimmed = block.trim();
+    if (!trimmed) continue;
+    const lines = trimmed.split("\n").map((line) => line.trimEnd()).filter(Boolean);
     if (lines.length < 2) continue;
     const timeLineIndex = lines.findIndex((line) => line.includes("-->"));
     if (timeLineIndex === -1) continue;
@@ -162,11 +140,22 @@ function parseSubtitleText(content: string): SubtitleCue[] {
     const end = parseTimestamp(endRaw.split(" ")[0]);
     const textLines = lines.slice(timeLineIndex + 1);
     if (!textLines.length) continue;
-    const text = stripVttTags(textLines.join("\n"));
-    if (!text) continue; // skip empty cues after tag-stripping
-    cues.push({ start, end, text });
+    cues.push({ start, end, text: textLines.join("\n") });
   }
   return cues;
+}
+
+// O(log n) binary search — replaces O(n) .find() in the hot subtitle tick path
+function findCurrentCue(cues: SubtitleCue[], t: number): SubtitleCue | null {
+  let lo = 0, hi = cues.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    const cue = cues[mid];
+    if (t < cue.start) hi = mid - 1;
+    else if (t > cue.end) lo = mid + 1;
+    else return cue;
+  }
+  return null;
 }
 
 function qualityScore(label: string): number {
@@ -182,11 +171,13 @@ function pickBestVariant(
   variants: Array<{ label: string; url: string; bandwidth?: string }>
 ): { label: string; url: string; bandwidth?: string } | null {
   if (!variants.length) return null;
-  return [...variants].sort((left, right) => {
-    const qualityDiff = qualityScore(right.label) - qualityScore(left.label);
-    if (qualityDiff !== 0) return qualityDiff;
-    return Number(right.bandwidth || 0) - Number(left.bandwidth || 0);
-  })[0];
+  return variants.reduce((best, v) => {
+    const bScore = qualityScore(best.label);
+    const vScore = qualityScore(v.label);
+    if (vScore > bScore) return v;
+    if (vScore === bScore && Number(v.bandwidth || 0) > Number(best.bandwidth || 0)) return v;
+    return best;
+  });
 }
 
 function readPlaybackCache<T>(key: string): T | null {
@@ -636,6 +627,16 @@ const PLAYER_STYLES = `
   }
 `;
 
+// Inject styles once at module load — never re-diffed by React VDOM
+if (typeof document !== "undefined") {
+  if (!document.getElementById("gx-player-styles")) {
+    const _s = document.createElement("style");
+    _s.id = "gx-player-styles";
+    _s.textContent = PLAYER_STYLES;
+    document.head.appendChild(_s);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -667,15 +668,14 @@ export default function VidSrcPlayer({
   const hlsRef = useRef<Hls | null>(null);
   const [hlsLevels, setHlsLevels] = useState<Array<{ height: number; bitrate: number }>>([]);
   const [selectedHlsLevel, setSelectedHlsLevel] = useState<number>(-1);
-  const [qualityMenuOpen, setQualityMenuOpen] = useState(false);
   const hideChromeTimeoutRef = useRef<number | null>(null);
   const subtitleInputRef = useRef<HTMLInputElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
   const mediaNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
   const embedLoadedRef = useRef(false);
-  const progressBarRef = useRef<HTMLDivElement>(null);
   const progressBarWidthRef = useRef(0);
+  const progressBarRef = useRef<HTMLDivElement>(null);
 
   // Thumbnail preview refs
   const previewVideoRef = useRef<HTMLVideoElement>(null);
@@ -683,6 +683,37 @@ export default function VidSrcPlayer({
   const previewThrottleRef = useRef<number>(0);
   const previewHoveringRef = useRef(false);
   const previewSeekedCleanupRef = useRef<(() => void) | null>(null);
+
+  // Direct-DOM refs for progress bar — bypass React for the 4–25×/sec timeupdate hot path
+  const currentTimeRef = useRef(0);
+  const durationRef = useRef(0);
+  const fillRef = useRef<HTMLDivElement>(null);
+  const thumbRef = useRef<HTMLDivElement>(null);
+  const bufferRef = useRef<HTMLDivElement>(null);
+  const rangeRef = useRef<HTMLInputElement>(null);
+  const timeDisplayRef = useRef<HTMLSpanElement>(null);
+
+  // Subtitle refs — binary search tick, avoids O(n) scan + avoids redundant setState
+  const subtitleCuesRef = useRef<SubtitleCue[]>([]);
+  const currentCueRef = useRef("");
+
+  // State-mirror refs for showControls stale-closure fix
+  const isPlayingRef = useRef(true);
+  const errorTextRef = useRef("");
+  const settingsOpenRef = useRef(false);
+  const episodeMenuOpenRef = useRef(false);
+
+  // Subtitle tick — called from handleTimeUpdate, no React involvement unless cue changes
+  const subtitleTickRef = useRef((t: number) => {
+    const cues = subtitleCuesRef.current;
+    if (!cues.length) return;
+    const cue = findCurrentCue(cues, t);
+    const text = cue?.text ?? "";
+    if (text !== currentCueRef.current) {
+      currentCueRef.current = text;
+      setCurrentCue(text);
+    }
+  });
 
   const [activeSubtitleText, setActiveSubtitleText] = useState(subtitle || "");
   const [activeSearchTitle, setActiveSearchTitle] = useState(subtitleSearchTitle || title);
@@ -718,14 +749,9 @@ export default function VidSrcPlayer({
   const [resolvedPlaybackUrl, setResolvedPlaybackUrl] = useState("");
   const [showChrome, setShowChrome] = useState(true);
   const [episodeMenuOpen, setEpisodeMenuOpen] = useState(false);
-  const [serverMenuOpen, setServerMenuOpen] = useState(false);
-  const [volumeMenuOpen, setVolumeMenuOpen] = useState(false);
-  const [subtitleMenuOpen, setSubtitleMenuOpen] = useState(false);
   const [volumeBoost, setVolumeBoost] = useState(100);
   const [isPlaying, setIsPlaying] = useState(true);
-  const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [buffered, setBuffered] = useState(0);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [subtitleUrl, setSubtitleUrl] = useState("");
@@ -734,7 +760,6 @@ export default function VidSrcPlayer({
   const [showSubtitlePanel, setShowSubtitlePanel] = useState(false);
   const [subtitleCues, setSubtitleCues] = useState<SubtitleCue[]>([]);
   const [currentCue, setCurrentCue] = useState("");
-  const [subtitleHint, setSubtitleHint] = useState("");
   const [activeSourceOptionId, setActiveSourceOptionId] = useState(sourceOptions?.[0]?.id ?? "");
   const [extracting, setExtracting] = useState(false);
   const [extractError, setExtractError] = useState("");
@@ -751,13 +776,27 @@ export default function VidSrcPlayer({
     x: number; time: number; dataUrl: string; visible: boolean;
   } | null>(null);
 
-  // Derived
+  // Derived — memoized so downstream useCallbacks don't re-create on every render
   const activeSource = allSources[activeIndex] ?? null;
   const activeSubtitles = activeSource?.subtitles ?? [];
   const hasFallback = activeIndex < allSources.length - 1;
-  const isMovieBoxQualityMode = allSources.length > 0 && allSources.every(s => s.provider.toLowerCase().includes("moviebox") || s.provider.toLowerCase().includes("movie box"));
-  const isDirectEngine = activeSource?.kind === "direct" || activeSource?.kind === "hls" || activeSource?.kind === "local";
-  const isEmbedEngine = activeSource?.kind === "embed";
+  const isMovieBoxQualityMode = useMemo(
+    () => allSources.length > 0 && allSources.every(s => s.provider.toLowerCase().includes("moviebox") || s.provider.toLowerCase().includes("movie box")),
+    [allSources]
+  );
+  const isDirectEngine = useMemo(
+    () => activeSource?.kind === "direct" || activeSource?.kind === "hls" || activeSource?.kind === "local",
+    [activeSource]
+  );
+  const isEmbedEngine = useMemo(() => activeSource?.kind === "embed", [activeSource]);
+  const isAnimeQualityMode = useMemo(
+    () => allSources.length > 1 && allSources.every(s => Boolean(s.quality) && !s.provider.toLowerCase().includes("moviebox")),
+    [allSources]
+  );
+  const hasQualityOptions = useMemo(
+    () => hlsLevels.length > 1 || isMovieBoxQualityMode || isAnimeQualityMode,
+    [hlsLevels, isMovieBoxQualityMode, isAnimeQualityMode]
+  );
 
   useEffect(() => {
     setRuntimeSources(sources ?? []);
@@ -768,19 +807,25 @@ export default function VidSrcPlayer({
 
   useEffect(() => { setActiveSourceOptionId(sourceOptions?.[0]?.id ?? ""); }, [sourceOptions]);
 
-  // Chrome visibility
-  const showControls = () => {
+  // Keep state-mirror refs in sync (used by showControls to avoid stale closures)
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
+  useEffect(() => { errorTextRef.current = errorText; }, [errorText]);
+  useEffect(() => { settingsOpenRef.current = settingsOpen; }, [settingsOpen]);
+  useEffect(() => { episodeMenuOpenRef.current = episodeMenuOpen; }, [episodeMenuOpen]);
+  useEffect(() => { subtitleCuesRef.current = subtitleCues; }, [subtitleCues]);
+
+  // Chrome visibility — stable forever (no stale closures; all state reads via refs)
+  const showControls = useCallback(() => {
     setShowChrome(true);
     if (hideChromeTimeoutRef.current) window.clearTimeout(hideChromeTimeoutRef.current);
-    // Never auto-hide when there's an error, menus open, or video is paused
-    if (errorText || settingsOpen || serverMenuOpen || volumeMenuOpen || subtitleMenuOpen || qualityMenuOpen || episodeMenuOpen) return;
+    if (errorTextRef.current || settingsOpenRef.current || episodeMenuOpenRef.current) return;
     hideChromeTimeoutRef.current = window.setTimeout(() => {
-      if (isPlaying && !errorText) setShowChrome(false);
+      if (isPlayingRef.current && !errorTextRef.current) setShowChrome(false);
     }, 3000);
-  };
+  }, []);
 
   useEffect(() => { setActiveIndex(0); setHlsLevels([]); setSelectedHlsLevel(-1); }, [baseSources]);
-  useEffect(() => { showControls(); return () => { if (hideChromeTimeoutRef.current) window.clearTimeout(hideChromeTimeoutRef.current); }; }, [episodeMenuOpen, serverMenuOpen, volumeMenuOpen, subtitleMenuOpen, showSubtitlePanel, settingsOpen]);
+  useEffect(() => { showControls(); return () => { if (hideChromeTimeoutRef.current) window.clearTimeout(hideChromeTimeoutRef.current); }; }, [episodeMenuOpen, showSubtitlePanel, settingsOpen, showControls]);
 
   // Keep controls visible when paused or errored
   useEffect(() => {
@@ -800,8 +845,8 @@ export default function VidSrcPlayer({
   // Fullscreen listener
   useEffect(() => {
     const onChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
-    document.addEventListener("fullscreenechange", onChange);
-    return () => document.removeEventListener("fullscreenechange", onChange);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
   }, []);
 
   // Keyboard shortcuts
@@ -875,9 +920,6 @@ export default function VidSrcPlayer({
     setStatusText(activeSource ? `Loading ${activeSource.provider}` : "No source");
     setResolvedEmbedUrl("");
     setEpisodeMenuOpen(false);
-    setServerMenuOpen(false);
-    setVolumeMenuOpen(false);
-    setSubtitleMenuOpen(false);
     setShowSubtitlePanel(false);
     setExtractError("");
     embedLoadedRef.current = false;
@@ -939,7 +981,13 @@ export default function VidSrcPlayer({
     video.pause();
     video.removeAttribute("src");
     video.load();
-    setCurrentTime(0);
+    currentTimeRef.current = 0;
+    durationRef.current = 0;
+    if (fillRef.current) fillRef.current.style.width = "0%";
+    if (thumbRef.current) thumbRef.current.style.left = "0%";
+    if (bufferRef.current) bufferRef.current.style.width = "0%";
+    if (rangeRef.current) { rangeRef.current.value = "0"; rangeRef.current.max = "0"; }
+    if (timeDisplayRef.current) timeDisplayRef.current.textContent = "0:00";
     setDuration(0);
     let sourceReady = false;
     let shouldRestoreAudioAfterStart = false;
@@ -979,12 +1027,28 @@ export default function VidSrcPlayer({
     };
     const handlePause = () => setIsPlaying(false);
     const handleTimeUpdate = () => {
-      setCurrentTime(video.currentTime);
-      if (video.buffered.length > 0 && video.duration) {
-        setBuffered((video.buffered.end(video.buffered.length - 1) / video.duration) * 100);
+      const t = video.currentTime;
+      const d = durationRef.current || video.duration || 0;
+      currentTimeRef.current = t;
+      // Update progress bar DOM directly — zero React involvement on this hot path
+      const pct = d > 0 ? Math.min((t / d) * 100, 100) : 0;
+      const pctStr = `${pct}%`;
+      if (fillRef.current) fillRef.current.style.width = pctStr;
+      if (thumbRef.current) thumbRef.current.style.left = pctStr;
+      if (rangeRef.current) rangeRef.current.value = String(t);
+      if (timeDisplayRef.current) timeDisplayRef.current.textContent = formatTime(t);
+      if (bufferRef.current && video.buffered.length > 0 && d > 0) {
+        bufferRef.current.style.width = `${(video.buffered.end(video.buffered.length - 1) / d) * 100}%`;
       }
+      // Subtitle lookup via binary search — only setState when cue actually changes
+      subtitleTickRef.current(t);
     };
-    const handleDurationChange = () => setDuration(video.duration || 0);
+    const handleDurationChange = () => {
+      const d = video.duration || 0;
+      durationRef.current = d;
+      setDuration(d);
+      if (rangeRef.current) rangeRef.current.max = String(d);
+    };
     const handleVolumeChange = () => { setVolume(video.volume); setIsMuted(video.muted); };
     video.addEventListener("canplay", handleCanPlay);
     video.addEventListener("loadedmetadata", handleLoadedMetadata);
@@ -1047,7 +1111,7 @@ export default function VidSrcPlayer({
       pv.src = activeSource.url;
     }
     pv.muted = true;
-    pv.preload = "metadata";
+    pv.preload = "none";
   }, [activeSource, isDirectEngine, resolvedPlaybackUrl]);
 
   // Audio boost
@@ -1084,61 +1148,29 @@ export default function VidSrcPlayer({
     if (subtitleUrl.startsWith("blob:")) URL.revokeObjectURL(subtitleUrl);
     const firstSubtitle = activeSubtitles[0];
     if (firstSubtitle?.url) { setSubtitleUrl(firstSubtitle.url); setSubtitleName(firstSubtitle.label); setSubtitlesEnabled(true); return; }
-    setSubtitleUrl(""); setSubtitleName(""); setSubtitlesEnabled(false); setSubtitleCues([]); setCurrentCue(""); setSubtitleHint("");
+    currentCueRef.current = "";
+    setSubtitleUrl(""); setSubtitleName(""); setSubtitlesEnabled(false); setSubtitleCues([]); setCurrentCue("");
   }, [activeSource]);
 
   useEffect(() => {
     if (!subtitleUrl || subtitleUrl.startsWith("blob:")) return;
     let cancelled = false;
-
-    const fetchSubtitleContent = async (): Promise<string> => {
-      // Fast path: try fetching the subtitle URL directly.
-      // This works for CORS-permissive sources (e.g. OpenSubtitles, local blobs).
-      try {
-        const directCtrl = new AbortController();
-        const directTimer = window.setTimeout(() => directCtrl.abort(), 6000);
-        try {
-          const res = await fetch(subtitleUrl, { signal: directCtrl.signal });
-          if (res.ok) return await res.text();
-        } finally {
-          window.clearTimeout(directTimer);
-        }
-      } catch {
-        // CORS policy, missing Referer, or network error —
-        // HiAnime / MegaCloud CDN subtitles always land here.
-      }
-
-      // Backend proxy path: the server has no CORS restrictions and forwards
-      // the correct Referer/headers to CDN subtitle endpoints.
-      const proxyUrl =
-        `${API}/subtitles/download?url=${encodeURIComponent(subtitleUrl)}` +
-        `&title=subtitle&language=en&type=anime&source=player&format=vtt`;
-      const res = await fetch(proxyUrl);
-      if (!res.ok) throw new Error(`Subtitle proxy failed with ${res.status}`);
-      return await res.text();
-    };
-
-    fetchSubtitleContent()
-      .then((content) => {
-        if (cancelled) return;
-        const cues = parseSubtitleText(content);
-        setSubtitleCues(cues);
-        if (cues.length > 0) setSubtitleHint(`Subtitles loaded. Next line at ${formatTime(cues[0].start)}.`);
-      })
-      .catch(() => { if (!cancelled) setSubtitleCues([]); });
-
+    fetch(subtitleUrl).then((response) => { if (!response.ok) throw new Error(`Subtitle load failed with ${response.status}`); return response.text(); }).then((content) => {
+      if (cancelled) return;
+      const parse = () => { if (!cancelled) setSubtitleCues(parseSubtitleText(content)); };
+      if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(parse);
+      else window.setTimeout(parse, 0);
+    }).catch(() => { if (!cancelled) setSubtitleCues([]); });
     return () => { cancelled = true; };
   }, [subtitleUrl]);
 
   useEffect(() => {
-    if (!subtitleCues.length) { setCurrentCue(""); setSubtitleHint(""); return; }
-    const cue = subtitleCues.find((item) => currentTime >= item.start && currentTime <= item.end);
-    setCurrentCue(cue?.text ?? "");
-    if (cue) { setSubtitleHint(""); return; }
-    const nextCue = subtitleCues.find((item) => item.start > currentTime);
-    if (nextCue) { setSubtitleHint(`Subtitles loaded. Next line at ${formatTime(nextCue.start)}.`); return; }
-    setSubtitleHint("Subtitles loaded.");
-  }, [currentTime, subtitleCues]);
+    // When subtitle cues are cleared, reset the displayed cue immediately
+    if (!subtitleCues.length) {
+      currentCueRef.current = "";
+      setCurrentCue("");
+    }
+  }, [subtitleCues]);
 
   // Playback speed sync
   useEffect(() => {
@@ -1152,7 +1184,7 @@ export default function VidSrcPlayer({
 
   const handleSourceSwitch = (index: number) => {
     setActiveIndex(index); setErrorText(""); setFallbackNotice(""); setExtractError("");
-    setReloadKey((key) => key + 1); setEpisodeMenuOpen(false); setServerMenuOpen(false);
+    setReloadKey((key) => key + 1); setEpisodeMenuOpen(false);
     setSettingsOpen(false); showControls();
   };
 
@@ -1181,17 +1213,17 @@ export default function VidSrcPlayer({
       extractedSourcesRef.current = []; setExtractedSources([]); setRuntimeSources(next.sources);
       setActiveSubtitleText(next.subtitle || ""); setActiveSearchTitle(next.subtitleSearchTitle || title);
       setActiveSourceOptionId(optionId); setActiveIndex(0); setReloadKey((key) => key + 1);
-      setServerMenuOpen(false); setSettingsOpen(false);
+      setSettingsOpen(false);
     } catch (error) { setFallbackNotice(error instanceof Error ? error.message : "Could not switch server."); }
     finally { setEpisodeLoading(false); }
   };
 
-  const togglePlayback = () => {
+  const togglePlayback = useCallback(() => {
     const video = videoRef.current;
     if (!video || !isDirectEngine) return;
     if (video.paused) void video.play().catch(() => {}); else video.pause();
     showControls();
-  };
+  }, [isDirectEngine, showControls]);
 
   const toggleFullscreen = async () => {
     try {
@@ -1202,9 +1234,16 @@ export default function VidSrcPlayer({
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const video = videoRef.current;
-    if (!video || !duration) return;
+    if (!video) return;
     const nextTime = Number(e.target.value);
-    video.currentTime = nextTime; setCurrentTime(nextTime); showControls();
+    video.currentTime = nextTime;
+    currentTimeRef.current = nextTime;
+    const d = durationRef.current || video.duration || 0;
+    const pct = d > 0 ? Math.min((nextTime / d) * 100, 100) : 0;
+    if (fillRef.current) fillRef.current.style.width = `${pct}%`;
+    if (thumbRef.current) thumbRef.current.style.left = `${pct}%`;
+    if (timeDisplayRef.current) timeDisplayRef.current.textContent = formatTime(nextTime);
+    showControls();
   };
 
   const onSubtitlePicked = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1213,57 +1252,44 @@ export default function VidSrcPlayer({
     if (subtitleUrl.startsWith("blob:")) URL.revokeObjectURL(subtitleUrl);
     const objectUrl = URL.createObjectURL(file);
     setSubtitleUrl(objectUrl); setSubtitleName(file.name); setSubtitlesEnabled(true);
-    setSubtitleCues([]); setCurrentCue(""); setSubtitleHint("Subtitle track loaded.");
-    setSubtitleMenuOpen(false); setShowSubtitlePanel(false);
+    currentCueRef.current = "";
+    setSubtitleCues([]); setCurrentCue("");
+    setShowSubtitlePanel(false);
     setFallbackNotice(`Loaded subtitles: ${file.name}`); event.target.value = "";
   };
 
   const handleSubtitleSelect = (url: string, label: string) => {
     if (subtitleUrl.startsWith("blob:") && subtitleUrl !== url) URL.revokeObjectURL(subtitleUrl);
     setSubtitleUrl(url); setSubtitleName(label); setSubtitlesEnabled(true);
-    setSubtitleCues([]); setCurrentCue(""); setSubtitleHint("Subtitle track loaded.");
-    setSubtitleMenuOpen(false); setShowSubtitlePanel(false); setFallbackNotice(`Loaded subtitles: ${label}`);
+    currentCueRef.current = "";
+    setSubtitleCues([]); setCurrentCue("");
+    setShowSubtitlePanel(false); setFallbackNotice(`Loaded subtitles: ${label}`);
   };
 
   const clearSubtitles = () => {
     if (subtitleUrl.startsWith("blob:")) URL.revokeObjectURL(subtitleUrl);
     setSubtitleUrl(""); setSubtitleName(""); setSubtitlesEnabled(false);
-    setSubtitleCues([]); setCurrentCue(""); setSubtitleHint("Subtitles off."); setSubtitleMenuOpen(false);
+    currentCueRef.current = "";
+    setSubtitleCues([]); setCurrentCue("");
   };
 
   const toggleSubtitles = () => {
     if (activeSubtitles.length > 0 || subtitleUrl) {
-      if (subtitlesEnabled) {
-        // Turn subtitles OFF — clear everything
-        clearSubtitles();
-        return;
-      }
-      // Turn subtitles ON — reload the first available track.
-      // We always clear cues first so the fetch useEffect re-runs even if
-      // the URL hasn't changed (e.g. toggling off then on again).
+      if (subtitlesEnabled) { clearSubtitles(); return; }
       const firstSubtitle = activeSubtitles[0];
-      if (firstSubtitle?.url) {
-        if (subtitleUrl.startsWith("blob:") && subtitleUrl !== firstSubtitle.url) URL.revokeObjectURL(subtitleUrl);
-        setSubtitleUrl("");                         // force useEffect to re-fire on next tick
-        setSubtitleCues([]); setCurrentCue("");
-        setTimeout(() => {
-          setSubtitleUrl(firstSubtitle.url);
-          setSubtitleName(firstSubtitle.label);
-          setSubtitlesEnabled(true);
-        }, 0);
-      }
+      if (firstSubtitle?.url) handleSubtitleSelect(firstSubtitle.url, firstSubtitle.label);
       return;
     }
-    if (disableSubtitleSearch) { setSubtitleHint("No subtitles available for this source."); return; }
+    if (disableSubtitleSearch) { return; }
     setShowSubtitlePanel((open) => !open);
   };
 
   const handleSubtitleLoaded = (content: string, label: string) => {
     if (subtitleUrl.startsWith("blob:")) URL.revokeObjectURL(subtitleUrl);
     const cues = parseSubtitleText(content);
+    currentCueRef.current = "";
     setSubtitleUrl(""); setSubtitleName(label); setSubtitleCues(cues); setCurrentCue("");
-    setSubtitleHint(cues.length > 0 ? `Subtitles loaded. Next line at ${formatTime(cues[0].start)}.` : "Subtitle file loaded, but no timed lines were found.");
-    setSubtitleMenuOpen(false); setShowSubtitlePanel(false); setFallbackNotice(`Loaded subtitles: ${label}`);
+    setShowSubtitlePanel(false); setFallbackNotice(`Loaded subtitles: ${label}`);
   };
 
   const extractDirectStreamUrl = async (targetUrl: string): Promise<{ url: string; quality?: string; format?: string }> => {
@@ -1292,7 +1318,7 @@ export default function VidSrcPlayer({
       extractedSourcesRef.current = [...extractedSourcesRef.current, extracted];
       const newIndex = baseSources.length + extractedSourcesRef.current.length - 1;
       setExtractedSources([...extractedSourcesRef.current]); setActiveIndex(newIndex);
-      setReloadKey((k) => k + 1); setServerMenuOpen(false); setSettingsOpen(false);
+      setReloadKey((k) => k + 1); setSettingsOpen(false);
       setFallbackNotice(`Extracted a direct stream from ${activeSource.provider}. Switched to it.`);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown extraction error";
@@ -1393,29 +1419,27 @@ export default function VidSrcPlayer({
     return () => { cancelled = true; };
   }, [activeSource, baseSources.length, volumeBoost]);
 
-  const handleShellClick = (event: React.MouseEvent<HTMLDivElement>) => {
+  const handleShellClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
     if (showSubtitlePanel && !target.closest("[data-subtitle-panel='true']")) setShowSubtitlePanel(false);
     if (settingsOpen && !target.closest("[data-settings='true']")) { setSettingsOpen(false); setSettingsScreen("main"); }
     if (target.closest("button, input, select, textarea, a")) { showControls(); return; }
     if (target.closest("[data-subtitle-panel='true']")) { showControls(); return; }
     if (target.closest("[data-settings='true']")) { showControls(); return; }
-    if (serverMenuOpen) setServerMenuOpen(false);
-    if (volumeMenuOpen) setVolumeMenuOpen(false);
-    if (subtitleMenuOpen) setSubtitleMenuOpen(false);
     if (episodeMenuOpen) setEpisodeMenuOpen(false);
     if (isDirectEngine) { togglePlayback(); return; }
     showControls();
-  };
+  }, [showSubtitlePanel, settingsOpen, episodeMenuOpen, isDirectEngine, showControls, togglePlayback]);
 
   // Progress bar hover (thumbnail preview)
-  const handleProgressHover = (e: React.MouseEvent<HTMLDivElement>) => {
+  const handleProgressHover = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     previewHoveringRef.current = true;
-    if (!duration) return;
+    const d = durationRef.current;
+    if (!d) return;
     const rect = e.currentTarget.getBoundingClientRect();
     progressBarWidthRef.current = rect.width;
     const ratio = Math.max(0, Math.min((e.clientX - rect.left) / rect.width, 1));
-    const hoverTime = ratio * duration;
+    const hoverTime = ratio * d;
     const x = e.clientX - rect.left;
 
     if (!isDirectEngine) {
@@ -1434,7 +1458,6 @@ export default function VidSrcPlayer({
     const canvas = previewCanvasRef.current;
     if (!pv || !canvas) { setHoverPreview({ x, time: hoverTime, dataUrl: "", visible: true }); return; }
 
-    // Cancel any pending seeked listener to avoid stale frame updates
     if (previewSeekedCleanupRef.current) { previewSeekedCleanupRef.current(); previewSeekedCleanupRef.current = null; }
 
     pv.currentTime = hoverTime;
@@ -1453,7 +1476,7 @@ export default function VidSrcPlayer({
     };
     pv.addEventListener("seeked", onSeeked);
     previewSeekedCleanupRef.current = () => pv.removeEventListener("seeked", onSeeked);
-  };
+  }, [isDirectEngine]);
 
   const handleProgressLeave = () => {
     previewHoveringRef.current = false;
@@ -1465,9 +1488,6 @@ export default function VidSrcPlayer({
   const currentQualityLabel = selectedHlsLevel === -1
     ? "Auto"
     : hlsLevels[selectedHlsLevel]?.height ? `${hlsLevels[selectedHlsLevel].height}p` : "Auto";
-
-  const isAnimeQualityMode = allSources.length > 1 && allSources.every(s => Boolean(s.quality) && !s.provider.toLowerCase().includes("moviebox"));
-  const hasQualityOptions = hlsLevels.length > 1 || isMovieBoxQualityMode || isAnimeQualityMode;
 
   const currentServerLabel = (() => {
     if (sourceOptions && sourceOptions.length > 0) {
@@ -1484,11 +1504,9 @@ export default function VidSrcPlayer({
     <div
       ref={rootRef}
       className={`gx-player${showChrome ? " controls-visible" : ""}`}
-      onMouseMove={() => { showControls(); }}
+      onMouseMove={showControls}
       onClick={handleShellClick}
     >
-      <style>{PLAYER_STYLES}</style>
-
       <input ref={subtitleInputRef} type="file" accept=".vtt,text/vtt" style={{ display: "none" }} onChange={onSubtitlePicked} />
       {/* Hidden elements for preview generation */}
       <video ref={previewVideoRef} style={{ display: "none" }} muted playsInline crossOrigin="anonymous" />
@@ -1515,7 +1533,7 @@ export default function VidSrcPlayer({
           playsInline
           preload="auto"
           poster={poster}
-          onClick={(event) => { event.stopPropagation(); setShowSubtitlePanel(false); setServerMenuOpen(false); setVolumeMenuOpen(false); setSubtitleMenuOpen(false); setSettingsOpen(false); togglePlayback(); }}
+          onClick={(event) => { event.stopPropagation(); setShowSubtitlePanel(false); setSettingsOpen(false); togglePlayback(); }}
         >
         </video>
       )}
@@ -1636,16 +1654,17 @@ export default function VidSrcPlayer({
               )}
 
               <div className="gx-progress-track">
-                <div className="gx-progress-buffer" style={{ width: `${buffered}%` }} />
-                <div className="gx-progress-fill" style={{ width: `${duration ? Math.min((currentTime / duration) * 100, 100) : 0}%` }} />
-                <div className="gx-progress-thumb" style={{ left: `${duration ? Math.min((currentTime / duration) * 100, 100) : 0}%` }} />
+                <div ref={bufferRef} className="gx-progress-buffer" style={{ width: "0%" }} />
+                <div ref={fillRef} className="gx-progress-fill" style={{ width: "0%" }} />
+                <div ref={thumbRef} className="gx-progress-thumb" style={{ left: "0%" }} />
                 <input
+                  ref={rangeRef}
                   className="gx-progress-input"
                   type="range"
                   min={0}
                   max={duration || 0}
                   step={0.1}
-                  value={Math.min(currentTime, duration || 0)}
+                  defaultValue={0}
                   onChange={handleSeek}
                 />
               </div>
@@ -1731,7 +1750,7 @@ export default function VidSrcPlayer({
             {/* Center: time */}
             {isDirectEngine && (
               <div className="gx-ctrl-center">
-                {formatTime(currentTime)} / {formatTime(duration)}
+                <span ref={timeDisplayRef}>0:00</span> / {formatTime(duration)}
               </div>
             )}
 

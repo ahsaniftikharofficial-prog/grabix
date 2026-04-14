@@ -2914,6 +2914,9 @@ def _is_direct_media_url(url: str) -> bool:
     parsed = urlparse(lowered)
     if "/moviebox/proxy-stream" in lowered:
         return True
+    # .m3u8 / .m3u are HLS playlists — treat as direct so Fetch skips yt-dlp
+    if parsed.path.endswith((".m3u8", ".m3u")):
+        return True
     return parsed.path.endswith((".mp4", ".m4v", ".mov", ".webm", ".mkv"))
 
 
@@ -4407,7 +4410,24 @@ def _download_hls_media(
     controls = download_controls[dl_id]
 
     # ── Build request headers (Referer injection, same as before) ────────────
-    request_headers: dict[str, str] = {"User-Agent": "Mozilla/5.0"}
+    # Use a full Chrome UA — bare "Mozilla/5.0" is rejected by Cloudflare and
+    # most anime CDNs.  The Sec-Fetch-* and Accept headers mimic a real browser
+    # navigation request so CDN anti-bot checks pass.
+    _CHROME_UA = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+    request_headers: dict[str, str] = {
+        "User-Agent":      _CHROME_UA,
+        "Accept":          "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection":      "keep-alive",
+        "Sec-Fetch-Dest":  "empty",
+        "Sec-Fetch-Mode":  "cors",
+        "Sec-Fetch-Site":  "cross-site",
+    }
     request_headers.update(headers or {})
     _has_referer = any(k.lower() == "referer" for k in request_headers)
     if not _has_referer:
@@ -4494,8 +4514,6 @@ def _download_hls_media(
         _lock = threading.Lock()
         _completed = [0]
         _total_bytes = [0]
-        # Rolling speed window: (timestamp, cumulative_bytes) samples
-        _speed_samples: list[tuple[float, int]] = [(time.monotonic(), 0)]
 
         downloads[dl_id].update({
             "partial_file_path": str(seg_dir),
@@ -4506,6 +4524,13 @@ def _download_hls_media(
         })
         _persist_download_record(dl_id, force=True)
 
+        # ── Resume: count segments already on disk from a previous attempt ──
+        for _ri in range(total_segs):
+            _rp = seg_dir / f"seg_{_ri:06d}.ts"
+            if _rp.exists() and _rp.stat().st_size > 0:
+                _completed[0] += 1
+                _total_bytes[0] += _rp.stat().st_size
+
         def _download_seg(args: tuple[int, str]) -> tuple[int, Path]:
             idx, seg_url = args
             if controls["cancel"].is_set():
@@ -4513,6 +4538,9 @@ def _download_hls_media(
             while controls["pause"].is_set() and not controls["cancel"].is_set():
                 time.sleep(0.2)
             seg_path = seg_dir / f"seg_{idx:06d}.ts"
+            # RESUME: skip if segment was already fully downloaded
+            if seg_path.exists() and seg_path.stat().st_size > 0:
+                return idx, seg_path
             last_exc: Exception = RuntimeError("segment download failed")
             for attempt in range(4):
                 try:
@@ -4522,26 +4550,12 @@ def _download_hls_media(
                     with _lock:
                         _completed[0] += 1
                         _total_bytes[0] += seg_len
-                        _now = time.monotonic()
-                        _speed_samples.append((_now, _total_bytes[0]))
-                        # Keep only last 5 s of samples
-                        _cutoff = _now - 5.0
-                        while len(_speed_samples) > 2 and _speed_samples[0][0] < _cutoff:
-                            _speed_samples.pop(0)
-                        # Speed = bytes delta over time delta of window
-                        _window_bytes = _total_bytes[0] - _speed_samples[0][1]
-                        _window_secs  = max(_now - _speed_samples[0][0], 0.001)
-                        _speed_bps    = _window_bytes / _window_secs
-                        _done         = _completed[0]
-                        _pct          = round(_done / total_segs * 100, 1)
-                        _remaining    = total_segs - _done
-                        _eta_secs     = int(_remaining / max(_done / max(_now - _speed_samples[0][0] + 0.001, 0.001), 0.001)) if _done else 0
+                        _done = _completed[0]
+                        _pct  = round(_done / total_segs * 100, 1)
                         downloads[dl_id].update({
                             "percent":          _pct,
                             "bytes_downloaded": _total_bytes[0],
                             "downloaded":       _format_bytes(_total_bytes[0]),
-                            "speed":            f"{_format_bytes(_speed_bps)}/s",
-                            "eta":              _format_eta(_eta_secs) if _eta_secs > 0 else "",
                             "stage_label":      f"Downloading ({_done}/{total_segs} segments)",
                             "progress_mode":    "determinate",
                         })
@@ -4555,18 +4569,51 @@ def _download_hls_media(
                         time.sleep(min(2 ** attempt, 8))
             raise last_exc
 
-        HLS_WORKERS = 8  # simultaneous segment fetches
+        # ── Background speed thread: samples bytes every 1 s over 10 s window ──
+        _speed_history: list[tuple[float, int]] = [(time.monotonic(), _total_bytes[0])]
+        _speed_stop = threading.Event()
+
+        def _speed_tracker() -> None:
+            while not _speed_stop.wait(1.0):
+                _now = time.monotonic()
+                _cur = _total_bytes[0]
+                _speed_history.append((_now, _cur))
+                _cutoff = _now - 10.0
+                while len(_speed_history) > 2 and _speed_history[0][0] < _cutoff:
+                    _speed_history.pop(0)
+                if len(_speed_history) >= 2:
+                    _bps = (_speed_history[-1][1] - _speed_history[0][1]) / max(
+                        _speed_history[-1][0] - _speed_history[0][0], 0.001
+                    )
+                    _done = _completed[0]
+                    _elapsed = _now - _speed_history[0][0]
+                    _rate = _done / max(_elapsed, 0.001)
+                    _remaining_segs = total_segs - _done
+                    _eta = int(_remaining_segs / _rate) if _rate > 0 and _remaining_segs > 0 else 0
+                    downloads[dl_id].update({
+                        "speed": f"{_format_bytes(max(_bps, 0))}/s",
+                        "eta":   _format_eta(_eta) if _eta > 0 else "",
+                    })
+                    _persist_download_record(dl_id)
+
+        _speed_thread = threading.Thread(target=_speed_tracker, daemon=True)
+        _speed_thread.start()
+
+        HLS_WORKERS = 12  # simultaneous segment fetches
         seg_paths: dict[int, Path] = {}
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=HLS_WORKERS) as executor:
-            fs = {executor.submit(_download_seg, (i, u)): i
-                  for i, u in enumerate(segment_urls)}
-            for future in concurrent.futures.as_completed(fs):
-                if controls["cancel"].is_set():
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    raise RuntimeError("Download canceled")
-                idx, seg_path = future.result()   # re-raises on worker exception
-                seg_paths[idx] = seg_path
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=HLS_WORKERS) as executor:
+                fs = {executor.submit(_download_seg, (i, u)): i
+                      for i, u in enumerate(segment_urls)}
+                for future in concurrent.futures.as_completed(fs):
+                    if controls["cancel"].is_set():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise RuntimeError("Download canceled")
+                    idx, seg_path = future.result()   # re-raises on worker exception
+                    seg_paths[idx] = seg_path
+        finally:
+            _speed_stop.set()
 
         # ═══════════════════════════════════════════════════════════════════
         # PHASE 3 — FFmpeg concat-mux .ts segments → .mkv
@@ -4618,22 +4665,30 @@ def _download_hls_media(
             "stage_label": "Finalizing",
         })
         _persist_download_record(dl_id, force=True)
+        # Success — safe to delete segments now that FFmpeg has muxed them
+        if seg_dir is not None:
+            shutil.rmtree(seg_dir, ignore_errors=True)
         return final_path
 
     except Exception as _parallel_exc:
-        # Cancel: propagate immediately, no fallback
         if controls["cancel"].is_set():
-            raise
-        # Any other failure (parse error, network, etc.) → fall back to
-        # the original single-connection FFmpeg approach below.
-        _parallel_err = str(_parallel_exc)
-    finally:
-        # Clean up segment temp dir on success or any failure
-        if seg_dir is not None:
-            try:
+            # User cancelled — clean up and stop
+            if seg_dir is not None:
                 shutil.rmtree(seg_dir, ignore_errors=True)
-            except Exception:
-                pass
+            raise
+        # If segments were already partially downloaded, re-raise so the outer
+        # _download_task retry loop calls us again — the resume logic will skip
+        # already-downloaded segments and pick up where it left off.
+        # Only fall through to single-connection FFmpeg when nothing was
+        # downloaded yet (playlist parse failed, CDN unreachable, etc.).
+        try:
+            _has_partial = _completed[0] > 0
+        except NameError:
+            _has_partial = False
+        if _has_partial:
+            raise
+        # No progress at all — fall back to single-connection FFmpeg approach.
+        _parallel_err = str(_parallel_exc)
 
     # ════════════════════════════════════════════════════════════════════════
     # FALLBACK — original single-connection FFmpeg HLS download
@@ -6584,6 +6639,12 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         "postprocessor_hooks": [_postprocessor_hook],
         "continuedl": True,
         "windowsfilenames": True,
+        # Download up to 8 fragments simultaneously — works around YouTube's
+        # per-connection throttling and uses the full available bandwidth.
+        "concurrent_fragment_downloads": 8,
+        # Force 10 MB HTTP chunks; prevents YouTube from sending a slow trickle
+        # on the first chunk of each fragment.
+        "http_chunk_size": 10 * 1024 * 1024,
     }
     if effective_engine == "aria2" and has_aria2():
         controls = download_controls.get(dl_id)

@@ -709,6 +709,7 @@ export default function AnimePage() {
             setPlayer(nextPlayer);
           }}
           consumetHealthy={Boolean(health?.healthy)}
+          consumetBaseUrl={health?.api_base ?? "http://127.0.0.1:3000"}
           activeTab={tab}
         />
       )}
@@ -789,6 +790,7 @@ function AnimeDetail({
   onClose,
   onPlay,
   consumetHealthy,
+  consumetBaseUrl,
   activeTab,
 }: {
   anime: AnimeCardItem;
@@ -816,6 +818,7 @@ function AnimeDetail({
     }>;
   }) => void;
   consumetHealthy: boolean;
+  consumetBaseUrl: string;
   activeTab: Tab;
 }) {
   const [finding, setFinding] = useState(false);
@@ -905,6 +908,28 @@ function AnimeDetail({
     resolvedSourcePromiseCacheRef.current = {};
     resolvedPlayableSourcesPromiseCacheRef.current = {};
     setFinding(false);
+
+    // ── Fast sub/dub detection via local sidecar (HiAnime only) ─────────────
+    // This fires immediately — before the slow Promise.allSettled chain below —
+    // so Sub/Dub buttons and episode list appear in ~200 ms instead of 1.5–3 s.
+    if (anime.provider === "hianime" && anime.id) {
+      fetch(`${consumetBaseUrl}/anime/hianime/info?id=${encodeURIComponent(anime.id)}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((info: { subEpisodeCount?: number; dubEpisodeCount?: number; episodes?: ConsumetEpisode[] } | null) => {
+          if (!info || cancelled) return;
+          const dubCount = info.dubEpisodeCount ?? 0;
+          setDubEpisodeCount(dubCount);
+          if (Array.isArray(info.episodes) && info.episodes.length > 0) {
+            episodeCacheRef.current = {
+              ...episodeCacheRef.current,
+              [`hianime-${anime.id}`]: info.episodes,
+            };
+            setEpisodes(info.episodes);
+            setKnownEpisodeCount(info.episodes.length);
+          }
+        })
+        .catch(() => {/* silent — slower path below still runs as backup */});
+    }
 
     Promise.allSettled([
       findTmdbId(anime.title, anime.alt_title),
@@ -1010,7 +1035,7 @@ function AnimeDetail({
     return () => {
       cancelled = true;
     };
-  }, [anime.id, anime.provider, anime.title, anime.alt_title, consumetHealthy]);
+  }, [anime.id, anime.provider, anime.title, anime.alt_title, consumetHealthy, consumetBaseUrl]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1366,6 +1391,53 @@ function AnimeDetail({
   };
 
   const resolvePlayableSources = async (targetEpisode = episode): Promise<StreamSource[]> => {
+    // ── Fast path: call sidecar watch endpoint directly for HiAnime ───────────
+    // This bypasses the slow backend resolution chain (~10-20s) and gets the
+    // stream URL in ~200-500ms. Falls back to the existing path if it fails.
+    if (anime.provider === "hianime") {
+      const normalizedAudio = normalizeAudioPreference(audio);
+      const cat = (hasDub && normalizedAudio === "en") ? "dub" : "sub";
+      // Try episode ID from cache first, then from the fast sidecar episodes we loaded
+      const cachedEps = episodeCacheRef.current[`hianime-${anime.id}`] ?? episodes;
+      const ep = cachedEps.find((e) => Number(e.number) === Number(targetEpisode)) ?? cachedEps[0];
+      const epId = ep?.id ? String(ep.id).trim() : undefined;
+      if (epId) {
+        try {
+          const r = await fetch(
+            `${consumetBaseUrl}/anime/hianime/watch/${encodeURIComponent(epId)}?server=hd-1&category=${cat}`,
+            { signal: AbortSignal.timeout(8000) }
+          );
+          if (r.ok) {
+            const watchData = await r.json() as {
+              sources?: Array<{ url: string; quality?: string; isM3U8?: boolean }>;
+              subtitles?: Array<{ lang?: string; url?: string }>;
+            };
+            if (watchData.sources && watchData.sources.length > 0) {
+              const subs = (watchData.subtitles ?? []).map((s, si) => ({
+                id: s.lang ?? `sub-${si}`,
+                label: s.lang ?? "Subtitle",
+                language: s.lang,
+                url: s.url ?? "",
+              }));
+              const sources: StreamSource[] = watchData.sources.map((src, i) => ({
+                id: `hianime-sidecar-${epId}-${cat}-${i}`,
+                label: `HiAnime ${cat === "dub" ? "DUB" : "SUB"}`,
+                provider: "hianime",
+                kind: src.isM3U8 ? "hls" : "direct",
+                url: src.url,
+                quality: src.quality,
+                subtitles: subs,
+              }));
+              // Cache so instant-play works on subsequent clicks
+              resolvedPlayableSourcesCacheRef.current[`play:${normalizedAudio}:${server}:${targetEpisode}`] = sources;
+              return sources;
+            }
+          }
+        } catch {
+          // Silent — fall through to backend path
+        }
+      }
+    }
     return await resolveAnimePlaybackSourcesViaBackend(targetEpisode);
   };
 
