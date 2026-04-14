@@ -1103,8 +1103,11 @@ function QueueCard({
   // Clean up raw speed string: strip ANSI codes and extra whitespace
   const cleanSpeed = formatDisplaySpeed(item.speed);
   const progressMode = item.progressMode || (item.status === "processing" ? "processing" : item.total ? "determinate" : "activity");
-  const showProcessingProgress = progressMode === "processing";
-  const showDeterminateProgress = progressMode === "determinate" && !showProcessingProgress;
+  // "processing" with a real percent (merge tracking) → show as determinate so the
+  // bar fills 0→100 instead of spinning. Pure "processing" (no real %) keeps the spinner.
+  const hasMergePercent = progressMode === "processing" && item.percent > 0 && item.percent < 100;
+  const showProcessingProgress = progressMode === "processing" && !hasMergePercent;
+  const showDeterminateProgress = progressMode === "determinate" || hasMergePercent;
   const activityBytes = item.bytesDownloaded || parseDisplayedBytes(item.downloaded || item.size);
   const activityFillPercent = activityBytes > 0
     ? Math.min(92, Math.max(12, 92 * (1 - Math.exp(-activityBytes / (96 * 1024 * 1024)))))
@@ -1213,102 +1216,15 @@ function QueueCard({
 
       {/* ── Row 2: Progress bar + stats ── */}
       {(isActive || isPaused) && (() => {
-        const hasSegmentBar = item.downloadEngine === "aria2" && (isActive || isPaused) && item.percent < 100;
-
-        // Bucket segments into max 80 visual blocks to avoid rendering thousands of divs
-        const VISUAL_BLOCKS = 80;
-        const bucketedSegments: number[] = [];
-        if (hasSegmentBar) {
-          const raw = item.aria2Segments;
-          const blockSize = Math.max(1, Math.ceil(raw.length / VISUAL_BLOCKS));
-          for (let b = 0; b < VISUAL_BLOCKS; b++) {
-            const slice = raw.slice(b * blockSize, (b + 1) * blockSize);
-            if (slice.length === 0) break;
-            bucketedSegments.push(Math.round(slice.reduce((a, v) => a + v, 0) / slice.length));
-          }
-        }
-
         return (
           <div style={{ marginTop: 10 }}>
-            {/* Main overall progress bar */}
-            {hasSegmentBar && (
-              <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", color: "var(--text-muted)", marginBottom: 3, textTransform: "uppercase" }}>
-                Overall
-              </div>
-            )}
+            {/* Single progress bar — same style for all engines */}
             <div className="progress-bar-bg">
               <div
                 className={`progress-bar-fill${showProcessingProgress ? " indeterminate" : ""}`}
                 style={{ width: showDeterminateProgress ? `${item.percent}%` : `${activityFillPercent}%`, opacity: isPaused ? 0.5 : 1 }}
               />
             </div>
-
-            {/* Aria2 segment bar — IDM-style: one bar divided into per-connection segments */}
-            {hasSegmentBar && (
-              <>
-                <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", color: "var(--text-muted)", marginTop: 6, marginBottom: 3, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 5 }}>
-                  Connections
-                  <span style={{ fontSize: 9, color: "var(--accent)", background: "var(--accent-light)", padding: "0px 5px", borderRadius: 99, fontWeight: 700 }}>
-                    aria2
-                  </span>
-                </div>
-                {(item.aria2ConnectionSegments ?? []).length > 0 ? (
-                  /* IDM-style: one bar, N equal slots, each slot fills independently from its left edge */
-                  <div style={{
-                    display: "flex", height: 10, borderRadius: 4, overflow: "hidden",
-                    background: "var(--bg-surface2)",
-                    opacity: isPaused ? 0.45 : 1,
-                    transition: "opacity 0.3s",
-                    gap: 1,
-                  }}>
-                    {(item.aria2ConnectionSegments ?? []).map((fill, i) => (
-                      <div key={i} style={{ flex: 1, position: "relative", background: "var(--bg-surface2)", overflow: "hidden" }}>
-                        {/* filled portion */}
-                        <div style={{
-                          position: "absolute", left: 0, top: 0, bottom: 0,
-                          width: `${Math.round(fill * 100)}%`,
-                          background: fill >= 1
-                            ? "var(--success, #4ade80)"
-                            : `rgba(138, 180, 248, ${0.3 + fill * 0.7})`,
-                          transition: "width 0.4s ease, background 0.3s",
-                        }} />
-                        {/* divider tick on left edge (skip first) */}
-                        {i > 0 && (
-                          <div style={{
-                            position: "absolute", left: 0, top: 0, bottom: 0,
-                            width: 1, background: "var(--bg-base, #111)", opacity: 0.6, zIndex: 1,
-                          }} />
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  /* Fallback scanning animation while connection count is loading */
-                  <div
-                    className={bucketedSegments.length === 0 && !isPaused ? "aria2-segment-scanning" : ""}
-                    style={{
-                      display: "flex", gap: 1.5, height: 10,
-                      borderRadius: 4, overflow: "hidden",
-                      background: bucketedSegments.length > 0 ? "var(--bg-surface2)" : undefined,
-                      opacity: isPaused ? 0.45 : 1,
-                      transition: "opacity 0.3s",
-                    }}
-                  >
-                    {bucketedSegments.map((val, i) => (
-                      <div key={i} style={{
-                        flex: 1, height: "100%",
-                        backgroundColor: val >= 240
-                          ? "var(--success, #4ade80)"
-                          : val > 0
-                          ? `rgba(138, 180, 248, ${0.25 + (val / 255) * 0.75})`
-                          : "transparent",
-                        transition: "background-color 0.4s",
-                      }} />
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
 
             {/* Stats row */}
             <div style={{ display: "flex", alignItems: "center", gap: 0, marginTop: 6 }}>

@@ -3241,12 +3241,14 @@ def _start_aria2_rpc_monitor(
     dl_id: str,
     rpc_port: int,
     expected_total_bytes: int = 0,
+    workspace_path: str = "",
 ) -> tuple[threading.Event, threading.Thread]:
     """
     Monitor download progress by polling aria2's JSON-RPC API.
     Returns (stop_event, thread). Caller must set stop_event when done.
     Handles the gap between yt-dlp starting aria2 and aria2 accepting RPC connections.
     Also handles the stream-switch gap (video stream finishes, audio stream starts).
+    After aria2 finishes, tracks the growing merged output file for real merge progress.
     """
     stop_event = threading.Event()
 
@@ -3263,12 +3265,15 @@ def _start_aria2_rpc_monitor(
         last_completed = 0          # last polled completedLength (for the current stream)
         smoothed_speed = 0.0
         processing_since: float = 0.0  # timestamp when "processing" mode was first detected
+        aria2_done_since: float = 0.0  # timestamp when aria2 first reported all downloads finished
+        stream_file_sizes: set[int] = set()  # sizes of completed stream files (to exclude them from merge tracking)
 
         while not stop_event.is_set():
             try:
                 rpc = _aria2_poll_rpc(rpc_port)
                 if rpc is not None:
-                    # aria2 is active — use RPC data
+                    # aria2 is active — use RPC data; reset done-timer since a new stream is running
+                    aria2_done_since = 0.0
                     current_completed = rpc["completed"]
                     total_this_stream = rpc["total"]
                     speed_bps = rpc["speed"]
@@ -3335,21 +3340,105 @@ def _start_aria2_rpc_monitor(
                         total_known = stopped["total"] or expected_total_bytes or stopped["completed"]
                         cumulative = stopped["completed"]
                         pct = 100.0 if total_known > 0 else downloads[dl_id].get("percent", 0)
-                        downloads[dl_id].update({
-                            "percent": pct,
-                            "downloaded": _format_bytes(cumulative),
-                            "total": _format_bytes(total_known) if total_known else "",
-                            "size": _format_bytes(total_known or cumulative),
-                            "bytes_downloaded": cumulative,
-                            "bytes_total": total_known,
-                            "progress_mode": "determinate",
-                            "stage_label": "Finalizing",
-                            "speed": "",
-                            "eta": "0s",
-                            "aria2_segments": [],
-                            "aria2_connection_segments": [],
-                        })
-                        _persist_download_record(dl_id)
+                        current_status = downloads[dl_id].get("status", "downloading")
+                        # Mark the first moment aria2 reported completion so we can
+                        # detect a stuck post-processing phase (e.g. hung ffmpeg merge).
+                        if aria2_done_since == 0.0:
+                            aria2_done_since = time.monotonic()
+                            # Snapshot all completed stream file sizes now so the merge
+                            # progress tracker can exclude them when looking for the
+                            # growing merged output file.
+                            if workspace_path:
+                                try:
+                                    stream_file_sizes = {
+                                        f.stat().st_size
+                                        for f in Path(workspace_path).rglob("*")
+                                        if f.is_file() and ".aria2" not in f.name.lower()
+                                    }
+                                except Exception:
+                                    stream_file_sizes = set()
+                        # If yt-dlp hasn't advanced the status beyond "downloading"
+                        # yet (progress_hook may not fire during external merge),
+                        # push it to "processing" so the UI never shows
+                        # "Downloading 100%" indefinitely.
+                        if current_status == "downloading":
+                            downloads[dl_id].update({
+                                "percent": pct,
+                                "downloaded": _format_bytes(cumulative),
+                                "total": _format_bytes(total_known) if total_known else "",
+                                "size": _format_bytes(total_known or cumulative),
+                                "bytes_downloaded": cumulative,
+                                "bytes_total": total_known,
+                                "status": "processing",
+                                "progress_mode": "processing",
+                                "stage_label": "Merging",
+                                "speed": "",
+                                "eta": "0s",
+                                "aria2_segments": [],
+                                "aria2_connection_segments": [],
+                            })
+                            _persist_download_record(dl_id)
+
+                    # ── Merge progress tracking ───────────────────────────────────
+                    # Once aria2 is done (aria2_done_since > 0), poll the workspace
+                    # for the growing merged output file and show real 0–100% progress.
+                    # This block runs every iteration regardless of whether the RPC
+                    # server is still up — it persists through the whole ffmpeg phase.
+                    if aria2_done_since > 0 and workspace_path:
+                        try:
+                            cur_st = downloads[dl_id].get("status", "")
+                            if cur_st == "processing":
+                                ws = Path(workspace_path)
+                                candidates = [
+                                    f for f in ws.rglob("*")
+                                    if f.is_file()
+                                    and ".aria2" not in f.name.lower()
+                                    and f.suffix.lower() not in {".part", ".ytdl", ".tmp", ".temp"}
+                                ]
+                                # The merge output starts small and grows; the already-
+                                # complete stream files have stable sizes we snapshotted.
+                                merge_candidates = [
+                                    f for f in candidates
+                                    if f.stat().st_size not in stream_file_sizes
+                                    and f.stat().st_size > 0
+                                ]
+                                if merge_candidates:
+                                    newest = max(merge_candidates, key=lambda f: f.stat().st_mtime)
+                                    merge_size = newest.stat().st_size
+                                    total_ref = (
+                                        downloads[dl_id].get("bytes_total")
+                                        or expected_total_bytes
+                                        or merge_size
+                                    )
+                                    if total_ref > 0:
+                                        pct = min(99.5, round(merge_size / total_ref * 100, 1))
+                                        downloads[dl_id].update({
+                                            "percent": pct,
+                                            "progress_mode": "determinate",
+                                            "downloaded": _format_bytes(merge_size),
+                                        })
+                                        _persist_download_record(dl_id)
+                        except Exception:
+                            pass
+
+                    # ── Stuck-merge timeout ───────────────────────────────────────
+                    # IMPORTANT: this check is OUTSIDE `if stopped is not None` so it
+                    # keeps firing even after aria2's RPC server shuts down (once aria2
+                    # exits the RPC becomes unreachable and stopped is always None, but
+                    # aria2_done_since remains set from when we first saw completion).
+                    if aria2_done_since > 0:
+                        cur_st = downloads[dl_id].get("status", "")
+                        stuck_seconds = time.monotonic() - aria2_done_since
+                        if stuck_seconds > 180 and cur_st not in ("done", "failed", "canceled", "error"):
+                            downloads[dl_id].update({
+                                "status": "failed",
+                                "error": "Post-processing timed out (3 min) after aria2 finished. The merge step may be hung — please retry.",
+                                "stage_label": "Failed",
+                                "progress_mode": "activity",
+                                "recoverable": True,
+                            })
+                            _persist_download_record(dl_id, force=True)
+                            break
             except Exception:
                 pass
             stop_event.wait(0.5)
@@ -6101,10 +6190,106 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
             _persist_download_record(dl_id, force=True)
 
     template = str(workspace / f"{_yt_dlp_output_stem(dl_id, url)}.%(ext)s")
+
+    # ── Merge progress tracking via yt-dlp postprocessor hooks ────────────────
+    # When yt-dlp runs ffmpeg to merge video+audio streams, no progress_hook
+    # fires and the UI would freeze at "Processing… Merging" with a spinning
+    # indeterminate bar.  We fix this with two things:
+    #   1. A postprocessor_hook that fires at merge start/finish, captures the
+    #      actual merged output file path, and flips the bar to determinate mode.
+    #   2. A background polling thread that reads the growing merged file's size
+    #      and turns it into a real 0-100% percentage.
+    _merge_progress_stop = threading.Event()
+    _merge_expected_bytes: list[int] = [0]  # mutable so the closure can write
+
+    def _postprocessor_hook(d: dict) -> None:
+        pp   = d.get("postprocessor", "")
+        s    = d.get("status", "")
+        # Only care about ffmpeg merge/convert steps
+        if pp not in ("FFmpegMergerPP", "FFmpegVideoConvertorPP",
+                      "FFmpegCopyStreamPP", "FFmpegFixupM4aPP"):
+            return
+
+        if s == "started":
+            # Use cumulative bytes downloaded as proxy for merged output size
+            expected = (
+                downloads[dl_id].get("bytes_downloaded", 0)
+                or estimated_total_bytes
+                or 1
+            )
+            _merge_expected_bytes[0] = max(int(expected), 1)
+            _merge_progress_stop.clear()
+            downloads[dl_id].update({
+                "status": "processing",
+                "progress_mode": "determinate",   # real fill, not spinner
+                "stage_label": "Merging",
+                "percent": 0,
+                "speed": "",
+                "eta": "",
+            })
+            _persist_download_record(dl_id, force=True)
+
+            # Poll the workspace for the growing merged output file
+            def _size_poll() -> None:
+                ws = Path(workspace)
+                _SKIP_EXT = {".part", ".ytdl", ".aria2", ".tmp", ".temp"}
+                while not _merge_progress_stop.is_set():
+                    try:
+                        candidates = [
+                            f for f in ws.rglob("*")
+                            if f.is_file()
+                            and f.suffix.lower() not in _SKIP_EXT
+                            and ".aria2" not in f.name
+                        ]
+                        if candidates:
+                            cur = max(
+                                (f.stat().st_size for f in candidates if f.exists()),
+                                default=0,
+                            )
+                            exp = _merge_expected_bytes[0]
+                            pct = min(99.0, round(cur / exp * 100, 1))
+                            prev = float(downloads[dl_id].get("percent") or 0)
+                            if pct > prev:
+                                downloads[dl_id].update({
+                                    "percent": pct,
+                                    "downloaded": _format_bytes(cur),
+                                    "progress_mode": "determinate",
+                                })
+                                _persist_download_record(dl_id)
+                    except Exception:
+                        pass
+                    _merge_progress_stop.wait(0.6)
+
+            threading.Thread(target=_size_poll, daemon=True).start()
+
+        elif s == "finished":
+            _merge_progress_stop.set()
+            # Capture the real merged-output path so _resolve_final_file
+            # doesn't have to guess (this fixes "never completes" when the
+            # fallback directory scan misses the yt-dlp output).
+            info = d.get("info_dict") or {}
+            actual = (
+                info.get("filepath")
+                or info.get("_filename")
+                or info.get("filename")
+                or ""
+            )
+            if actual and Path(str(actual)).is_file():
+                downloads[dl_id]["file_path"]         = str(actual)
+                downloads[dl_id]["partial_file_path"] = ""
+            downloads[dl_id].update({
+                "percent":      100,
+                "stage_label":  "Finalizing",
+                "progress_mode": "determinate",
+            })
+            _persist_download_record(dl_id, force=True)
+    # ─────────────────────────────────────────────────────────────────────────
+
     opts: dict = {
         "outtmpl": template,
         "noplaylist": True,
         "progress_hooks": [progress_hook],
+        "postprocessor_hooks": [_postprocessor_hook],
         "continuedl": True,
         "windowsfilenames": True,
     }
@@ -6203,11 +6388,12 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         yt_dlp = _get_yt_dlp()
         with yt_dlp.YoutubeDL(opts) as ydl:
             if effective_engine == "aria2" and dl_type in {"video", "audio"} and _ytdlp_aria2_rpc_port:
-                # RPC is now enabled — start our monitor for real % + IDM segment bars.
+                # RPC is now enabled — start our monitor for real % + merge progress.
                 monitor_stop_event, monitor_thread = _start_aria2_rpc_monitor(
                     dl_id,
                     _ytdlp_aria2_rpc_port,
                     expected_total_bytes=estimated_total_bytes,
+                    workspace_path=str(workspace),
                 )
             elif effective_engine == "aria2" and dl_type in {"video", "audio"}:
                 # Fallback: RPC unavailable (has_aria2() returned False mid-run or
@@ -6281,6 +6467,7 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         db_update_status(dl_id, status, downloads[dl_id].get("file_path", ""))
         _persist_download_record(dl_id, force=True)
     finally:
+        _merge_progress_stop.set()   # stop merge size-poll thread if running
         if monitor_stop_event is not None:
           monitor_stop_event.set()
         if monitor_thread is not None and monitor_thread.is_alive():
