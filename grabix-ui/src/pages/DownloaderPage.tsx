@@ -56,6 +56,7 @@ interface QueueItem {
   stageLabel: string;
   variantLabel: string;
   aria2Segments: number[];
+  aria2ConnectionSegments: number[];
 }
 
 interface RuntimeDependency {
@@ -101,6 +102,7 @@ function toQueueItem(serverItem: any, previous?: QueueItem): QueueItem {
     stageLabel: serverItem.stage_label ?? previous?.stageLabel ?? "",
     variantLabel: serverItem.variant_label ?? previous?.variantLabel ?? "",
     aria2Segments: Array.isArray(serverItem.aria2_segments) ? serverItem.aria2_segments : previous?.aria2Segments ?? [],
+    aria2ConnectionSegments: Array.isArray(serverItem.aria2_connection_segments) ? serverItem.aria2_connection_segments : previous?.aria2ConnectionSegments ?? [],
   };
 }
 
@@ -171,7 +173,7 @@ function variantLabelForRequest(
   return thumbnailFormat;
 }
 
-export default function DownloaderPage() {
+export default function DownloaderPage({ onDownloadStarting }: { onDownloadStarting?: () => void }) {
   const [url, setUrl] = useState("");
   const [batchMode, setBatchMode] = useState(false);
   const [batchUrls, setBatchUrls] = useState("");
@@ -386,11 +388,13 @@ export default function DownloaderPage() {
       stageLabel: "Queued",
       variantLabel,
       aria2Segments: [],
+      aria2ConnectionSegments: [],
     };
     setQueue(prev => [newItem, ...prev]);
 
     try {
       const trimEnabled = trimOpen && trimEnd - trimStart < info!.duration;
+      onDownloadStarting?.();
       const res = await backendFetch(`${API}/download?url=${encodeURIComponent(url)}&title=${encodeURIComponent(info.title)}&thumbnail=${encodeURIComponent(info.thumbnail)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`, undefined, { sensitive: true });
       if (!res.ok) {
         let errMsg = `Download failed (${res.status})`;
@@ -406,6 +410,7 @@ export default function DownloaderPage() {
         try {
           const pr = await fetch(`${API}/download-status/${serverTaskId}`);
           const pd = await pr.json();
+          const isDone = ["done", "failed", "canceled", "error"].includes(pd.status);
           setQueue(prev => prev.map(q => (q.serverId || q.id) === serverTaskId
             ? {
                 ...q,
@@ -425,10 +430,12 @@ export default function DownloaderPage() {
                 progressMode: pd.progress_mode ?? q.progressMode,
                 stageLabel: pd.stage_label ?? q.stageLabel,
                 variantLabel: pd.variant_label ?? q.variantLabel,
+                aria2Segments: isDone ? [] : (Array.isArray(pd.aria2_segments) ? pd.aria2_segments : q.aria2Segments),
+                aria2ConnectionSegments: isDone ? [] : (Array.isArray(pd.aria2_connection_segments) ? pd.aria2_connection_segments : q.aria2ConnectionSegments),
               }
             : q
           ));
-          if (["done", "failed", "canceled", "error"].includes(pd.status)) {
+          if (isDone) {
             clearInterval(interval);
             pollingRef.current.delete(serverTaskId);
           }
@@ -468,10 +475,12 @@ export default function DownloaderPage() {
         stageLabel: "Queued",
         variantLabel,
         aria2Segments: [],
+        aria2ConnectionSegments: [],
       };
       setQueue(prev => [newItem, ...prev]);
       try {
         const trimEnabled = trimOpen && info && trimEnd - trimStart < info.duration;
+        onDownloadStarting?.();
         const res = await backendFetch(`${API}/download?url=${encodeURIComponent(bUrl)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`, undefined, { sensitive: true });
         if (!res.ok) {
           throw new Error(`Download request failed with ${res.status}`);
@@ -483,6 +492,7 @@ export default function DownloaderPage() {
           try {
             const pr = await fetch(`${API}/download-status/${serverTaskId}`);
             const pd = await pr.json();
+            const isDone = ["done", "failed", "canceled", "error"].includes(pd.status);
             setQueue(prev => prev.map(q => (q.serverId || q.id) === serverTaskId
               ? {
                   ...q,
@@ -502,10 +512,12 @@ export default function DownloaderPage() {
                   progressMode: pd.progress_mode ?? q.progressMode,
                   stageLabel: pd.stage_label ?? q.stageLabel,
                   variantLabel: pd.variant_label ?? q.variantLabel,
+                  aria2Segments: isDone ? [] : (Array.isArray(pd.aria2_segments) ? pd.aria2_segments : q.aria2Segments),
+                  aria2ConnectionSegments: isDone ? [] : (Array.isArray(pd.aria2_connection_segments) ? pd.aria2_connection_segments : q.aria2ConnectionSegments),
                 }
               : q
             ));
-            if (["done", "failed", "canceled", "error"].includes(pd.status)) {
+            if (isDone) {
               clearInterval(interval); pollingRef.current.delete(serverTaskId);
             }
           } catch { clearInterval(interval); }
@@ -1110,7 +1122,7 @@ function QueueCard({
     <div className="card fade-in" style={{ padding: "12px 14px" }}>
       {/* ── Row 1: thumbnail + title + action buttons ── */}
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <img src={item.thumbnail || "https://via.placeholder.com/96x64?text=DL"} alt="" style={{ width: 48, height: 32, objectFit: "cover", borderRadius: 5, flexShrink: 0, border: "1px solid var(--border)", background: "var(--bg-surface2)" }} />
+        <img src={item.thumbnail || "https://via.placeholder.com/96x64?text=DL"} onError={(e) => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/96x64?text=DL"; }} alt="" style={{ width: 48, height: 32, objectFit: "cover", borderRadius: 5, flexShrink: 0, border: "1px solid var(--border)", background: "var(--bg-surface2)" }} />
 
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.title}</div>
@@ -1201,7 +1213,7 @@ function QueueCard({
 
       {/* ── Row 2: Progress bar + stats ── */}
       {(isActive || isPaused) && (() => {
-        const hasSegmentBar = item.downloadEngine === "aria2" && (isActive || isPaused);
+        const hasSegmentBar = item.downloadEngine === "aria2" && (isActive || isPaused) && item.percent < 100;
 
         // Bucket segments into max 80 visual blocks to avoid rendering thousands of divs
         const VISUAL_BLOCKS = 80;
@@ -1231,7 +1243,7 @@ function QueueCard({
               />
             </div>
 
-            {/* Aria2 segment bar — IDM-style per-connection visualization */}
+            {/* Aria2 segment bar — IDM-style: one bar divided into per-connection segments */}
             {hasSegmentBar && (
               <>
                 <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", color: "var(--text-muted)", marginTop: 6, marginBottom: 3, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 5 }}>
@@ -1240,29 +1252,61 @@ function QueueCard({
                     aria2
                   </span>
                 </div>
-                <div
-                  className={bucketedSegments.length === 0 && !isPaused ? "aria2-segment-scanning" : ""}
-                  style={{
-                    display: "flex", gap: 1.5, height: 7,
-                    borderRadius: 4, overflow: "hidden",
-                    background: bucketedSegments.length > 0 ? "var(--bg-surface2)" : undefined,
+                {(item.aria2ConnectionSegments ?? []).length > 0 ? (
+                  /* IDM-style: one bar, N equal slots, each slot fills independently from its left edge */
+                  <div style={{
+                    display: "flex", height: 10, borderRadius: 4, overflow: "hidden",
+                    background: "var(--bg-surface2)",
                     opacity: isPaused ? 0.45 : 1,
                     transition: "opacity 0.3s",
-                  }}
-                >
-                  {bucketedSegments.map((val, i) => (
-                    <div key={i} style={{
-                      flex: 1,
-                      height: "100%",
-                      backgroundColor: val >= 240
-                        ? "var(--success, #4ade80)"
-                        : val > 0
-                        ? `rgba(138, 180, 248, ${0.25 + (val / 255) * 0.75})`
-                        : "transparent",
-                      transition: "background-color 0.4s",
-                    }} />
-                  ))}
-                </div>
+                    gap: 1,
+                  }}>
+                    {(item.aria2ConnectionSegments ?? []).map((fill, i) => (
+                      <div key={i} style={{ flex: 1, position: "relative", background: "var(--bg-surface2)", overflow: "hidden" }}>
+                        {/* filled portion */}
+                        <div style={{
+                          position: "absolute", left: 0, top: 0, bottom: 0,
+                          width: `${Math.round(fill * 100)}%`,
+                          background: fill >= 1
+                            ? "var(--success, #4ade80)"
+                            : `rgba(138, 180, 248, ${0.3 + fill * 0.7})`,
+                          transition: "width 0.4s ease, background 0.3s",
+                        }} />
+                        {/* divider tick on left edge (skip first) */}
+                        {i > 0 && (
+                          <div style={{
+                            position: "absolute", left: 0, top: 0, bottom: 0,
+                            width: 1, background: "var(--bg-base, #111)", opacity: 0.6, zIndex: 1,
+                          }} />
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  /* Fallback scanning animation while connection count is loading */
+                  <div
+                    className={bucketedSegments.length === 0 && !isPaused ? "aria2-segment-scanning" : ""}
+                    style={{
+                      display: "flex", gap: 1.5, height: 10,
+                      borderRadius: 4, overflow: "hidden",
+                      background: bucketedSegments.length > 0 ? "var(--bg-surface2)" : undefined,
+                      opacity: isPaused ? 0.45 : 1,
+                      transition: "opacity 0.3s",
+                    }}
+                  >
+                    {bucketedSegments.map((val, i) => (
+                      <div key={i} style={{
+                        flex: 1, height: "100%",
+                        backgroundColor: val >= 240
+                          ? "var(--success, #4ade80)"
+                          : val > 0
+                          ? `rgba(138, 180, 248, ${0.25 + (val / 255) * 0.75})`
+                          : "transparent",
+                        transition: "background-color 0.4s",
+                      }} />
+                    ))}
+                  </div>
+                )}
               </>
             )}
 

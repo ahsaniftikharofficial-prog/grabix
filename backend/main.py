@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-import os, uuid, sqlite3, shutil, threading, subprocess, time, json, re, hashlib, socket, ipaddress, tempfile, zipfile, importlib
+import os, uuid, sqlite3, shutil, threading, subprocess, time, json, re, hashlib, socket, ipaddress, tempfile, zipfile, importlib, queue as _queue
 import ctypes
 from pathlib import Path
 from datetime import datetime
@@ -3273,6 +3273,7 @@ def _start_aria2_rpc_monitor(
                     total_this_stream = rpc["total"]
                     speed_bps = rpc["speed"]
                     segments = rpc.get("segments", [])
+                    connection_progress = rpc.get("connection_progress", [])
 
                     # Store gid in controls as soon as we have it (for pause/resume)
                     _rpc_gid = rpc.get("gid", "")
@@ -3289,7 +3290,8 @@ def _start_aria2_rpc_monitor(
                     cumulative = finished_stream_bytes + current_completed
                     total_known = expected_total_bytes or (finished_stream_bytes + total_this_stream)
 
-                    pct = min(round(cumulative / total_known * 100, 1), 99.9) if total_known else 0
+                    # No cap at 99.9 — let it reach 100 when real data says so
+                    pct = round(cumulative / total_known * 100, 1) if total_known else 0
 
                     if speed_bps > 0:
                         smoothed_speed = speed_bps if smoothed_speed <= 0 else (smoothed_speed * 0.6 + speed_bps * 0.4)
@@ -3322,8 +3324,32 @@ def _start_aria2_rpc_monitor(
                         "speed": speed_label,
                         "eta": eta_label,
                         "aria2_segments": segments,
+                        "aria2_connection_segments": connection_progress,
                     })
                     _persist_download_record(dl_id)
+                else:
+                    # tellActive returned empty — aria2 may be finalising.
+                    # Check tellStopped so we can push to 100% instead of staying stuck at 99.9%.
+                    stopped = _aria2_poll_rpc_stopped(rpc_port)
+                    if stopped is not None:
+                        total_known = stopped["total"] or expected_total_bytes or stopped["completed"]
+                        cumulative = stopped["completed"]
+                        pct = 100.0 if total_known > 0 else downloads[dl_id].get("percent", 0)
+                        downloads[dl_id].update({
+                            "percent": pct,
+                            "downloaded": _format_bytes(cumulative),
+                            "total": _format_bytes(total_known) if total_known else "",
+                            "size": _format_bytes(total_known or cumulative),
+                            "bytes_downloaded": cumulative,
+                            "bytes_total": total_known,
+                            "progress_mode": "determinate",
+                            "stage_label": "Finalizing",
+                            "speed": "",
+                            "eta": "0s",
+                            "aria2_segments": [],
+                            "aria2_connection_segments": [],
+                        })
+                        _persist_download_record(dl_id)
             except Exception:
                 pass
             stop_event.wait(0.5)
@@ -3727,16 +3753,39 @@ def _aria2_parse_bitfield(tasks: list) -> list[int]:
     return []
 
 
+def _aria2_bitfield_to_connection_progress(segments: list[int], num_connections: int) -> list[float]:
+    """
+    Split the flat piece list evenly across num_connections ranges.
+    Returns a list of fill ratios 0.0–1.0, one per connection.
+    This gives REAL per-connection progress: each connection owns a contiguous
+    slice of pieces, and the ratio tells how many of those pieces are complete.
+    """
+    if not segments or num_connections <= 0:
+        return []
+    n = max(1, num_connections)
+    chunk = max(1, len(segments) // n)
+    result: list[float] = []
+    for i in range(n):
+        start = i * chunk
+        end = start + chunk if i < n - 1 else len(segments)
+        sl = segments[start:end]
+        if sl:
+            result.append(sum(1 for v in sl if v >= 240) / len(sl))
+        else:
+            result.append(0.0)
+    return result
+
+
 def _aria2_poll_rpc(port: int) -> dict | None:
     """
     Poll aria2's JSON-RPC API for live download progress.
-    Returns dict with 'completed', 'total', 'speed', 'segments', 'gid' or None on failure.
+    Returns dict with 'completed', 'total', 'speed', 'segments', 'connection_progress', 'gid' or None on failure.
     """
     try:
         payload = json.dumps({
             "jsonrpc": "2.0", "id": "p",
             "method": "aria2.tellActive",
-            "params": [["gid", "completedLength", "totalLength", "downloadSpeed", "bitfield", "numPieces"]],
+            "params": [["gid", "completedLength", "totalLength", "downloadSpeed", "bitfield", "numPieces", "connections"]],
         }).encode("utf-8")
         req = URLRequest(
             f"http://127.0.0.1:{port}/jsonrpc",
@@ -3754,7 +3803,9 @@ def _aria2_poll_rpc(port: int) -> dict | None:
         speed    = sum(int(t.get("downloadSpeed",  0)) for t in tasks)
         gid      = tasks[0].get("gid", "") if tasks else ""
         segments = _aria2_parse_bitfield(tasks)
-        return {"completed": completed, "total": total, "speed": speed, "segments": segments, "gid": gid}
+        num_connections = max(int(tasks[0].get("connections", 0)) if tasks else 0, 1)
+        connection_progress = _aria2_bitfield_to_connection_progress(segments, num_connections)
+        return {"completed": completed, "total": total, "speed": speed, "segments": segments, "connection_progress": connection_progress, "gid": gid}
     except Exception:
         return None
 
@@ -3928,6 +3979,22 @@ def _download_via_aria2(
     controls["aria2_rpc_port"] = rpc_port
     last_error_lines: list[str] = []
 
+    # Drain stderr in a background thread so the main loop never blocks on readline().
+    # On Windows (and sometimes Linux), readline() on a subprocess pipe will block
+    # indefinitely when the process is alive but not writing to stderr — which is
+    # exactly what aria2 does during its final file-assembly/checksum phase.
+    _stderr_q: _queue.Queue[str] = _queue.Queue()
+
+    def _stderr_drain() -> None:
+        try:
+            for _line in process.stderr:  # type: ignore[union-attr]
+                _stderr_q.put(_line)
+        except Exception:
+            pass
+
+    _stderr_thread = threading.Thread(target=_stderr_drain, daemon=True)
+    _stderr_thread.start()
+
     # Give aria2's RPC server a moment to start accepting connections
     time.sleep(0.6)
 
@@ -3961,14 +4028,17 @@ def _download_via_aria2(
             if process.poll() is not None:
                 break
 
-            if process.stderr:
-                line = process.stderr.readline()
-                if line:
-                    clean_line = line.strip()
+            # Non-blocking: drain whatever stderr lines the background thread has collected
+            while True:
+                try:
+                    _raw = _stderr_q.get_nowait()
+                    clean_line = _raw.strip()
                     if clean_line:
                         last_error_lines.append(clean_line)
                         if len(last_error_lines) > 8:
                             last_error_lines.pop(0)
+                except _queue.Empty:
+                    break
 
             # Poll aria2's RPC for accurate multi-connection progress + segments
             rpc = _aria2_poll_rpc(rpc_port)
@@ -3980,6 +4050,7 @@ def _download_via_aria2(
                 total      = rpc["total"] or total_bytes
                 speed_bps  = rpc["speed"]
                 segments   = rpc.get("segments", [])
+                connection_progress = rpc.get("connection_progress", [])
                 pct        = round(completed / total * 100, 1) if total else 0
                 speed      = f"{_format_bytes(speed_bps)}/s" if speed_bps else downloads[dl_id].get("speed", "")
                 remaining  = max(total - completed, 0)
@@ -3995,6 +4066,7 @@ def _download_via_aria2(
                     speed     = ""
                     eta       = ""
                     segments  = []
+                    connection_progress = []
                 else:
                     # RPC not ready yet or mid-transition — keep last known values
                     completed = downloads[dl_id].get("bytes_downloaded", 0)
@@ -4003,6 +4075,7 @@ def _download_via_aria2(
                     speed     = downloads[dl_id].get("speed", "")
                     eta       = downloads[dl_id].get("eta", "")
                     segments  = []
+                    connection_progress = []
 
             downloads[dl_id].update({
                 "percent": pct,
@@ -4018,11 +4091,24 @@ def _download_via_aria2(
                 "file_path": output_path,
                 "partial_file_path": output_path,
                 "aria2_segments": segments,
+                "aria2_connection_segments": connection_progress,
             })
             _persist_download_record(dl_id)
             time.sleep(0.4)
 
         return_code = process.wait()
+        # Collect any final stderr lines captured after the loop broke
+        _stderr_thread.join(timeout=1.0)
+        while True:
+            try:
+                _raw = _stderr_q.get_nowait()
+                clean_line = _raw.strip()
+                if clean_line:
+                    last_error_lines.append(clean_line)
+                    if len(last_error_lines) > 8:
+                        last_error_lines.pop(0)
+            except _queue.Empty:
+                break
         if return_code != 0:
             detail = " | ".join(last_error_lines[-3:]) or f"aria2 exited with code {return_code}"
             raise RuntimeError(detail)
@@ -4547,6 +4633,7 @@ def _public_download(d: dict) -> dict:
         "stage_label": d.get("stage_label", ""),
         "variant_label": d.get("variant_label", (d.get("params") or {}).get("variant_label", "")),
         "aria2_segments": d.get("aria2_segments", []),
+        "aria2_connection_segments": d.get("aria2_connection_segments", []),
     }
 
 
@@ -5936,17 +6023,33 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         if controls["cancel"].is_set():
             raise RuntimeError("Download canceled")
 
-        # For aria2+yt-dlp, yt-dlp's ExternalFD never fills in downloaded_bytes.
-        # Progress is tracked by the RPC monitor thread started below.
-        # We only need to update the file_path so the UI shows the right file.
+        # For aria2+yt-dlp, yt-dlp's ExternalFD fills in downloaded_bytes via its own tracking.
+        # We update progress here since RPC monitoring is disabled for yt-dlp invocations.
         if effective_engine == "aria2" and dl_type in {"video", "audio"}:
             if d["status"] == "downloading":
                 filename = d.get("filename", "")
+                downloaded_bytes = d.get("downloaded_bytes") or 0
+                total_bytes_val = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                pct = round((downloaded_bytes / total_bytes_val) * 100, 1) if total_bytes_val else 0
+                raw_speed = d.get("speed")
+                speed = _strip_ansi(d.get("_speed_str", ""))
+                if not speed and raw_speed:
+                    speed = f"{_format_bytes(raw_speed)}/s"
+                update: dict = {
+                    "percent": pct,
+                    "speed": speed,
+                    "downloaded": _format_bytes(downloaded_bytes),
+                    "total": _format_bytes(total_bytes_val) if total_bytes_val else "",
+                    "bytes_downloaded": downloaded_bytes,
+                    "bytes_total": total_bytes_val,
+                    "progress_mode": "determinate" if total_bytes_val else "activity",
+                    "stage_label": "Downloading",
+                }
                 if filename:
-                    downloads[dl_id]["file_path"] = filename
-                    downloads[dl_id]["partial_file_path"] = filename
-                    downloads[dl_id]["stage_label"] = "Downloading"
-                    _persist_download_record(dl_id)
+                    update["file_path"] = filename
+                    update["partial_file_path"] = filename
+                downloads[dl_id].update(update)
+                _persist_download_record(dl_id)
             elif d["status"] == "finished":
                 downloads[dl_id].update({
                     "status": "processing",
@@ -6002,10 +6105,9 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         "windowsfilenames": True,
     }
     if effective_engine == "aria2" and has_aria2():
-        _ytdlp_aria2_rpc_port = _aria2_find_free_port()
+        _ytdlp_aria2_rpc_port = 0   # RPC disabled for yt-dlp (see external_downloader_args comment)
         controls = download_controls.get(dl_id)
         if controls is not None:
-            controls["aria2_rpc_port"] = _ytdlp_aria2_rpc_port
             controls["process_kind"] = "aria2"
         opts["external_downloader"] = ARIA2_PATH
         opts["external_downloader_args"] = {
@@ -6014,12 +6116,16 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
                 "--split=16",
                 "--min-split-size=1M",
                 "--file-allocation=none",
-                "--enable-rpc=true",
-                f"--rpc-listen-port={_ytdlp_aria2_rpc_port}",
-                "--rpc-allow-origin-all=true",
                 "--summary-interval=0",
                 "--download-result=hide",
                 "--console-log-level=error",
+                # NOTE: --enable-rpc is intentionally omitted here.
+                # yt-dlp invokes aria2 once per stream (video + audio for 1080p).
+                # Both calls use the same port. On Windows, the first aria2's port
+                # enters TIME_WAIT after exit, causing the second invocation to fail
+                # to bind the port and exit with an error, hanging yt-dlp in a
+                # retry loop. Progress for yt-dlp downloads is tracked via
+                # yt-dlp's own progress_hook instead.
             ] + ([] if os.name == "nt" else [f"--stop-with-process={os.getpid()}"])
         }
     else:

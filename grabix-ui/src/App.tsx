@@ -216,7 +216,7 @@ function Inner() {
   }, [runtimeHealth]);
 
   const pages: Record<Page, ReactNode> = {
-    downloader: <ErrorBoundary section="Downloader"><DownloaderPage /></ErrorBoundary>,
+    downloader: <ErrorBoundary section="Downloader"><DownloaderPage onDownloadStarting={watchdog.notifyDownloadStarting} /></ErrorBoundary>,
     converter:  <ErrorBoundary section="Converter"><ConverterPage /></ErrorBoundary>,
     library:    <ErrorBoundary section="Library"><LibraryPage /></ErrorBoundary>,
     anime:      <ErrorBoundary section="Anime"><AnimePage /></ErrorBoundary>,

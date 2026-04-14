@@ -20,25 +20,33 @@ export type WatchdogStatus = "idle" | "reconnecting" | "reconnected" | "failed";
 export interface WatchdogState {
   status: WatchdogStatus;
   isBannerVisible: boolean;
+  /** Call this when a new download is starting — suppresses false crash banners for 20s */
+  notifyDownloadStarting: () => void;
 }
 
-const POLL_MS               = 5_000;   // poll every 5s
-const PING_TIMEOUT_MS       = 6_000;   // wait up to 6s per ping
-const CONSECUTIVE_FAILS     = 4;       // 4 in a row before reacting
-const RECONNECT_TIMEOUT_MS  = 90_000;  // 90s before declaring "failed"
-const BANNER_LINGER_MS      = 4_000;   // green banner stays 4s
-const INITIAL_POLL_DELAY_MS = 5_000;   // first poll starts 5s after mount
+const POLL_MS               = 5_000;
+const PING_TIMEOUT_MS       = 6_000;
+const CONSECUTIVE_FAILS     = 4;
+const RECONNECT_TIMEOUT_MS  = 90_000;
+const BANNER_LINGER_MS      = 4_000;
+const INITIAL_POLL_DELAY_MS = 5_000;
+/** How long after a download starts to suppress watchdog false positives (aria2 spawn spike) */
+const DOWNLOAD_START_GRACE_MS = 20_000;
 
 export function useWatchdog(): WatchdogState {
   const [status, setStatus]           = useState<WatchdogStatus>("idle");
   const [isBannerVisible, setVisible] = useState(false);
 
-  // CRITICAL: only show errors once this is true (backend answered successfully >=1x)
   const hasEverConnected  = useRef(false);
   const wasDown           = useRef(false);
   const consecutiveFails  = useRef(0);
   const reconnectStart    = useRef<number | null>(null);
   const lingerTimer       = useRef<number | null>(null);
+  const downloadGraceEnd  = useRef<number>(0);
+
+  const notifyDownloadStarting = () => {
+    downloadGraceEnd.current = Date.now() + DOWNLOAD_START_GRACE_MS;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -55,7 +63,6 @@ export function useWatchdog(): WatchdogState {
 
         if (!res.ok) throw new Error("non-ok");
 
-        // SUCCESS
         consecutiveFails.current = 0;
         hasEverConnected.current = true;
 
@@ -75,11 +82,14 @@ export function useWatchdog(): WatchdogState {
         if (cancelled) return;
         consecutiveFails.current += 1;
 
-        // Never show an error if we have never successfully connected.
-        // This is a startup delay, not a crash — stay silent.
         if (!hasEverConnected.current) return;
-
         if (consecutiveFails.current < CONSECUTIVE_FAILS) return;
+
+        // Suppress false positives while aria2 is starting up (causes brief CPU spike)
+        if (Date.now() < downloadGraceEnd.current) {
+          consecutiveFails.current = 0;
+          return;
+        }
 
         if (!wasDown.current) {
           wasDown.current        = true;
@@ -109,5 +119,5 @@ export function useWatchdog(): WatchdogState {
     };
   }, []);
 
-  return { status, isBannerVisible };
+  return { status, isBannerVisible, notifyDownloadStarting };
 }
