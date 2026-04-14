@@ -23,6 +23,37 @@ from urllib.parse import urlparse, parse_qs, quote
 
 import httpx
 
+# ── Key health cache ──────────────────────────────────────────────────────────
+# Stores the last verified working client key and when it was verified.
+# Populated by the background worker before anyone presses play.
+import threading
+import time as _time
+
+_key_lock = threading.Lock()
+
+_key_health: dict = {
+    "key": None,          # str | None — the last verified working key
+    "verified_at": 0.0,   # float — unix timestamp of last successful verification
+    "ttl": 1200.0,        # float — how long (seconds) a verified key stays trusted (20 min)
+}
+
+
+def get_cached_client_key() -> str | None:
+    """Return the cached verified key if it is still fresh, else None."""
+    with _key_lock:
+        entry = _key_health
+        if entry["key"] and (_time.time() - entry["verified_at"]) < entry["ttl"]:
+            return entry["key"]
+    return None
+
+
+def set_cached_client_key(key: str) -> None:
+    """Store a verified working key with current timestamp."""
+    with _key_lock:
+        _key_health["key"] = key
+        _key_health["verified_at"] = _time.time()
+
+
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -409,8 +440,12 @@ async def extract_hianime_stream(
                 remote_keys = await remote_keys_task
                 remote_keys_task = asyncio.create_task(asyncio.sleep(0))  # mark done
 
+                cached_key = get_cached_client_key()
                 key_candidates = list(dict.fromkeys(
-                    ([scraped_key] if scraped_key else []) + remote_keys + _FALLBACK_KEYS
+                    ([cached_key] if cached_key else [])
+                    + ([scraped_key] if scraped_key else [])
+                    + remote_keys
+                    + _FALLBACK_KEYS
                 ))
 
                 for key in key_candidates:
@@ -423,6 +458,7 @@ async def extract_hianime_stream(
                         data2 = r2.json()
 
                         if not data2.get("encrypted") and isinstance(data2.get("sources"), list) and data2["sources"]:
+                            set_cached_client_key(key)
                             return _build_result(data2, embed_url)
 
                         if data2.get("encrypted") and isinstance(data2.get("sources"), str):
@@ -432,6 +468,7 @@ async def extract_hianime_stream(
                                 sources = json.loads(raw)
                                 if sources:
                                     data2["sources"] = sources
+                                    set_cached_client_key(key)
                                     return _build_result(data2, embed_url)
                             except Exception:
                                 continue
@@ -441,3 +478,120 @@ async def extract_hianime_stream(
         raise RuntimeError(
             f"Python MegaCloud extractor: all server/key combinations failed for episode '{episode_id}'"
         )
+
+
+# ── Background key health worker ──────────────────────────────────────────────
+
+async def run_key_health_worker(interval_seconds: float = 1200.0) -> None:
+    """
+    Background coroutine. Runs forever while the app is alive.
+    Every `interval_seconds` (default 20 min) it:
+      1. Checks if the cached key is still fresh.
+      2. If not, probes MegaCloud with a known test episode to find a working key.
+      3. Stores the verified key in the cache.
+
+    Should be started once at application startup via asyncio.create_task().
+    Errors are caught and logged — this worker must never crash the app.
+    """
+    import asyncio
+    import logging
+
+    logger = logging.getLogger("megacloud.key_worker")
+
+    # A known stable HiAnime episode ID used only for key verification probes.
+    # One Piece episode 1 — always available, always on VidCloud.
+    TEST_EPISODE_ID = "one-piece-100?ep=2142"
+
+    async def _probe_key(key: str, client: httpx.AsyncClient, embed_url: str, source_id: str) -> bool:
+        """Returns True if this key produces valid decrypted sources."""
+        parsed = urlparse(embed_url)
+        domain = parsed.hostname or "megacloud.tv"
+        embed_page_url = f"https://{domain}/embed-2/v3/e-1/{source_id}?k=1"
+        get_sources_url = f"https://{domain}/embed-2/v3/e-1/getSources?id={source_id}"
+        headers = {
+            "User-Agent": _UA,
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json, text/plain, */*",
+            "Origin": f"https://{domain}",
+            "Referer": embed_page_url,
+        }
+        try:
+            r = await client.get(
+                f"{get_sources_url}&_k={quote(key, safe='')}",
+                headers=headers,
+                timeout=10.0,
+            )
+            data = r.json()
+            # Unencrypted sources — key accepted
+            if not data.get("encrypted") and isinstance(data.get("sources"), list) and data["sources"]:
+                return True
+            # Encrypted — try decryption
+            if data.get("encrypted") and isinstance(data.get("sources"), str):
+                megacloud_key = data.get("key", "")
+                try:
+                    raw = _decrypt_megacloud_sources(data["sources"], key, megacloud_key)
+                    sources = json.loads(raw)
+                    return bool(sources)
+                except Exception:
+                    return False
+        except Exception:
+            return False
+        return False
+
+    logger.info("MegaCloud key health worker started.")
+
+    while True:
+        try:
+            # Sleep first — on startup the main stream path will already populate
+            # the cache naturally on first play. Worker's job is to keep it fresh.
+            await asyncio.sleep(interval_seconds)
+
+            # Skip probe if cache is still fresh
+            cached = get_cached_client_key()
+            if cached:
+                logger.debug("Key health worker: cached key still valid, skipping probe.")
+                continue
+
+            logger.info("Key health worker: cache stale, probing MegaCloud...")
+
+            async with httpx.AsyncClient(
+                timeout=20.0,
+                follow_redirects=True,
+                headers={"User-Agent": _UA},
+            ) as client:
+                # Step 1: Get embed URL for the test episode
+                embed_url = await _get_episode_embed_url(client, TEST_EPISODE_ID, "1", "sub")
+                if not embed_url:
+                    logger.warning("Key health worker: could not get embed URL for test episode.")
+                    continue
+
+                parsed = urlparse(embed_url)
+                path_parts = [p for p in parsed.path.split("/") if p]
+                source_id = path_parts[-1] if path_parts else ""
+                if not source_id:
+                    continue
+
+                embed_page_url = f"https://{parsed.hostname}/embed-2/v3/e-1/{source_id}?k=1"
+
+                # Step 2: Try to find a working key
+                scraped_key = await _scrape_client_key(client, embed_page_url, parsed.hostname or "megacloud.tv", HIANIME_BASE + "/")
+                remote_keys = await _get_remote_keys(client)
+
+                candidates = list(dict.fromkeys(
+                    ([scraped_key] if scraped_key else []) + remote_keys + _FALLBACK_KEYS
+                ))
+
+                for key in candidates:
+                    if await _probe_key(key, client, embed_url, source_id):
+                        set_cached_client_key(key)
+                        logger.info("Key health worker: found and cached a working key.")
+                        break
+                else:
+                    logger.warning("Key health worker: no working key found in this cycle.")
+
+        except asyncio.CancelledError:
+            logger.info("Key health worker: cancelled, shutting down.")
+            return
+        except Exception as exc:
+            logger.error("Key health worker error (will retry next cycle): %s", exc)
+            await asyncio.sleep(60.0)  # Back off on unexpected errors

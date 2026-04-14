@@ -28,6 +28,7 @@ from app.services.consumet import (
     get_health_status as get_consumet_health_status,
     is_consumet_configured as is_consumet_sidecar_configured,
 )
+from app.services.megacloud import run_key_health_worker
 from app.services.errors import json_error_response
 from app.services.logging_utils import LOG_DIR, backend_log_path, get_logger, log_event, read_recent_log_events
 from app.services.archive_installer import parse_checksum_manifest, safe_extract_zip, sha256_file
@@ -198,6 +199,8 @@ async def _grabix_lifespan(app: FastAPI):
     global _app_event_loop
     _app_event_loop = asyncio.get_running_loop()
     ensure_runtime_bootstrap()
+    # Start the MegaCloud key health worker — keeps the client key fresh in the background
+    asyncio.create_task(run_key_health_worker(interval_seconds=1200.0))
     yield
 
 
@@ -1460,51 +1463,6 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
     episode_id = payload.episodeId.strip()
     if not episode_id:
         raise HTTPException(status_code=400, detail="episodeId is required")
-
-    try:
-        from app.services.consumet import fetch_anime_watch
-        watch_payload = await fetch_anime_watch(
-            provider="hianime",
-            episode_id=episode_id,
-            server=payload.server,
-            audio=payload.audio
-        )
-        sources = watch_payload.get("sources")
-        if sources and isinstance(sources, list):
-            # Only use hls or direct sources — embed kind means MegaCloud/VidStreaming
-            # iframes that show "We're Sorry" pages and are not playable.
-            playable = [s for s in sources if isinstance(s, dict) and str(s.get("kind") or "").lower() in {"hls", "direct"}]
-            if not playable:
-                raise ValueError("AniWatch returned only embed sources — falling back.")
-            target_source = playable[0]
-            kind = str(target_source.get("kind") or "hls")
-            # Ensure anime HLS streams always use the backend proxy.
-            # AniWatch CDN segments 403 without a Referer; if the sidecar
-            # didn't include one, inject a safe default.
-            raw_headers = dict(watch_payload.get("headers") or {})
-            if not raw_headers:
-                raw_headers = {"Referer": "https://megacloud.blog/"}
-            resolution = {
-                "source": {
-                    "url": target_source.get("url"),
-                    "kind": kind,
-                    "headers": raw_headers,
-                },
-                "subtitles": watch_payload.get("subtitles") or [],
-                "provider": "HiAnime",
-                "selectedServer": target_source.get("quality", payload.server),
-                "strategy": "HiAnime Direct Resolution",
-            }
-            _set_cached_anime_resolution(payload, resolution)
-            return resolution
-    except Exception as exc:
-        tried.append(
-            {
-                "server": payload.server,
-                "stage": "anime-primary",
-                "detail": f"Direct HiAnime sidecar resolution failed {exc}. Trying embed extraction and fallback providers.",
-            }
-        )
 
     try:
         from app.services.consumet import _fetch_consumet_json
