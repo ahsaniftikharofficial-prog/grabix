@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 import os, uuid, sqlite3, shutil, threading, subprocess, time, json, re, hashlib, socket, ipaddress, tempfile, zipfile, importlib, queue as _queue
+import concurrent.futures
 import ctypes
 from pathlib import Path
 from datetime import datetime
@@ -4376,6 +4377,21 @@ def _download_hls_media(
     headers: dict[str, str] | None = None,
     output_dir: str | Path | None = None,
 ) -> str:
+    """
+    Parallel HLS segment downloader.
+
+    Downloads up to HLS_WORKERS segments concurrently so the full available
+    bandwidth is used instead of being throttled to one TCP connection at a
+    time (FFmpeg's default sequential behaviour = ~500 KB/s on a 10 MB/s line).
+
+    Pipeline:
+      1. Fetch + parse the m3u8 playlist (handles master → variant redirect).
+      2. Download all segments in parallel via a ThreadPoolExecutor.
+      3. Use FFmpeg concat-demuxer to merge .ts segments → .mkv.
+
+    Falls back to the original single-connection FFmpeg approach if playlist
+    parsing fails (e.g. non-standard CDN responses).
+    """
     if not has_ffmpeg():
         raise RuntimeError("FFmpeg is required for HLS downloads.")
 
@@ -4388,12 +4404,249 @@ def _download_hls_media(
         fallback,
         variant_label=downloads[dl_id].get("variant_label", ""),
     )
-    output_path = f"{final_path}.part.mkv"
-
-    request_headers = {"User-Agent": "Mozilla/5.0"}
-    request_headers.update(headers or {})
     controls = download_controls[dl_id]
 
+    # ── Build request headers (Referer injection, same as before) ────────────
+    request_headers: dict[str, str] = {"User-Agent": "Mozilla/5.0"}
+    request_headers.update(headers or {})
+    _has_referer = any(k.lower() == "referer" for k in request_headers)
+    if not _has_referer:
+        _hls_host = urlparse(url).netloc.lower()
+        _CDN_REFERERS: list[tuple[str, str]] = [
+            ("megacloud",     "https://megacloud.blog/"),
+            ("aniwatchtv",    "https://aniwatchtv.to/"),
+            ("hianime",       "https://hianime.to/"),
+            ("gogoanime",     "https://gogoanime3.co/"),
+            ("gogo-cdn",      "https://gogoanime3.co/"),
+            ("animepahe",     "https://animepahe.ru/"),
+            ("rapidcloud",    "https://rapidcloud.io/"),
+            ("vidstreaming",  "https://vidstreaming.io/"),
+            ("vidcloud",      "https://vidcloud9.com/"),
+            ("filemoon",      "https://filemoon.sx/"),
+            ("streamtape",    "https://streamtape.com/"),
+        ]
+        for _key, _ref in _CDN_REFERERS:
+            if _key in _hls_host:
+                request_headers["Referer"] = _ref
+                break
+        else:
+            _p = urlparse(url)
+            request_headers["Referer"] = f"{_p.scheme}://{_hls_host}/"
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _fetch_bytes(fetch_url: str) -> bytes:
+        req = URLRequest(fetch_url, headers=request_headers)
+        with urlopen(req, timeout=30) as resp:
+            return resp.read()
+
+    def _resolve(base: str, seg: str) -> str:
+        if seg.startswith("http://") or seg.startswith("https://"):
+            return seg
+        return urljoin(base, seg)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # PHASE 1 — parse the m3u8 playlist
+    # ════════════════════════════════════════════════════════════════════════
+    seg_dir: Path | None = None
+    try:
+        downloads[dl_id].update({
+            "file_path": final_path,
+            "stage_label": "Fetching playlist...",
+            "progress_mode": "activity",
+            "downloaded": "", "total": "", "size": "", "speed": "", "eta": "",
+        })
+        _persist_download_record(dl_id, force=True)
+
+        playlist_text = _fetch_bytes(url).decode("utf-8", errors="replace")
+        if "#EXTM3U" not in playlist_text:
+            raise ValueError("Response is not a valid m3u8 playlist")
+
+        # Resolve master playlist → best variant
+        media_url = url
+        if "EXT-X-STREAM-INF" in playlist_text:
+            # Pick the first (best-quality) variant URI
+            for _line in playlist_text.splitlines():
+                _line = _line.strip()
+                if _line and not _line.startswith("#"):
+                    media_url = _resolve(url, _line)
+                    break
+            playlist_text = _fetch_bytes(media_url).decode("utf-8", errors="replace")
+
+        # Collect segment URLs in order
+        segment_urls: list[str] = []
+        for _line in playlist_text.splitlines():
+            _line = _line.strip()
+            if _line and not _line.startswith("#"):
+                segment_urls.append(_resolve(media_url, _line))
+
+        if not segment_urls:
+            raise ValueError("No segments found in playlist")
+
+        total_segs = len(segment_urls)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # PHASE 2 — parallel segment download
+        # ═══════════════════════════════════════════════════════════════════
+        seg_dir = Path(output_dir or DOWNLOAD_DIR) / f"_hls_{dl_id}"
+        seg_dir.mkdir(parents=True, exist_ok=True)
+
+        # Thread-safe progress counters
+        _lock = threading.Lock()
+        _completed = [0]
+        _total_bytes = [0]
+        # Rolling speed window: (timestamp, cumulative_bytes) samples
+        _speed_samples: list[tuple[float, int]] = [(time.monotonic(), 0)]
+
+        downloads[dl_id].update({
+            "partial_file_path": str(seg_dir),
+            "progress_mode": "determinate",
+            "stage_label": f"Downloading (0/{total_segs} segments)",
+            "percent": 0,
+            "bytes_downloaded": 0,
+        })
+        _persist_download_record(dl_id, force=True)
+
+        def _download_seg(args: tuple[int, str]) -> tuple[int, Path]:
+            idx, seg_url = args
+            if controls["cancel"].is_set():
+                raise RuntimeError("Download canceled")
+            while controls["pause"].is_set() and not controls["cancel"].is_set():
+                time.sleep(0.2)
+            seg_path = seg_dir / f"seg_{idx:06d}.ts"
+            last_exc: Exception = RuntimeError("segment download failed")
+            for attempt in range(4):
+                try:
+                    data = _fetch_bytes(seg_url)
+                    seg_path.write_bytes(data)
+                    seg_len = len(data)
+                    with _lock:
+                        _completed[0] += 1
+                        _total_bytes[0] += seg_len
+                        _now = time.monotonic()
+                        _speed_samples.append((_now, _total_bytes[0]))
+                        # Keep only last 5 s of samples
+                        _cutoff = _now - 5.0
+                        while len(_speed_samples) > 2 and _speed_samples[0][0] < _cutoff:
+                            _speed_samples.pop(0)
+                        # Speed = bytes delta over time delta of window
+                        _window_bytes = _total_bytes[0] - _speed_samples[0][1]
+                        _window_secs  = max(_now - _speed_samples[0][0], 0.001)
+                        _speed_bps    = _window_bytes / _window_secs
+                        _done         = _completed[0]
+                        _pct          = round(_done / total_segs * 100, 1)
+                        _remaining    = total_segs - _done
+                        _eta_secs     = int(_remaining / max(_done / max(_now - _speed_samples[0][0] + 0.001, 0.001), 0.001)) if _done else 0
+                        downloads[dl_id].update({
+                            "percent":          _pct,
+                            "bytes_downloaded": _total_bytes[0],
+                            "downloaded":       _format_bytes(_total_bytes[0]),
+                            "speed":            f"{_format_bytes(_speed_bps)}/s",
+                            "eta":              _format_eta(_eta_secs) if _eta_secs > 0 else "",
+                            "stage_label":      f"Downloading ({_done}/{total_segs} segments)",
+                            "progress_mode":    "determinate",
+                        })
+                        _persist_download_record(dl_id)
+                    return idx, seg_path
+                except Exception as exc:
+                    last_exc = exc
+                    if controls["cancel"].is_set():
+                        raise RuntimeError("Download canceled") from exc
+                    if attempt < 3:
+                        time.sleep(min(2 ** attempt, 8))
+            raise last_exc
+
+        HLS_WORKERS = 8  # simultaneous segment fetches
+        seg_paths: dict[int, Path] = {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=HLS_WORKERS) as executor:
+            fs = {executor.submit(_download_seg, (i, u)): i
+                  for i, u in enumerate(segment_urls)}
+            for future in concurrent.futures.as_completed(fs):
+                if controls["cancel"].is_set():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise RuntimeError("Download canceled")
+                idx, seg_path = future.result()   # re-raises on worker exception
+                seg_paths[idx] = seg_path
+
+        # ═══════════════════════════════════════════════════════════════════
+        # PHASE 3 — FFmpeg concat-mux .ts segments → .mkv
+        # ═══════════════════════════════════════════════════════════════════
+        downloads[dl_id].update({
+            "stage_label": "Merging segments...",
+            "progress_mode": "processing",
+            "percent": 99,
+            "speed": "",
+            "eta": "",
+        })
+        _persist_download_record(dl_id, force=True)
+
+        concat_list = seg_dir / "concat.txt"
+        with open(concat_list, "w", encoding="utf-8") as _f:
+            for _idx in sorted(seg_paths):
+                # Use forward slashes and escape single quotes for FFmpeg
+                _safe = str(seg_paths[_idx]).replace("'", "'\\''")
+                _f.write(f"file '{_safe}'\n")
+
+        output_part = f"{final_path}.part.mkv"
+        _cf = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        _merge_proc = subprocess.run(
+            [
+                FFMPEG_PATH, "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", str(concat_list),
+                "-c", "copy",
+                "-f", "matroska",
+                output_part,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            creationflags=_cf,
+        )
+        if _merge_proc.returncode != 0:
+            _err = (_merge_proc.stderr or b"").decode("utf-8", errors="replace")[-600:]
+            raise RuntimeError(f"FFmpeg concat failed: {_err}")
+
+        if Path(final_path).exists():
+            Path(final_path).unlink()
+        Path(output_part).replace(final_path)
+
+        downloads[dl_id].update({
+            "percent": 100,
+            "file_path": final_path,
+            "partial_file_path": "",
+            "progress_mode": "determinate",
+            "stage_label": "Finalizing",
+        })
+        _persist_download_record(dl_id, force=True)
+        return final_path
+
+    except Exception as _parallel_exc:
+        # Cancel: propagate immediately, no fallback
+        if controls["cancel"].is_set():
+            raise
+        # Any other failure (parse error, network, etc.) → fall back to
+        # the original single-connection FFmpeg approach below.
+        _parallel_err = str(_parallel_exc)
+    finally:
+        # Clean up segment temp dir on success or any failure
+        if seg_dir is not None:
+            try:
+                shutil.rmtree(seg_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+    # ════════════════════════════════════════════════════════════════════════
+    # FALLBACK — original single-connection FFmpeg HLS download
+    # Used when the parallel approach cannot parse/fetch the playlist.
+    # ════════════════════════════════════════════════════════════════════════
+    downloads[dl_id].update({
+        "stage_label": "Downloading (sequential fallback)...",
+        "progress_mode": "activity",
+        "downloaded": "", "total": "", "size": "", "speed": "", "eta": "",
+    })
+    _persist_download_record(dl_id, force=True)
+
+    output_path = f"{final_path}.part.mkv"
     command = [FFMPEG_PATH, "-y"]
     if request_headers:
         header_blob = "".join(f"{key}: {value}\r\n" for key, value in request_headers.items())
@@ -4401,10 +4654,12 @@ def _download_hls_media(
     command.extend([
         "-protocol_whitelist", "file,http,https,tcp,tls,crypto,data",
         "-allowed_extensions", "ALL",
-        "-timeout", "30000000",         # 30 s per HTTP op (µs) — prevents CDN stall hang
-        "-reconnect", "1",              # auto-reconnect on transient errors
-        "-reconnect_streamed", "1",     # reconnect for HLS/streamed content
-        "-reconnect_delay_max", "5",    # max 5 s between reconnect attempts
+        "-timeout", "30000000",
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+        "-http_persistent", "1",
+        "-multiple_requests", "1",
         "-stats_period", "1",
         "-i", url,
         "-c", "copy",
@@ -4415,17 +4670,10 @@ def _download_hls_media(
     downloads[dl_id].update({
         "file_path": final_path,
         "partial_file_path": output_path,
-        "downloaded": "",
-        "total": "",
-        "size": "",
-        "speed": "",
-        "eta": "",
-        "progress_mode": "activity",
-        "stage_label": "Downloading",
     })
     _persist_download_record(dl_id, force=True)
 
-    last_error = "FFmpeg could not start the HLS download."
+    last_error = _parallel_err or "FFmpeg could not start the HLS download."
     for attempt in range(3):
         _hls_cf = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         process = subprocess.Popen(
@@ -4446,16 +4694,13 @@ def _download_hls_media(
         last_size_sample = 0
         last_sample_ts = time.monotonic()
 
-        # ── Watchdog: kill FFmpeg if no new bytes written in 3 minutes ───────
-        # readline() blocks forever when the CDN stalls; the watchdog escapes it
-        # by terminating FFmpeg, which closes the pipe and unblocks readline().
-        _WD_TIMEOUT_S = 180  # 3 minutes of zero byte progress = hung download
+        _WD_TIMEOUT_S = 180
         _wd_stop = threading.Event()
         _wd_last_size: list[int] = [0]
         _wd_last_ts: list[float] = [time.monotonic()]
 
         def _wd_run() -> None:
-            while not _wd_stop.wait(15):        # check every 15 s
+            while not _wd_stop.wait(15):
                 if controls["cancel"].is_set():
                     break
                 try:
@@ -4467,12 +4712,11 @@ def _download_hls_media(
                     _wd_last_ts[0] = time.monotonic()
                 elif time.monotonic() - _wd_last_ts[0] > _WD_TIMEOUT_S:
                     if process.poll() is None:
-                        process.terminate()         # unblocks readline() via EOF
+                        process.terminate()
                     break
 
         _wd_thread = threading.Thread(target=_wd_run, daemon=True)
         _wd_thread.start()
-        # ─────────────────────────────────────────────────────────────────────
 
         try:
             while True:
@@ -4507,16 +4751,17 @@ def _download_hls_media(
                     downloads[dl_id]["downloaded"] = current_label
                     if total_duration_seconds > 0:
                         downloads[dl_id]["percent"] = round(
-                            min(100.0, (current_seconds / total_duration_seconds) * 100),
-                            1,
+                            min(100.0, (current_seconds / total_duration_seconds) * 100), 1,
                         )
                         downloads[dl_id]["progress_mode"] = "determinate"
+
                 speed_match = re.search(r"speed=\s*([0-9.]+)x", line)
                 if speed_match:
                     try:
                         speed_factor = float(speed_match.group(1))
                     except Exception:
                         speed_factor = 0.0
+
                 try:
                     current_size = Path(output_path).stat().st_size
                 except Exception:
@@ -4533,10 +4778,12 @@ def _download_hls_media(
                         downloads[dl_id]["speed"] = f"{_format_bytes(delta / elapsed)}/s"
                         last_size_sample = current_size
                         last_sample_ts = now
+
                 if total_duration_seconds > 0 and current_seconds > 0:
                     remaining_seconds = max(total_duration_seconds - current_seconds, 0.0)
                     if speed_factor > 0:
                         downloads[dl_id]["eta"] = _format_eta(remaining_seconds / speed_factor)
+
                 downloads[dl_id]["stage_label"] = "Downloading"
                 _persist_download_record(dl_id)
         finally:
@@ -4566,7 +4813,6 @@ def _download_hls_media(
             time.sleep(2 ** (attempt + 1))
 
     raise RuntimeError(last_error)
-
 
 # ── Download record helpers ───────────────────────────────────────────────────
 def _download_strategy_for(params: dict | None) -> str:
@@ -6498,15 +6744,16 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         error_text = str(e)
         if isinstance(e, OSError) and getattr(e, "errno", None) == 22:
             error_text = "Windows rejected the generated download file path. GRABIX now uses safer filenames, so retry this download after restarting the backend/app."
-        downloads[dl_id]["status"] = status
-        downloads[dl_id]["error"] = error_text
-        downloads[dl_id]["recoverable"] = status == "failed"
-        downloads[dl_id]["failure_code"] = "download_canceled" if status == "canceled" else "download_failed"
-        downloads[dl_id]["progress_mode"] = "activity"
-        if status == "failed":
-            downloads[dl_id]["_failed_at"] = time.time()
-        downloads[dl_id]["stage_label"] = "Canceled" if status == "canceled" else "Failed"
-        db_update_status(dl_id, status, downloads[dl_id].get("file_path", ""))
+        if dl_id in downloads:
+            downloads[dl_id]["status"] = status
+            downloads[dl_id]["error"] = error_text
+            downloads[dl_id]["recoverable"] = status == "failed"
+            downloads[dl_id]["failure_code"] = "download_canceled" if status == "canceled" else "download_failed"
+            downloads[dl_id]["progress_mode"] = "activity"
+            if status == "failed":
+                downloads[dl_id]["_failed_at"] = time.time()
+            downloads[dl_id]["stage_label"] = "Canceled" if status == "canceled" else "Failed"
+        db_update_status(dl_id, status, (downloads.get(dl_id) or {}).get("file_path", ""))
         _persist_download_record(dl_id, force=True)
     finally:
         _merge_progress_stop.set()   # stop merge size-poll thread if running

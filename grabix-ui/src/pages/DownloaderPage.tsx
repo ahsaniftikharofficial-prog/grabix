@@ -394,8 +394,11 @@ export default function DownloaderPage({ onDownloadStarting }: { onDownloadStart
 
     try {
       const trimEnabled = trimOpen && trimEnd - trimStart < info!.duration;
+      // Force FFmpeg HLS path for .m3u8 URLs — skips the yt-dlp probe that throws
+      // "Unsupported URL" for raw HLS streams pasted from the anime player.
+      const forceHls = url.toLowerCase().includes(".m3u8");
       onDownloadStarting?.();
-      const res = await backendFetch(`${API}/download?url=${encodeURIComponent(url)}&title=${encodeURIComponent(info.title)}&thumbnail=${encodeURIComponent(info.thumbnail)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`, undefined, { sensitive: true });
+      const res = await backendFetch(`${API}/download?url=${encodeURIComponent(url)}&title=${encodeURIComponent(info.title)}&thumbnail=${encodeURIComponent(info.thumbnail)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}${forceHls ? "&force_hls=true" : ""}`, undefined, { sensitive: true });
       if (!res.ok) {
         let errMsg = `Download failed (${res.status})`;
         try { const errData = await res.json(); errMsg = errData.detail || errData.error || errMsg; } catch {}
@@ -480,8 +483,9 @@ export default function DownloaderPage({ onDownloadStarting }: { onDownloadStart
       setQueue(prev => [newItem, ...prev]);
       try {
         const trimEnabled = trimOpen && info && trimEnd - trimStart < info.duration;
+        const forceHlsBulk = bUrl.toLowerCase().includes(".m3u8");
         onDownloadStarting?.();
-        const res = await backendFetch(`${API}/download?url=${encodeURIComponent(bUrl)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}`, undefined, { sensitive: true });
+        const res = await backendFetch(`${API}/download?url=${encodeURIComponent(bUrl)}&dl_type=${fileType}&quality=${quality}&audio_format=${audioFormat}&subtitle_lang=${subtitleLang}&thumbnail_format=${thumbnailFormat}&trim_start=${trimStart}&trim_end=${trimEnd}&trim_enabled=${trimEnabled}&use_cpu=${useCpu}&download_engine=${encodeURIComponent(effectiveDownloadEngine)}${forceHlsBulk ? "&force_hls=true" : ""}`, undefined, { sensitive: true });
         if (!res.ok) {
           throw new Error(`Download request failed with ${res.status}`);
         }
