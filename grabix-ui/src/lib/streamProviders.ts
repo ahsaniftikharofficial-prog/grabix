@@ -285,7 +285,7 @@ async function resolveProviderPlayback(
   // 30-second hard timeout — prevents "loading forever" when the backend
   // provider chain is slow (e.g. MegaCloud extraction taking 25+ seconds).
   const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), 30_000);
+  const timeoutId = window.setTimeout(() => controller.abort(), 55_000);
 
   try {
     const response = await fetch(`${BACKEND_API}${path}`, {

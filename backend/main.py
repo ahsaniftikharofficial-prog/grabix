@@ -1453,25 +1453,28 @@ def _resolve_fallback_provider(tmdb_id: int | None, season: int, episode: int, t
     return None
 
 
-async def _validate_stream_url(url: str, timeout: float = 5.0) -> bool:
+async def _validate_stream_url(url: str, timeout: float = 5.0, request_headers: dict | None = None) -> bool:
     """
     Quick HEAD/GET check to confirm the stream URL actually responds.
     Returns True if the URL returns 200 or 206.
     Returns False on any error, timeout, or non-success status.
+    Accepts optional request_headers (e.g. Referer) so CDN URLs don't get
+    incorrectly rejected when the CDN requires a Referer header.
     """
     import httpx as _httpx
+    check_headers = {"User-Agent": "Mozilla/5.0", **(request_headers or {})}
     try:
         async with _httpx.AsyncClient(
             timeout=_httpx.Timeout(connect=3.0, read=timeout, write=3.0, pool=3.0),
             follow_redirects=True,
         ) as client:
             # Try HEAD first (faster, no body download)
-            r = await client.head(url, headers={"User-Agent": "Mozilla/5.0"})
+            r = await client.head(url, headers=check_headers)
             if r.status_code in (200, 206):
                 return True
-            # Some CDNs reject HEAD — fall back to GET with a tiny read
-            if r.status_code in (405, 501):
-                r2 = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            # Some CDNs reject HEAD or require Referer — fall back to ranged GET
+            if r.status_code in (403, 405, 501):
+                r2 = await client.get(url, headers={**check_headers, "Range": "bytes=0-0"})
                 return r2.status_code in (200, 206)
     except Exception:
         pass
@@ -1616,7 +1619,8 @@ async def _race_fallback_provider(
         if not stream_url:
             return None
 
-        if not await _validate_stream_url(stream_url):
+        provider_headers = dict(watch_data.get("headers") or {})
+        if not await _validate_stream_url(stream_url, request_headers=provider_headers or None):
             return None
 
         return {
