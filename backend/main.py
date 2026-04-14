@@ -1569,11 +1569,16 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
         )
 
     # ── Fallback providers: AnimeKai → KickAssAnime → AnimePahe ──────────────
-    # Only runs when HiAnime failed and we have a title to search by.
+    # Runs in PARALLEL when HiAnime failed and we have a title to search by.
+    # All 3 providers are tried simultaneously; the first success wins.
+    # Total timeout: 30 seconds for the entire fallback chain.
     if payload.title:
         from app.services.consumet import search_domain, fetch_anime_watch, _fetch_consumet_json
+
         FALLBACK_PROVIDERS = ["animekai", "kickassanime", "animepahe"]
-        for fb_provider in FALLBACK_PROVIDERS:
+
+        async def _try_fallback_provider(fb_provider: str) -> dict | None:
+            """Try a single fallback provider. Returns resolution dict or None."""
             try:
                 # Step 1 — search by title to get this provider's anime ID
                 search_result = await search_domain(
@@ -1582,10 +1587,10 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
                 items = search_result.get("items") or []
                 if not items:
                     tried.append({"server": payload.server, "stage": f"{fb_provider}-search", "detail": "no results"})
-                    continue
+                    return None
                 fb_anime_id = str(items[0].get("id") or "").strip()
                 if not fb_anime_id:
-                    continue
+                    return None
 
                 # Step 2 — fetch episode list for this anime
                 if fb_provider == "animepahe":
@@ -1601,7 +1606,7 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
                 episodes = info_payload.get("episodes") or []
                 if not episodes:
                     tried.append({"server": payload.server, "stage": f"{fb_provider}-info", "detail": "no episodes"})
-                    continue
+                    return None
 
                 # Step 3 — match episode by number, fall back to first episode
                 target_ep = next(
@@ -1610,7 +1615,7 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
                 )
                 fb_episode_id = str(target_ep.get("id") or "").strip()
                 if not fb_episode_id:
-                    continue
+                    return None
 
                 # Step 4 — fetch the stream from this provider
                 watch_data = await fetch_anime_watch(
@@ -1626,7 +1631,7 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
                 ]
                 if not playable:
                     tried.append({"server": payload.server, "stage": f"{fb_provider}-watch", "detail": "no playable sources"})
-                    continue
+                    return None
 
                 target_source = playable[0]
                 raw_headers = dict(watch_data.get("headers") or {})
@@ -1642,7 +1647,6 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
                     "strategy": f"{fb_provider} Fallback Resolution",
                 }
                 tried.append({"server": payload.server, "stage": f"{fb_provider}-fallback", "detail": "success"})
-                _set_cached_anime_resolution(payload, resolution)
                 return resolution
 
             except Exception as fb_exc:
@@ -1651,7 +1655,51 @@ async def anime_resolve_source(payload: AnimeResolveRequest):
                     "stage": f"{fb_provider}-fallback",
                     "detail": str(fb_exc),
                 })
-                continue
+                return None
+
+        # Run all fallback providers in parallel, total timeout = 30s
+        try:
+            tasks = [asyncio.create_task(_try_fallback_provider(p)) for p in FALLBACK_PROVIDERS]
+            done, pending = await asyncio.wait(
+                tasks,
+                timeout=30.0,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Keep checking completed tasks for a valid result
+            # (FIRST_COMPLETED fires on the first completion, not the first success)
+            successful_resolution = None
+            while done and not successful_resolution:
+                task = done.pop()
+                result = task.result()
+                if result is not None:
+                    successful_resolution = result
+                else:
+                    # This provider returned None, wait for next completion
+                    if pending:
+                        more_done, pending = await asyncio.wait(
+                            pending,
+                            timeout=max(0, 30.0),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        done.update(more_done)
+
+            # Cancel any still-running tasks
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            if successful_resolution:
+                _set_cached_anime_resolution(payload, successful_resolution)
+                return successful_resolution
+
+        except Exception as parallel_exc:
+            tried.append({
+                "server": payload.server,
+                "stage": "parallel-fallback",
+                "detail": f"Parallel fallback error: {parallel_exc}",
+            })
 
     raise HTTPException(
         status_code=422,
