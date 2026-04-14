@@ -3363,7 +3363,7 @@ def _start_aria2_rpc_monitor(
                         # "Downloading 100%" indefinitely.
                         if current_status == "downloading":
                             downloads[dl_id].update({
-                                "percent": pct,
+                                "percent": 0,
                                 "downloaded": _format_bytes(cumulative),
                                 "total": _format_bytes(total_known) if total_known else "",
                                 "size": _format_bytes(total_known or cumulative),
@@ -3373,7 +3373,7 @@ def _start_aria2_rpc_monitor(
                                 "progress_mode": "processing",
                                 "stage_label": "Merging",
                                 "speed": "",
-                                "eta": "0s",
+                                "eta": "",
                                 "aria2_segments": [],
                                 "aria2_connection_segments": [],
                             })
@@ -6207,7 +6207,7 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         s    = d.get("status", "")
         # Only care about ffmpeg merge/convert steps
         if pp not in ("FFmpegMergerPP", "FFmpegVideoConvertorPP",
-                      "FFmpegCopyStreamPP", "FFmpegFixupM4aPP"):
+                      "FFmpegVideoRemuxerPP", "FFmpegCopyStreamPP", "FFmpegFixupM4aPP"):
             return
 
         if s == "started":
