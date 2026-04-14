@@ -595,3 +595,23 @@ async def run_key_health_worker(interval_seconds: float = 1200.0) -> None:
         except Exception as exc:
             logger.error("Key health worker error (will retry next cycle): %s", exc)
             await asyncio.sleep(60.0)  # Back off on unexpected errors
+
+
+async def try_extract_hianime_stream(
+    episode_id: str,
+    category: str = "sub",
+    referer: str = HIANIME_BASE + "/",
+) -> dict | None:
+    """
+    Race-safe wrapper around extract_hianime_stream().
+    Returns the result dict on success, or None on any failure.
+    Never raises — designed to be used in asyncio.gather() races.
+    """
+    try:
+        return await extract_hianime_stream(
+            episode_id=episode_id,
+            category=category,
+            referer=referer,
+        )
+    except Exception:
+        return None

@@ -1453,201 +1453,280 @@ def _resolve_fallback_provider(tmdb_id: int | None, season: int, episode: int, t
     return None
 
 
+async def _validate_stream_url(url: str, timeout: float = 5.0) -> bool:
+    """
+    Quick HEAD/GET check to confirm the stream URL actually responds.
+    Returns True if the URL returns 200 or 206.
+    Returns False on any error, timeout, or non-success status.
+    """
+    import httpx as _httpx
+    try:
+        async with _httpx.AsyncClient(
+            timeout=_httpx.Timeout(connect=3.0, read=timeout, write=3.0, pool=3.0),
+            follow_redirects=True,
+        ) as client:
+            # Try HEAD first (faster, no body download)
+            r = await client.head(url, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code in (200, 206):
+                return True
+            # Some CDNs reject HEAD — fall back to GET with a tiny read
+            if r.status_code in (405, 501):
+                r2 = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                return r2.status_code in (200, 206)
+    except Exception:
+        pass
+    return False
+
+
+async def _race_hianime_megacloud(
+    episode_id: str,
+    audio: str,
+) -> dict | None:
+    """
+    Race-safe wrapper for the Python MegaCloud extractor.
+    Normalizes output to match the shape returned by _race_fallback_provider.
+    Returns None on failure.
+    """
+    from app.services.megacloud import try_extract_hianime_stream
+
+    category = "dub" if str(audio or "").lower() == "en" else "sub"
+    result = await try_extract_hianime_stream(
+        episode_id=episode_id,
+        category=category,
+    )
+    if not result:
+        return None
+
+    sources = result.get("sources") or []
+    playable = [
+        s for s in sources
+        if isinstance(s, dict)
+        and str(s.get("kind") or ("hls" if s.get("isM3U8") else "direct")).lower() in {"hls", "direct"}
+    ]
+    if not playable:
+        return None
+
+    stream_url = str(playable[0].get("url") or "").strip()
+    if not stream_url:
+        return None
+
+    # MegaCloud streams are on bunnycdn — they always require a Referer
+    # The extractor provides this in result["headers"]
+    headers = dict(result.get("headers") or {})
+    if not headers:
+        headers = {"Referer": "https://megacloud.blog/"}
+
+    # HiAnime streams go through the backend proxy, so we trust them without HEAD check
+    return {
+        "source": {
+            "url": stream_url,
+            "kind": "hls" if (playable[0].get("isM3U8") or ".m3u8" in stream_url.lower()) else "direct",
+            "headers": headers,
+        },
+        "subtitles": result.get("subtitles") or [],
+        "provider": "HiAnime",
+        "selectedServer": "VidCloud",
+        "strategy": "HiAnime MegaCloud Race Win",
+    }
+
+
+async def _race_fallback_provider(
+    fb_provider: str,
+    title: str,
+    episode_number: int,
+    audio: str,
+    server: str,
+) -> dict | None:
+    """
+    Try a single fallback provider for a stream URL.
+    Returns a normalized resolution dict on success, or None on failure.
+    Never raises — designed for asyncio.gather() races.
+
+    Steps:
+      1. Search provider by anime title
+      2. Pick best matching result
+      3. Fetch episode list
+      4. Match episode by number
+      5. Fetch stream, return first playable source
+    """
+    from app.services.consumet import search_domain, fetch_anime_watch, _fetch_consumet_json
+
+    try:
+        # Step 1 — search by title
+        search_result = await search_domain("anime", title, provider=fb_provider, page=1)
+        items = search_result.get("items") or []
+        if not items:
+            return None
+
+        fb_anime_id = str(items[0].get("id") or "").strip()
+        if not fb_anime_id:
+            return None
+
+        # Step 2 — fetch episode list
+        if fb_provider == "animepahe":
+            info_payload = await _fetch_consumet_json(
+                f"/anime/{fb_provider}/info/{fb_anime_id}",
+                ttl_seconds=300,
+            )
+        else:
+            info_payload = await _fetch_consumet_json(
+                f"/anime/{fb_provider}/info",
+                params={"id": fb_anime_id},
+                ttl_seconds=300,
+            )
+
+        episodes = info_payload.get("episodes") or []
+        if not episodes:
+            return None
+
+        # Step 3 — match episode by number, fall back to first
+        target_ep = next(
+            (e for e in episodes if int(e.get("number") or 0) == episode_number),
+            episodes[0],
+        )
+        fb_episode_id = str(target_ep.get("id") or "").strip()
+        if not fb_episode_id:
+            return None
+
+        # Step 4 — fetch stream
+        watch_data = await fetch_anime_watch(
+            provider=fb_provider,
+            episode_id=fb_episode_id,
+            server=server,
+            audio=audio,
+        )
+        sources = watch_data.get("sources") or []
+
+        # Task 7: If user asked for dub, skip this provider if it only has sub
+        category_requested = "dub" if str(audio or "").lower() == "en" else "sub"
+        returned_category = str(watch_data.get("_category_used") or "sub").lower()
+        if category_requested == "dub" and returned_category != "dub":
+            return None
+
+        playable = [
+            s for s in sources
+            if isinstance(s, dict)
+            and str(s.get("kind") or "").lower() in {"hls", "direct"}
+        ]
+        if not playable:
+            return None
+
+        # Step 5 — validate the URL is reachable before declaring victory
+        stream_url = str(playable[0].get("url") or "").strip()
+        if not stream_url:
+            return None
+
+        if not await _validate_stream_url(stream_url):
+            return None
+
+        return {
+            "source": {
+                "url": stream_url,
+                "kind": str(playable[0].get("kind") or "hls"),
+                "headers": dict(watch_data.get("headers") or {}),
+            },
+            "subtitles": watch_data.get("subtitles") or [],
+            "provider": fb_provider,
+            "selectedServer": playable[0].get("quality", server),
+            "strategy": f"{fb_provider} Race Win",
+        }
+
+    except Exception:
+        return None
+
+
 @app.post("/anime/resolve-source")
 async def anime_resolve_source(payload: AnimeResolveRequest):
     cached = _get_cached_anime_resolution(payload)
     if cached:
         return cached
 
-    tried: list[dict] = []
     episode_id = payload.episodeId.strip()
     if not episode_id:
         raise HTTPException(status_code=400, detail="episodeId is required")
 
+    audio = payload.audio or "original"
+    server = payload.server or "auto"
+    title = payload.title or ""
+
+    # ── Build the race ────────────────────────────────────────────────────────
+    # All four providers fire simultaneously.
+    # First to return a valid, reachable stream URL wins.
+    # The others are cancelled immediately.
+
+    tasks = []
+    task_labels = []
+
+    # Provider 1: Python MegaCloud extractor (HiAnime)
+    tasks.append(asyncio.create_task(
+        _race_hianime_megacloud(episode_id, audio),
+        name="hianime_megacloud",
+    ))
+    task_labels.append("hianime_megacloud")
+
+    # Providers 2-4: Fallback providers (only if we have a title to search with)
+    if title:
+        for fb_provider in ("animekai", "kickassanime", "animepahe"):
+            tasks.append(asyncio.create_task(
+                _race_fallback_provider(
+                    fb_provider=fb_provider,
+                    title=title,
+                    episode_number=payload.episodeNumber or 1,
+                    audio=audio,
+                    server=server,
+                ),
+                name=fb_provider,
+            ))
+            task_labels.append(fb_provider)
+
+    # ── Race: wait for first non-None result ─────────────────────────────────
+    resolution = None
+    pending = set(tasks)
+
     try:
-        from app.services.consumet import _fetch_consumet_json
-        category = _map_audio_category(payload.audio)
-        allow_browser_capture = str(payload.purpose or "play").strip().lower() == "download"
-
-        async def _try_raw_hianime(server_name: str) -> dict | None:
-            raw_payload = await _fetch_consumet_json(
-                f"/anime/hianime/watch/{quote(episode_id)}",
-                params={"server": server_name, "category": category},
-                ttl_seconds=10,  # CDN tokens expire quickly; barely cache to avoid stale URLs
-                timeout=25.0,    # hianime extraction can take up to 10+ seconds
+        while pending and resolution is None:
+            done, pending = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=35.0,
             )
-            direct_resolution = _convert_hianime_source_payload(raw_payload, server_name, tried)
-            if direct_resolution:
-                return direct_resolution
-            return _extract_hianime_embed_source(
-                raw_payload,
-                episode_id,
-                server_name,
-                tried,
-                allow_browser_capture=allow_browser_capture,
-            )
+            if not done:
+                # Timeout hit with no results
+                break
+            for finished_task in done:
+                try:
+                    result = finished_task.result()
+                    if result is not None and resolution is None:
+                        resolution = result
+                except Exception:
+                    pass
+    finally:
+        # Cancel all remaining tasks — we have our winner (or have given up)
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
-        tasks = [asyncio.create_task(_try_raw_hianime(server_name)) for server_name in _anime_server_order(payload.server)]
-        try:
-            for completed in asyncio.as_completed(tasks):
-                resolution = await completed
-                if resolution:
-                    _set_cached_anime_resolution(payload, resolution)
-                    return resolution
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-    except Exception as exc:
-        tried.append(
-            {
-                "server": payload.server,
-                "stage": "hianime-raw-watch",
-                "detail": f"HiAnime embed extraction failed: {exc}",
-            }
+    if resolution is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "All stream providers failed. Try again in a moment.",
+                "code": "all_providers_failed",
+                "retryable": True,
+            },
         )
 
-    # ── Fallback providers: AnimeKai → KickAssAnime → AnimePahe ──────────────
-    # Runs in PARALLEL when HiAnime failed and we have a title to search by.
-    # All 3 providers are tried simultaneously; the first success wins.
-    # Total timeout: 30 seconds for the entire fallback chain.
-    if payload.title:
-        from app.services.consumet import search_domain, fetch_anime_watch, _fetch_consumet_json
+    # ── Normalize and cache ───────────────────────────────────────────────────
+    # Make sure HLS streams from HiAnime always have a Referer header set
+    # so the backend proxy can forward it to the CDN
+    source = resolution.get("source") or {}
+    if not source.get("headers"):
+        source["headers"] = {"Referer": "https://megacloud.blog/"}
+        resolution["source"] = source
 
-        FALLBACK_PROVIDERS = ["animekai", "kickassanime", "animepahe"]
-
-        async def _try_fallback_provider(fb_provider: str) -> dict | None:
-            """Try a single fallback provider. Returns resolution dict or None."""
-            try:
-                # Step 1 — search by title to get this provider's anime ID
-                search_result = await search_domain(
-                    "anime", payload.title, provider=fb_provider, page=1
-                )
-                items = search_result.get("items") or []
-                if not items:
-                    tried.append({"server": payload.server, "stage": f"{fb_provider}-search", "detail": "no results"})
-                    return None
-                fb_anime_id = str(items[0].get("id") or "").strip()
-                if not fb_anime_id:
-                    return None
-
-                # Step 2 — fetch episode list for this anime
-                if fb_provider == "animepahe":
-                    info_payload = await _fetch_consumet_json(
-                        f"/anime/{fb_provider}/info/{fb_anime_id}", ttl_seconds=300
-                    )
-                else:
-                    info_payload = await _fetch_consumet_json(
-                        f"/anime/{fb_provider}/info",
-                        params={"id": fb_anime_id},
-                        ttl_seconds=300,
-                    )
-                episodes = info_payload.get("episodes") or []
-                if not episodes:
-                    tried.append({"server": payload.server, "stage": f"{fb_provider}-info", "detail": "no episodes"})
-                    return None
-
-                # Step 3 — match episode by number, fall back to first episode
-                target_ep = next(
-                    (e for e in episodes if int(e.get("number") or 0) == payload.episodeNumber),
-                    episodes[0],
-                )
-                fb_episode_id = str(target_ep.get("id") or "").strip()
-                if not fb_episode_id:
-                    return None
-
-                # Step 4 — fetch the stream from this provider
-                watch_data = await fetch_anime_watch(
-                    provider=fb_provider,
-                    episode_id=fb_episode_id,
-                    server=payload.server,
-                    audio=payload.audio,
-                )
-                sources = watch_data.get("sources") or []
-                playable = [
-                    s for s in sources
-                    if isinstance(s, dict) and str(s.get("kind") or "").lower() in {"hls", "direct"}
-                ]
-                if not playable:
-                    tried.append({"server": payload.server, "stage": f"{fb_provider}-watch", "detail": "no playable sources"})
-                    return None
-
-                target_source = playable[0]
-                raw_headers = dict(watch_data.get("headers") or {})
-                resolution = {
-                    "source": {
-                        "url": target_source.get("url"),
-                        "kind": str(target_source.get("kind") or "hls"),
-                        "headers": raw_headers,
-                    },
-                    "subtitles": watch_data.get("subtitles") or [],
-                    "provider": fb_provider,
-                    "selectedServer": target_source.get("quality", payload.server),
-                    "strategy": f"{fb_provider} Fallback Resolution",
-                }
-                tried.append({"server": payload.server, "stage": f"{fb_provider}-fallback", "detail": "success"})
-                return resolution
-
-            except Exception as fb_exc:
-                tried.append({
-                    "server": payload.server,
-                    "stage": f"{fb_provider}-fallback",
-                    "detail": str(fb_exc),
-                })
-                return None
-
-        # Run all fallback providers in parallel, total timeout = 30s
-        try:
-            tasks = [asyncio.create_task(_try_fallback_provider(p)) for p in FALLBACK_PROVIDERS]
-            done, pending = await asyncio.wait(
-                tasks,
-                timeout=30.0,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            # Keep checking completed tasks for a valid result
-            # (FIRST_COMPLETED fires on the first completion, not the first success)
-            successful_resolution = None
-            while done and not successful_resolution:
-                task = done.pop()
-                result = task.result()
-                if result is not None:
-                    successful_resolution = result
-                else:
-                    # This provider returned None, wait for next completion
-                    if pending:
-                        more_done, pending = await asyncio.wait(
-                            pending,
-                            timeout=max(0, 30.0),
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        done.update(more_done)
-
-            # Cancel any still-running tasks
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-
-            if successful_resolution:
-                _set_cached_anime_resolution(payload, successful_resolution)
-                return successful_resolution
-
-        except Exception as parallel_exc:
-            tried.append({
-                "server": payload.server,
-                "stage": "parallel-fallback",
-                "detail": f"Parallel fallback error: {parallel_exc}",
-            })
-
-    raise HTTPException(
-        status_code=422,
-        detail={
-            "message": "Stream unavailable - no playable anime provider responded.",
-            "tried": tried,
-        },
+    _set_cached_anime_resolution(payload, resolution)
+    return resolution
     )
 
 
