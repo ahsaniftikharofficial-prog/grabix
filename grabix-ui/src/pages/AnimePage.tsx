@@ -32,7 +32,7 @@ import {
   type AniwatchScheduledAnime,
   type AniwatchSection,
 } from "../lib/aniwatchProviders";
-import { BACKEND_API } from "../lib/api";
+import { BACKEND_API, fetchBackendPing } from "../lib/api";
 import { fetchTmdbSeasonMap as fetchTmdbSeasonMapFromBackend, searchTmdbMedia } from "../lib/tmdb";
 import { fetchMovieBoxSources, resolveAnimePlaybackSources, searchMovieBox, type StreamSource } from "../lib/streamProviders";
 import CachedImage from "../components/CachedImage";
@@ -353,6 +353,7 @@ export default function AnimePage() {
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [health, setHealth] = useState<ConsumetHealth | null>(null);
+  const [consumetBaseUrlOverride, setConsumetBaseUrlOverride] = useState<string | null>(null);
   // Genre tab state
   const [genres, setGenres] = useState<AniwatchGenre[]>([]);
   const [selectedGenre, setSelectedGenre] = useState<string>("");
@@ -500,6 +501,14 @@ export default function AnimePage() {
         }
       });
     };
+
+    // Mirror V2: use /health/ping to get the real consumet_url (api_base from
+    // /consumet/health is often "" which breaks the sidecar fetch entirely).
+    fetchBackendPing().then((ping) => {
+      if (!cancelled && ping?.consumet_url) {
+        setConsumetBaseUrlOverride(ping.consumet_url.replace(/\/$/, ""));
+      }
+    }).catch(() => {});
 
     loadHealth();
     const interval = window.setInterval(loadHealth, 8000);
@@ -709,7 +718,7 @@ export default function AnimePage() {
             setPlayer(nextPlayer);
           }}
           consumetHealthy={Boolean(health?.healthy)}
-          consumetBaseUrl={health?.api_base ?? "http://127.0.0.1:3000"}
+          consumetBaseUrl={consumetBaseUrlOverride || health?.api_base || "http://127.0.0.1:3000"}
           activeTab={tab}
         />
       )}
@@ -1402,61 +1411,54 @@ function AnimeDetail({
       const ep = cachedEps.find((e) => Number(e.number) === Number(targetEpisode)) ?? cachedEps[0];
       const epId = ep?.id ? String(ep.id).trim() : undefined;
       if (epId) {
-        try {
-          const r = await fetch(
-            `${consumetBaseUrl}/anime/hianime/watch/${encodeURIComponent(epId)}?server=hd-1&category=${cat}`,
-            { signal: AbortSignal.timeout(8000) }
-          );
-          if (r.ok) {
+        // Mirror V2: try vidcloud first (V2 default), then hd-1 as fallback.
+        // For hianime NEVER fall through to resolveAnimePlaybackSourcesViaBackend —
+        // that chain returns embed/backend sources which cause "Couldn't load this source".
+        const serversToTry = ["vidcloud", "hd-1"] as const;
+        for (const tryServer of serversToTry) {
+          try {
+            const r = await fetch(
+              `${consumetBaseUrl}/anime/hianime/watch/${encodeURIComponent(epId)}?server=${tryServer}&category=${cat}`,
+              { signal: AbortSignal.timeout(8000) }
+            );
+            if (!r.ok) continue;
             const watchData = await r.json() as {
-              sources?: Array<{ url: string; quality?: string; isM3U8?: boolean }>;
+              sources?: Array<{ url: string; quality?: string; isM3U8?: boolean; isEmbed?: boolean }>;
               subtitles?: Array<{ lang?: string; url?: string }>;
               headers?: Record<string, string>;
             };
-            if (watchData.sources && watchData.sources.length > 0) {
-              // Filter out raw embed URLs — they need an iframe, not a video element,
-              // and cannot be proxied through the HLS chain. If the sidecar only returned
-              // embed-only sources it means MegaCloud extraction failed; fall through to
-              // the backend resolution path which will try again independently.
-              const playableSources = watchData.sources.filter(
-                (src) => src.isM3U8 || (!src.isEmbed && src.url && !src.url.includes("megacloud.blog"))
-              );
-              if (playableSources.length > 0) {
-                // HiAnime CDN (MegaCloud/BunnyCDN) rejects segment requests that
-                // lack a Referer header. The consumet server returns the required
-                // headers in watchData.headers — we must forward them as
-                // requestHeaders so shouldKeepHlsProxied() returns true and the
-                // player routes all HLS traffic through the backend proxy.
-                const requestHeaders: Record<string, string> =
-                  watchData.headers && Object.keys(watchData.headers).length > 0
-                    ? watchData.headers
-                    : { Referer: "https://megacloud.blog/" };
-                const subs = (watchData.subtitles ?? []).map((s, si) => ({
-                  id: s.lang ?? `sub-${si}`,
-                  label: s.lang ?? "Subtitle",
-                  language: s.lang,
-                  url: s.url ?? "",
-                }));
-                const sources: StreamSource[] = playableSources.map((src, i) => ({
-                  id: `hianime-sidecar-${epId}-${cat}-${i}`,
-                  label: `HiAnime ${cat === "dub" ? "DUB" : "SUB"}`,
-                  provider: "hianime",
-                  kind: src.isM3U8 ? "hls" : "direct",
-                  url: src.url,
-                  quality: src.quality,
-                  requestHeaders,
-                  subtitles: subs,
-                }));
-                // Cache so instant-play works on subsequent clicks
-                resolvedPlayableSourcesCacheRef.current[`play:${normalizedAudio}:${server}:${targetEpisode}`] = sources;
-                return sources;
-              }
-              // All sources were embed-only — fall through to backend path
-            }
+            if (!watchData.sources?.length) continue;
+            const playableSources = watchData.sources.filter(
+              (src) => src.isM3U8 || (!src.isEmbed && src.url && !src.url.includes("megacloud.blog"))
+            );
+            if (playableSources.length === 0) continue;
+            // Mirror V2: no requestHeaders so HLS plays directly from CDN
+            const subs = (watchData.subtitles ?? []).map((s, si) => ({
+              id: s.lang ?? `sub-${si}`,
+              label: s.lang ?? "Subtitle",
+              language: s.lang,
+              url: s.url ?? "",
+            }));
+            const sources: StreamSource[] = playableSources.map((src, i) => ({
+              id: `hianime-sidecar-${epId}-${cat}-${i}`,
+              label: `HiAnime ${cat === "dub" ? "DUB" : "SUB"}`,
+              provider: "hianime",
+              kind: src.isM3U8 ? "hls" : "direct",
+              url: src.url,
+              quality: src.quality,
+              subtitles: subs,
+            }));
+            resolvedPlayableSourcesCacheRef.current[`play:${normalizedAudio}:${server}:${targetEpisode}`] = sources;
+            return sources;
+          } catch {
+            // Try next server
           }
-        } catch {
-          // Silent — fall through to backend path
         }
+        // Both servers failed — throw a clear error instead of falling to the backend
+        // chain which returns embed URLs that produce "Couldn't load this source".
+        throw new Error(
+          "Could not load stream from HiAnime. The consumet sidecar may be down or the aniwatch package may be outdated."
+        );
       }
     }
     return await resolveAnimePlaybackSourcesViaBackend(targetEpisode);
