@@ -30,7 +30,20 @@ interface Show {
   seasons?: { season_number: number; episode_count?: number; name?: string }[];
 }
 
-type Tab = "trending" | "popular" | "toprated" | "onair";
+type Tab = "trending" | "popular" | "toprated";
+
+const STATIC_TOP_TV: Array<{ id: number; name: string; year: number }> = [
+  { id: -201, name: "Breaking Bad", year: 2008 },
+  { id: -202, name: "Planet Earth II", year: 2016 },
+  { id: -203, name: "Planet Earth", year: 2006 },
+  { id: -204, name: "Band of Brothers", year: 2001 },
+  { id: -205, name: "Chernobyl", year: 2019 },
+  { id: -206, name: "The Wire", year: 2002 },
+  { id: -207, name: "Avatar: The Last Airbender", year: 2005 },
+  { id: -208, name: "Blue Planet II", year: 2017 },
+  { id: -209, name: "The Sopranos", year: 1999 },
+  { id: -210, name: "Sherlock", year: 2010 },
+];
 
 function makeFallbackShowId(subjectId: string): number {
   let hash = 0;
@@ -60,6 +73,19 @@ function mapMovieBoxSeriesToShow(item: MovieBoxItem): Show {
     number_of_seasons: seasons.length || undefined,
     number_of_episodes: totalEpisodes || undefined,
     seasons,
+  };
+}
+
+function mapStaticShowToShow(item: { id: number; name: string; year: number }): Show {
+  return {
+    id: item.id,
+    name: item.name,
+    overview: "",
+    poster_path: "",
+    backdrop_path: "",
+    vote_average: 0,
+    first_air_date: `${item.year}-01-01`,
+    genres: [],
   };
 }
 
@@ -101,39 +127,46 @@ export default function TVSeriesPage() {
   const fetchTMDB = async (nextTab: Tab, nextPage = 1) => {
     setLoading(true);
     setPageError("");
+    if (nextPage === 1) setShows([]);
+    const categories: Record<Tab, "trending" | "popular" | "top_rated"> = {
+      trending: "trending",
+      popular: "popular",
+      toprated: "top_rated",
+    };
     try {
-      const endpoints: Record<Tab, "trending" | "popular" | "top_rated" | "on_the_air"> = {
-        trending: "trending",
-        popular: "popular",
-        toprated: "top_rated",
-        onair: "on_the_air",
-      };
-      const data = await discoverTmdbMedia("tv", endpoints[nextTab], nextPage);
+      const data = await discoverTmdbMedia("tv", categories[nextTab], nextPage);
       if (!data?.results) throw new Error("TMDB TV discover unavailable");
       const nextShows = (data.results ?? []) as Show[];
       setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
+      return;
     } catch {
-      try {
-        const discover = await fetchMovieBoxDiscover();
-        const sections = discover.sections ?? [];
-        const allTvItems = sections
-          .flatMap((section) => section.items ?? [])
-          .filter(isTvSeriesItem);
-        const dedupedShows = allTvItems.filter(
-          (item, idx, arr) => idx === arr.findIndex((c) => c.id === item.id)
-        );
-        const sortedShows =
-          nextTab === "toprated"
-            ? [...dedupedShows].sort((a, b) => Number(b.imdb_rating ?? 0) - Number(a.imdb_rating ?? 0))
-            : nextTab === "popular"
-              ? [...dedupedShows].sort((a, b) => Number(b.imdb_rating_count ?? 0) - Number(a.imdb_rating_count ?? 0))
-              : dedupedShows;
-        const nextShows = sortedShows.map(mapMovieBoxSeriesToShow);
-        setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
-        if (nextShows.length === 0) {
-          setPageError("TV series could not be loaded right now.");
-        }
-      } catch {
+    }
+
+    try {
+      const discover = await fetchMovieBoxDiscover();
+      const sections = discover.sections ?? [];
+      const selectedItems = (
+        nextTab === "toprated"
+          ? sections.filter((section) => section.id === "top-rated")
+          : nextTab === "popular"
+            ? sections.filter((section) => section.id === "series" || section.id === "most-popular")
+            : sections.filter((section) => section.id === "recent")
+      ).flatMap((section) => section.items ?? []);
+      const nextShows = selectedItems
+        .filter(isTvSeriesItem)
+        .map(mapMovieBoxSeriesToShow);
+      setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
+      if (nextShows.length === 0 && nextTab === "toprated") {
+        setShows(STATIC_TOP_TV.map(mapStaticShowToShow));
+        return;
+      }
+      if (nextShows.length === 0) {
+        setPageError("TV series could not be loaded right now.");
+      }
+    } catch {
+      if (nextTab === "toprated") {
+        setShows(STATIC_TOP_TV.map(mapStaticShowToShow));
+      } else {
         setShows([]);
         setPageError("TV series could not be loaded right now.");
       }
@@ -212,7 +245,6 @@ export default function TVSeriesPage() {
     { id: "trending" as Tab, label: "Trending" },
     { id: "popular" as Tab, label: "Popular" },
     { id: "toprated" as Tab, label: "Top Rated" },
-    { id: "onair" as Tab, label: "On Air" },
   ];
   const filteredShows = useMemo(() => filterAdultContent(shows, adultContentBlocked), [shows, adultContentBlocked]);
 

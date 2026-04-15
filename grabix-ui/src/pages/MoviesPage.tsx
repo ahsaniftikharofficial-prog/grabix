@@ -29,6 +29,19 @@ interface Movie {
 }
 type Tab = "trending" | "popular" | "toprated";
 
+const STATIC_TOP_MOVIES: Array<{ id: number; title: string; year: number }> = [
+  { id: -101, title: "The Shawshank Redemption", year: 1994 },
+  { id: -102, title: "The Godfather", year: 1972 },
+  { id: -103, title: "The Dark Knight", year: 2008 },
+  { id: -104, title: "The Godfather Part II", year: 1974 },
+  { id: -105, title: "12 Angry Men", year: 1957 },
+  { id: -106, title: "Schindler's List", year: 1993 },
+  { id: -107, title: "The Lord of the Rings: The Return of the King", year: 2003 },
+  { id: -108, title: "Pulp Fiction", year: 1994 },
+  { id: -109, title: "The Good, the Bad and the Ugly", year: 1966 },
+  { id: -110, title: "Fight Club", year: 1999 },
+];
+
 function makeFallbackMovieId(subjectId: string): number {
   let hash = 0;
   for (const char of subjectId) {
@@ -49,6 +62,19 @@ function mapMovieBoxMovieToMovie(item: MovieBoxItem): Movie {
     vote_average: item.imdb_rating ?? 0,
     release_date: item.year ? `${item.year}-01-01` : "",
     genres: (item.genres ?? []).map((genre, index) => ({ id: index + 1, name: genre })),
+  };
+}
+
+function mapStaticMovieToMovie(item: { id: number; title: string; year: number }): Movie {
+  return {
+    id: item.id,
+    title: item.title,
+    overview: "",
+    poster_path: "",
+    backdrop_path: "",
+    vote_average: 0,
+    release_date: `${item.year}-01-01`,
+    genres: [],
   };
 }
 
@@ -84,37 +110,45 @@ export default function MoviesPage() {
   const fetchTMDB = async (t: Tab, p = 1) => {
     setLoading(true);
     setPageError("");
+    if (p === 1) setMovies([]);
+    const categories: Record<Tab, "trending" | "popular" | "top_rated"> = {
+      trending: "trending",
+      popular: "popular",
+      toprated: "top_rated",
+    };
     try {
-      const categories: Record<Tab, "trending" | "popular" | "top_rated"> = {
-        trending: "trending",
-        popular: "popular",
-        toprated: "top_rated",
-      };
       const d = await discoverTmdbMedia("movie", categories[t], p);
       if (!d?.results) throw new Error("TMDB movie discover unavailable");
       setMovies(p === 1 ? (d.results ?? []) : prev => [...prev, ...(d.results ?? [])]);
+      return;
     } catch {
-      try {
-        const discover = await fetchMovieBoxDiscover();
-        const sections = discover.sections ?? [];
-        const allMovieItems = sections
-          .flatMap((section) => section.items ?? [])
-          .filter((item) => item.moviebox_media_type === "movie");
-        const dedupedMovies = allMovieItems.filter(
-          (item, idx, arr) => idx === arr.findIndex((c) => c.id === item.id)
-        );
-        const sortedMovies =
-          t === "toprated"
-            ? [...dedupedMovies].sort((a, b) => Number(b.imdb_rating ?? 0) - Number(a.imdb_rating ?? 0))
-            : t === "popular"
-              ? [...dedupedMovies].sort((a, b) => Number(b.imdb_rating_count ?? 0) - Number(a.imdb_rating_count ?? 0))
-              : dedupedMovies;
-        const nextMovies = sortedMovies.map(mapMovieBoxMovieToMovie);
-        setMovies(p === 1 ? nextMovies : prev => [...prev, ...nextMovies]);
-        if (nextMovies.length === 0) {
-          setPageError("Movies could not be loaded right now.");
-        }
-      } catch {
+    }
+
+    try {
+      const discover = await fetchMovieBoxDiscover();
+      const sections = discover.sections ?? [];
+      const selectedItems = (
+        t === "toprated"
+          ? sections.filter((section) => section.id === "top-rated")
+          : t === "popular"
+            ? sections.filter((section) => section.id === "movies" || section.id === "most-popular")
+            : sections.filter((section) => section.id === "recent")
+      ).flatMap((section) => section.items ?? []);
+      const nextMovies = selectedItems
+        .filter((item) => item.moviebox_media_type === "movie")
+        .map(mapMovieBoxMovieToMovie);
+      setMovies(p === 1 ? nextMovies : prev => [...prev, ...nextMovies]);
+      if (nextMovies.length === 0 && t === "toprated") {
+        setMovies(STATIC_TOP_MOVIES.map(mapStaticMovieToMovie));
+        return;
+      }
+      if (nextMovies.length === 0) {
+        setPageError("Movies could not be loaded right now.");
+      }
+    } catch {
+      if (t === "toprated") {
+        setMovies(STATIC_TOP_MOVIES.map(mapStaticMovieToMovie));
+      } else {
         setMovies([]);
         setPageError("Movies could not be loaded right now.");
       }

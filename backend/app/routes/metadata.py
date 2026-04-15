@@ -7,6 +7,7 @@ from app.services.tmdb import (
     fetch_tv_season_map,
     search_media,
 )
+from app.services.imdb import fetch_imdb_chart
 
 router = APIRouter(prefix="/metadata")
 
@@ -54,3 +55,10 @@ async def tmdb_tv_season_map(
         "id": id,
         "seasons": await fetch_tv_season_map(tv_id=id),
     }
+
+
+@router.get("/imdb/chart")
+async def imdb_chart(
+    chart: str = Query(..., min_length=1),
+):
+    return await fetch_imdb_chart(chart_name=chart)

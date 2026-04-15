@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { TMDB_IMAGE_BASE as IMG_BASE, discoverTmdbMedia } from "../lib/tmdb";
 import { fetchMovieBoxDiscover, type MovieBoxItem } from "../lib/streamProviders";
+import { getImdbTop250MovieChart, getImdbTop250TvChart } from "../lib/imdbCharts";
 
 const API        = "https://api.imdbapi.dev";
 const JIKAN      = "https://api.jikan.moe/v4";
@@ -34,6 +35,8 @@ interface CanonicalTitle {
   year?: number;
   kind: "movie" | "tv";
 }
+type RatedMovieItem = TmdbMovie | MovieBoxItem;
+type RatedTvItem = TmdbShow | MovieBoxItem;
 
 const CANONICAL_TOP_MOVIES: CanonicalTitle[] = [
   { title: "The Shawshank Redemption", year: 1994, kind: "movie" },
@@ -117,6 +120,33 @@ const IS_SERIES = (t: string) =>
   ["TV_SERIES","TV_MINI_SERIES","tvSeries","tvMiniSeries","TV_SHOW","tvShow"].includes(t) || t.toLowerCase().includes("series");
 
 type TopTab = "movies"|"tv"|"anime";
+const INITIAL_VISIBLE_COUNT = 40;
+const VISIBLE_INCREMENT = 40;
+const MIN_TOP_ITEMS = 100;
+
+function hasPoster(item: { poster_path?: string | null; poster_proxy?: string; poster?: string }): boolean {
+  return Boolean(item.poster_path || item.poster_proxy || item.poster);
+}
+
+function mergePosterBackedItems<T extends { id?: string | number; title?: string; name?: string }>(
+  primary: T[],
+  fallback: T[],
+): T[] {
+  const seen = new Set<string>();
+  const merged: T[] = [];
+  const append = (items: T[]) => {
+    for (const item of items) {
+      const rawKey = item.id ?? item.title ?? item.name;
+      const key = String(rawKey ?? "").trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      merged.push(item);
+    }
+  };
+  append(primary);
+  append(fallback);
+  return merged;
+}
 
 const CSS = `
 @keyframes rat-fadeUp { from{opacity:0;transform:translateY(14px)} to{opacity:1;transform:translateY(0)} }
@@ -214,6 +244,24 @@ export default function RatingsPage() {
         setFallbackMovies(enrichedMovies);
       }
     } catch { /* silent */ }
+    try {
+      const imdbTopMovies = await getImdbTop250MovieChart();
+      if (imdbTopMovies.length > 0) {
+        canonicalMovies = imdbTopMovies.map((item) => ({
+          id: item.id,
+          title: item.primaryTitle,
+          year: item.startYear,
+          poster: item.primaryImage?.url,
+          poster_proxy: item.primaryImage?.url,
+          media_type: "movie",
+          moviebox_media_type: "movie",
+          imdb_rating: item.rating?.aggregateRating,
+          imdb_rating_count: item.rating?.voteCount,
+        }));
+        setMovieSourceLabel("IMDb Top 250");
+        setFallbackMovies(canonicalMovies);
+      }
+    } catch { /* silent */ }
     // TV — 3 pages (~60 items)
     setTvSourceLabel("Canonical IMDb");
     setFallbackTv(canonicalTv);
@@ -226,13 +274,31 @@ export default function RatingsPage() {
       }
     } catch { /* silent */ }
     try {
+      const imdbTopTv = await getImdbTop250TvChart();
+      if (imdbTopTv.length > 0) {
+        canonicalTv = imdbTopTv.map((item) => ({
+          id: item.id,
+          title: item.primaryTitle,
+          year: item.startYear,
+          poster: item.primaryImage?.url,
+          poster_proxy: item.primaryImage?.url,
+          media_type: "series",
+          moviebox_media_type: "series",
+          imdb_rating: item.rating?.aggregateRating,
+          imdb_rating_count: item.rating?.voteCount,
+        }));
+        setTvSourceLabel("IMDb Top 250");
+        setFallbackTv(canonicalTv);
+      }
+    } catch { /* silent */ }
+    try {
       const discover = await fetchMovieBoxDiscover();
       const allItems = discover.sections.flatMap((section) => section.items);
       const dedupe = (items: MovieBoxItem[]) =>
         items.filter((item, index, arr) => index === arr.findIndex((candidate) => candidate.id === item.id));
       const sortByRating = (items: MovieBoxItem[]) =>
         dedupe(items)
-          .filter((item) => Number(item.imdb_rating || 0) > 0)
+          .filter((item) => Number(item.imdb_rating || 0) > 0 && hasPoster(item))
           .sort((a, b) => {
             const ratingDiff = Number(b.imdb_rating || 0) - Number(a.imdb_rating || 0);
             if (ratingDiff !== 0) return ratingDiff;
@@ -241,15 +307,15 @@ export default function RatingsPage() {
 
       if (canonicalMovies.length === 0) {
         setMovieSourceLabel("MovieBox");
-        setFallbackMovies(sortByRating(allItems.filter((item) => item.moviebox_media_type === "movie")).slice(0, 60));
+        setFallbackMovies(sortByRating(allItems.filter((item) => item.moviebox_media_type === "movie")).slice(0, 150));
       }
       if (canonicalTv.length === 0) {
         setTvSourceLabel("MovieBox");
-        setFallbackTv(sortByRating(allItems.filter((item) => item.moviebox_media_type === "series" && item.media_type !== "anime")).slice(0, 60));
+        setFallbackTv(sortByRating(allItems.filter((item) => item.moviebox_media_type === "series" && item.media_type !== "anime")).slice(0, 150));
       }
       setFallbackAnime(
         sortByRating(allItems.filter((item) => item.media_type === "anime" || item.is_anime))
-          .slice(0, 60)
+          .slice(0, 150)
           .map((item, index) => ({
             id: item.id,
             title: item.title,
@@ -273,22 +339,18 @@ export default function RatingsPage() {
     } catch { /* silent */ }
     // TMDB top-rated posters for Movies and TV
     try {
-      const [mp1, mp2, tp1, tp2] = await Promise.allSettled([
-        discoverTmdbMedia("movie", "top_rated", 1),
-        discoverTmdbMedia("movie", "top_rated", 2),
-        discoverTmdbMedia("tv", "top_rated", 1),
-        discoverTmdbMedia("tv", "top_rated", 2),
-      ]);
-      const tmdbMovies = [
-        ...(mp1.status === "fulfilled" ? mp1.value?.results ?? [] : []),
-        ...(mp2.status === "fulfilled" ? mp2.value?.results ?? [] : []),
-      ];
-      const tmdbTv = [
-        ...(tp1.status === "fulfilled" ? tp1.value?.results ?? [] : []),
-        ...(tp2.status === "fulfilled" ? tp2.value?.results ?? [] : []),
-      ];
-      if (tmdbMovies.length > 0) setTopMovies(tmdbMovies as TmdbMovie[]);
-      if (tmdbTv.length > 0) setTopTv(tmdbTv as TmdbShow[]);
+      const moviePages = await Promise.allSettled(
+        Array.from({ length: 15 }, (_, index) => discoverTmdbMedia("movie", "top_rated", index + 1))
+      );
+      const tvPages = await Promise.allSettled(
+        Array.from({ length: 15 }, (_, index) => discoverTmdbMedia("tv", "top_rated", index + 1))
+      );
+      const tmdbMovies = moviePages.flatMap((result) => result.status === "fulfilled" ? (result.value?.results ?? []) : []);
+      const tmdbTv = tvPages.flatMap((result) => result.status === "fulfilled" ? (result.value?.results ?? []) : []);
+      const posterBackedTmdbMovies = tmdbMovies.filter((item) => Boolean(item?.poster_path));
+      const posterBackedTmdbTv = tmdbTv.filter((item) => Boolean(item?.poster_path));
+      if (posterBackedTmdbMovies.length > 0) setTopMovies(posterBackedTmdbMovies as TmdbMovie[]);
+      if (posterBackedTmdbTv.length > 0) setTopTv(posterBackedTmdbTv as TmdbShow[]);
     } catch { /* silent */ }
     setTopLoading(false);
   }, [fetchCanonicalTopList]);
@@ -378,9 +440,42 @@ export default function RatingsPage() {
   });
   const CELL = 60, ROW_LABEL = 48;
   const isEmptyState = !detail && !loading && browseResults.length === 0 && !browsing;
-  const visibleMovies = topMovies.length > 0 ? topMovies : fallbackMovies;
-  const visibleTv = topTv.length > 0 ? topTv : fallbackTv;
+  const visibleMovies: RatedMovieItem[] = (() => {
+    const posterBackedTmdb = topMovies.filter((item) => hasPoster(item));
+    const posterBackedFallback = fallbackMovies.filter((item) => hasPoster(item));
+    if (posterBackedTmdb.length >= MIN_TOP_ITEMS) return posterBackedTmdb;
+    return mergePosterBackedItems<RatedMovieItem>(posterBackedTmdb, posterBackedFallback);
+  })();
+  const visibleTv: RatedTvItem[] = (() => {
+    const posterBackedTmdb = topTv.filter((item) => hasPoster(item));
+    const posterBackedFallback = fallbackTv.filter((item) => hasPoster(item));
+    if (posterBackedTmdb.length >= MIN_TOP_ITEMS) return posterBackedTmdb;
+    return mergePosterBackedItems<RatedTvItem>(posterBackedTmdb, posterBackedFallback);
+  })();
   const visibleAnime = topAnime.length > 0 ? topAnime : fallbackAnime;
+  const [movieVisibleCount, setMovieVisibleCount] = useState(INITIAL_VISIBLE_COUNT);
+  const [tvVisibleCount, setTvVisibleCount] = useState(INITIAL_VISIBLE_COUNT);
+  const ratingsScrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setMovieVisibleCount(INITIAL_VISIBLE_COUNT);
+    setTvVisibleCount(INITIAL_VISIBLE_COUNT);
+  }, [activeTab]);
+
+  useEffect(() => {
+    const node = ratingsScrollRef.current;
+    if (!node) return;
+    const onScroll = () => {
+      if (node.scrollTop + node.clientHeight < node.scrollHeight - 240) return;
+      if (activeTab === "movies") {
+        setMovieVisibleCount((current) => Math.min(current + VISIBLE_INCREMENT, visibleMovies.length));
+      } else if (activeTab === "tv") {
+        setTvVisibleCount((current) => Math.min(current + VISIBLE_INCREMENT, visibleTv.length));
+      }
+    };
+    node.addEventListener("scroll", onScroll);
+    return () => node.removeEventListener("scroll", onScroll);
+  }, [activeTab, visibleMovies.length, visibleTv.length]);
 
   const RatingBadge = ({ r, source="TMDB" }: { r: number; source?: string }) => (
     <div style={{ position:"absolute", bottom:6, right:6, background:getRatingColor(r), color:"#fff", fontSize:10, fontWeight:700, borderRadius:4, padding:"2px 6px", display:"flex", flexDirection:"column", alignItems:"center", lineHeight:1.2 }}>
@@ -721,14 +816,14 @@ export default function RatingsPage() {
               </div>
             )}
           </div>
-          <div style={{ flex:1, overflow:"auto", padding:"18px 20px" }}>
+          <div ref={ratingsScrollRef} style={{ flex:1, overflow:"auto", padding:"18px 20px" }}>
 
             {/* Movies */}
             {activeTab==="movies" && (visibleMovies.length===0 && topLoading ? <SkeletonGrid /> : (
               <>
                 <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:12 }}>{visibleMovies.length} Top Rated Movies · {movieSourceLabel}</div>
                 <div className="rat-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
-                  {visibleMovies.map((m,i) => (
+                  {visibleMovies.slice(0, movieVisibleCount).map((m,i) => (
                     <div key={"id" in m ? m.id : i} className="rat-card"
                       style={{ animationDelay:`${(i%20)*0.03}s`, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", overflow:"hidden" }}
                       onClick={() => openByTitle(m.title)}>
@@ -758,7 +853,7 @@ export default function RatingsPage() {
               <>
                 <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:12 }}>{visibleTv.length} Top Rated TV Series · {tvSourceLabel}</div>
                 <div className="rat-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
-                  {visibleTv.map((s,i) => (
+                  {visibleTv.slice(0, tvVisibleCount).map((s,i) => (
                     <div key={"id" in s ? s.id : i} className="rat-card"
                       style={{ animationDelay:`${(i%20)*0.03}s`, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-md)", overflow:"hidden" }}
                       onClick={() => openByTitle("name" in s ? s.name : s.title)}>
