@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { TMDB_IMAGE_BASE as IMG_BASE } from "../lib/tmdb";
+import { TMDB_IMAGE_BASE as IMG_BASE, discoverTmdbMedia } from "../lib/tmdb";
 import { fetchMovieBoxDiscover, type MovieBoxItem } from "../lib/streamProviders";
 
 const API        = "https://api.imdbapi.dev";
@@ -270,6 +270,25 @@ export default function RatingsPage() {
         if (page < 3) await new Promise((res) => setTimeout(res, 450));
       }
       setTopAnime(collected.filter((item, index, arr) => index === arr.findIndex((candidate) => candidate.mal_id === item.mal_id)));
+    } catch { /* silent */ }
+    // TMDB top-rated posters for Movies and TV
+    try {
+      const [mp1, mp2, tp1, tp2] = await Promise.allSettled([
+        discoverTmdbMedia("movie", "top_rated", 1),
+        discoverTmdbMedia("movie", "top_rated", 2),
+        discoverTmdbMedia("tv", "top_rated", 1),
+        discoverTmdbMedia("tv", "top_rated", 2),
+      ]);
+      const tmdbMovies = [
+        ...(mp1.status === "fulfilled" ? mp1.value?.results ?? [] : []),
+        ...(mp2.status === "fulfilled" ? mp2.value?.results ?? [] : []),
+      ];
+      const tmdbTv = [
+        ...(tp1.status === "fulfilled" ? tp1.value?.results ?? [] : []),
+        ...(tp2.status === "fulfilled" ? tp2.value?.results ?? [] : []),
+      ];
+      if (tmdbMovies.length > 0) setTopMovies(tmdbMovies as TmdbMovie[]);
+      if (tmdbTv.length > 0) setTopTv(tmdbTv as TmdbShow[]);
     } catch { /* silent */ }
     setTopLoading(false);
   }, [fetchCanonicalTopList]);

@@ -116,18 +116,19 @@ export default function TVSeriesPage() {
       try {
         const discover = await fetchMovieBoxDiscover();
         const sections = discover.sections ?? [];
-        const selectedItems = (
+        const allTvItems = sections
+          .flatMap((section) => section.items ?? [])
+          .filter(isTvSeriesItem);
+        const dedupedShows = allTvItems.filter(
+          (item, idx, arr) => idx === arr.findIndex((c) => c.id === item.id)
+        );
+        const sortedShows =
           nextTab === "toprated"
-            ? sections.filter((section) => section.id === "top-rated")
+            ? [...dedupedShows].sort((a, b) => Number(b.imdb_rating ?? 0) - Number(a.imdb_rating ?? 0))
             : nextTab === "popular"
-              ? sections.filter((section) => section.id === "series" || section.id === "most-popular")
-              : nextTab === "onair"
-                ? sections.filter((section) => section.id === "recent")
-                : sections.filter((section) => section.id === "recent" || section.id === "series")
-        ).flatMap((section) => section.items ?? []);
-        const nextShows = selectedItems
-          .filter(isTvSeriesItem)
-          .map(mapMovieBoxSeriesToShow);
+              ? [...dedupedShows].sort((a, b) => Number(b.imdb_rating_count ?? 0) - Number(a.imdb_rating_count ?? 0))
+              : dedupedShows;
+        const nextShows = sortedShows.map(mapMovieBoxSeriesToShow);
         setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
         if (nextShows.length === 0) {
           setPageError("TV series could not be loaded right now.");

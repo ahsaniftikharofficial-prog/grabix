@@ -237,6 +237,7 @@ export default function MangaPage() {
   const [browseHasMore, setBrowseHasMore] = useState(true);
   const [searchResults, setSearchResults] = useState<MangaDiscoveryItem[]>([]);
   const [homeLoading, setHomeLoading] = useState(true);
+  const loadingRef = useRef(false);
   const [searchLoading, setSearchLoading] = useState(false);
   const [homeError, setHomeError] = useState<string | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -572,6 +573,7 @@ export default function MangaPage() {
 
   const loadDiscover = async (nextTab: MangaBrowseTab, nextPage = 1) => {
     setHomeLoading(true);
+    loadingRef.current = true;
     setHomeError(null);
     try {
       const loader = nextTab === "popular"
@@ -594,6 +596,7 @@ export default function MangaPage() {
       }
     } finally {
       setHomeLoading(false);
+      loadingRef.current = false;
     }
   };
 
@@ -615,7 +618,7 @@ export default function MangaPage() {
     if (!root || !node) return;
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting) && !homeLoading && browseHasMore) {
+        if (entries.some((entry) => entry.isIntersecting) && !loadingRef.current && browseHasMore) {
           const nextPage = browsePage + 1;
           setBrowsePage(nextPage);
           void loadDiscover(browseTab, nextPage);
@@ -625,7 +628,7 @@ export default function MangaPage() {
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, [browseHasMore, browsePage, browseTab, homeLoading, query, selectedItem, reader]);
+  }, [browseHasMore, browsePage, browseTab, query, selectedItem, reader]);
 
   useEffect(() => {
     if (!query.trim()) {

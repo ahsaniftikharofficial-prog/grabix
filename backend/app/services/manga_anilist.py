@@ -79,7 +79,7 @@ async def anilist_request(query: str, variables: dict[str, Any] | None = None, r
     raise Exception("AniList: Max retries exceeded")
 
 
-async def get_trending_manga(page: int = 1, per_page: int = 20) -> list[dict]:
+async def get_trending_manga(page: int = 1, per_page: int = 30) -> list[dict]:
     cache_key = f"anilist:trending:{page}:{per_page}"
     cached = await get_cached(cache_key)
     if cached:
@@ -115,7 +115,7 @@ async def get_trending_manga(page: int = 1, per_page: int = 20) -> list[dict]:
 
 
 
-async def get_popular_manga(page: int = 1, per_page: int = 20) -> list[dict]:
+async def get_popular_manga(page: int = 1, per_page: int = 30) -> list[dict]:
     cache_key = f"anilist:popular:{page}:{per_page}"
     cached = await get_cached(cache_key)
     if cached:
@@ -146,11 +146,11 @@ async def get_popular_manga(page: int = 1, per_page: int = 20) -> list[dict]:
     except Exception as exc:
         from app.services.logging_utils import get_logger
         get_logger("manga").warning(f"AniList popular failed: {exc}, using Jikan fallback.")
-        from app.services.manga_jikan import get_top_manga
-        return await get_top_manga(page=page)
+        from app.services.manga_jikan import get_popular_manga_jikan
+        return await get_popular_manga_jikan(page=page)
 
 
-async def get_top_rated_manga(page: int = 1, per_page: int = 20) -> list[dict]:
+async def get_top_rated_manga(page: int = 1, per_page: int = 30) -> list[dict]:
     cache_key = f"anilist:top-rated:{page}:{per_page}"
     cached = await get_cached(cache_key)
     if cached:

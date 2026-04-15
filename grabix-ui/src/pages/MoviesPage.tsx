@@ -97,16 +97,19 @@ export default function MoviesPage() {
       try {
         const discover = await fetchMovieBoxDiscover();
         const sections = discover.sections ?? [];
-        const selectedItems = (
+        const allMovieItems = sections
+          .flatMap((section) => section.items ?? [])
+          .filter((item) => item.moviebox_media_type === "movie");
+        const dedupedMovies = allMovieItems.filter(
+          (item, idx, arr) => idx === arr.findIndex((c) => c.id === item.id)
+        );
+        const sortedMovies =
           t === "toprated"
-            ? sections.filter((section) => section.id === "top-rated")
+            ? [...dedupedMovies].sort((a, b) => Number(b.imdb_rating ?? 0) - Number(a.imdb_rating ?? 0))
             : t === "popular"
-              ? sections.filter((section) => section.id === "most-popular" || section.id === "movies")
-              : sections.filter((section) => section.id === "recent")
-        ).flatMap((section) => section.items ?? []);
-        const nextMovies = selectedItems
-          .filter((item) => item.moviebox_media_type === "movie")
-          .map(mapMovieBoxMovieToMovie);
+              ? [...dedupedMovies].sort((a, b) => Number(b.imdb_rating_count ?? 0) - Number(a.imdb_rating_count ?? 0))
+              : dedupedMovies;
+        const nextMovies = sortedMovies.map(mapMovieBoxMovieToMovie);
         setMovies(p === 1 ? nextMovies : prev => [...prev, ...nextMovies]);
         if (nextMovies.length === 0) {
           setPageError("Movies could not be loaded right now.");
