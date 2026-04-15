@@ -106,13 +106,13 @@ function toQueueItem(serverItem: any, previous?: QueueItem): QueueItem {
   };
 }
 
-const MOCK_INFO: VideoInfo = {
+/* const MOCK_INFO: VideoInfo = {
   title: "One Piece Episode 1074 – Luffy's Gear 5 Awakening",
   thumbnail: "https://img.youtube.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
   duration: 1420,
   uploader: "Toei Animation",
   formats: ["1080p", "720p", "480p", "360p", "144p"],
-};
+}; */
 
 function secs(s: number) {
   const m = Math.floor(s / 60);

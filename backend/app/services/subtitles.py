@@ -350,6 +350,54 @@ async def search_subtitles(title: str, language: str, media_type: str) -> list[d
     return []
 
 
+def _get_subtitle_headers_candidates(url: str) -> list[dict[str, str]]:
+    """
+    Return a prioritised list of header dicts to try when fetching a subtitle URL.
+    Some CDNs enforce strict Referer/Origin allowlists, so we try the most likely
+    match first and fall back to the URL's own origin.
+    """
+    from urllib.parse import urlparse as _urlparse
+    parsed = _urlparse(url)
+    host = (parsed.hostname or "").lower()
+    own_base = f"{parsed.scheme}://{parsed.hostname}"
+
+    def _make(referer: str, origin: str) -> dict[str, str]:
+        return {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Referer": referer,
+            "Origin": origin,
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+    candidates: list[dict[str, str]] = []
+
+    # MegaCloud CDN — mgstatics.xyz / megacloud.* require Referer from megacloud.tv
+    if any(h in host for h in ("mgstatics.xyz", "megacloud.tv", "megacloud.club", "megacloud.store", "megacloud.xyz")):
+        candidates.append(_make("https://megacloud.tv/", "https://megacloud.tv"))
+        candidates.append(_make("https://hianime.to/", "https://hianime.to"))
+        candidates.append(_make("https://aniwatch.to/", "https://aniwatch.to"))
+
+    # HiAnime / AniWatch CDNs
+    elif any(h in host for h in ("hianime.to", "aniwatch.to", "aniwatchtv.to", "anicache.xyz")):
+        candidates.append(_make("https://hianime.to/", "https://hianime.to"))
+        candidates.append(_make("https://megacloud.tv/", "https://megacloud.tv"))
+
+    # RapidCloud / Zoro CDNs
+    elif any(h in host for h in ("rapid-cloud.co", "rabbitstream.net", "dokicloud.co")):
+        candidates.append(_make("https://rapid-cloud.co/", "https://rapid-cloud.co"))
+        candidates.append(_make("https://zoro.to/", "https://zoro.to"))
+
+    # Generic fallback: use the URL's own origin as Referer
+    candidates.append(_make(f"{own_base}/", own_base))
+
+    return candidates
+
+
 async def download_subtitle(url: str) -> str:
     if url.startswith(OPENSUBTITLES_COM_LINK_PREFIX):
         file_id = url.removeprefix(OPENSUBTITLES_COM_LINK_PREFIX).strip()
@@ -359,8 +407,23 @@ async def download_subtitle(url: str) -> str:
         if not url:
             raise ValueError("Could not resolve OpenSubtitles.com subtitle link")
 
-    data, content_type = await asyncio.to_thread(_fetch_bytes_sync, url, {"User-Agent": "GRABIX v1.0"})
-    return _extract_subtitle_content(data, content_type, url)
+    candidates = _get_subtitle_headers_candidates(url)
+    last_error: Exception = ValueError("No subtitle fetch candidates")
+
+    for headers in candidates:
+        try:
+            data, content_type = await asyncio.to_thread(_fetch_bytes_sync, url, headers)
+            content = _extract_subtitle_content(data, content_type, url)
+            # Reject if the response looks like an HTML error page, not subtitle text
+            stripped = content.strip()
+            if stripped and not stripped.lower().startswith("<!doctype") and not stripped.lower().startswith("<html"):
+                return content
+            # HTML error page — treat as a failed attempt and try next Referer
+            last_error = ValueError(f"CDN returned HTML error page (wrong Referer?): {stripped[:120]}")
+        except Exception as exc:
+            last_error = exc
+
+    raise last_error
 
 
 async def get_cached_subtitle_content(title: str, language: str, media_type: str) -> str | None:

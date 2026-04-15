@@ -1,24 +1,23 @@
 import Hls from "hls.js";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   IconAlert,
   IconArrowLeft,
-  IconAudio,
   IconDownload,
   IconExpand,
   IconInfo,
   IconList,
   IconPause,
   IconPlay,
-  IconServers,
   IconSettings,
   IconSubtitle,
 } from "./Icons";
 import SubtitlePanel from "./SubtitlePanel";
 import { BACKEND_API } from "../lib/api";
-import { fetchStreamVariants, inferStreamKind } from "../lib/streamProviders";
+import { inferStreamKind } from "../lib/streamProviders";
 import type { StreamSource } from "../lib/streamProviders";
 import { queueVideoDownload } from "../lib/downloads";
+import { readJsonStorage, versionedStorageKey, writeJsonStorage } from "../lib/persistentState";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,10 +69,29 @@ interface PlaybackCacheRecord<T> {
   value: T;
 }
 
+interface SubtitleAppearanceSettings {
+  fontScale: number;
+  fontFamily: string;
+  textColor: string;
+  textOpacity: number;
+  edgeStyle: "shadow" | "outline" | "raised" | "depressed" | "none";
+  edgeColor: string;
+  backgroundColor: string;
+  backgroundOpacity: number;
+  windowColor: string;
+  windowOpacity: number;
+}
+
+interface SubtitlePosition {
+  x: number;
+  y: number;
+}
+
 const PLAYBACK_CACHE_PREFIX = "grabix:playback:";
 const EMBED_CACHE_TTL_MS = 1000 * 60 * 30;
 const EXTRACT_CACHE_TTL_MS = 1000 * 60 * 20;
-const VARIANT_CACHE_TTL_MS = 1000 * 60 * 10;
+const SUBTITLE_APPEARANCE_STORAGE_KEY = versionedStorageKey("grabix:subtitle-appearance", "v1");
+const SUBTITLE_POSITION_STORAGE_KEY = versionedStorageKey("grabix:subtitle-position", "v1");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -136,13 +154,17 @@ function stripVttTags(text: string): string {
 }
 
 function parseSubtitleText(content: string): SubtitleCue[] {
-  const normalized = (content || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  const normalized = (content || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/^\uFEFF/, "")
+    .trim();
   if (!normalized) return [];
 
-  // Strip the WEBVTT header line (may include optional description: "WEBVTT - My file")
-  // and any leading NOTE / STYLE / REGION blocks before the first cue.
-  const withoutHeader = /^WEBVTT/i.test(normalized)
-    ? normalized.replace(/^WEBVTT[^\n]*\n((?:(?!-->)[^\n]*\n)*\n)*/i, "")
+  // Strip only the WEBVTT header line. NOTE / STYLE / REGION blocks can remain:
+  // the parser below ignores blocks that do not contain a cue timing line.
+  const withoutHeader = /^WEBVTT\b/i.test(normalized)
+    ? normalized.replace(/^WEBVTT[^\n]*(?:\n|$)/i, "").trimStart()
     : normalized;
 
   const blocks = withoutHeader
@@ -182,26 +204,88 @@ function findCurrentCue(cues: SubtitleCue[], t: number): SubtitleCue | null {
   return null;
 }
 
-function qualityScore(label: string): number {
-  const normalized = String(label || "").trim().toLowerCase();
-  const numeric = normalized.match(/(\d{3,4})p/);
-  if (numeric) return Number(numeric[1]);
-  if (normalized === "4k") return 2160;
-  if (normalized === "2k") return 1440;
-  return 0;
+const DEFAULT_SUBTITLE_APPEARANCE: SubtitleAppearanceSettings = {
+  fontScale: 1.15,
+  fontFamily: "Arial, Helvetica, sans-serif",
+  textColor: "#ffffff",
+  textOpacity: 1,
+  edgeStyle: "shadow",
+  edgeColor: "#000000",
+  backgroundColor: "#000000",
+  backgroundOpacity: 0.72,
+  windowColor: "#000000",
+  windowOpacity: 0,
+};
+const DEFAULT_SUBTITLE_POSITION: SubtitlePosition = { x: 0, y: 0 };
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
-function pickBestVariant(
-  variants: Array<{ label: string; url: string; bandwidth?: string }>
-): { label: string; url: string; bandwidth?: string } | null {
-  if (!variants.length) return null;
-  return variants.reduce((best, v) => {
-    const bScore = qualityScore(best.label);
-    const vScore = qualityScore(v.label);
-    if (vScore > bScore) return v;
-    if (vScore === bScore && Number(v.bandwidth || 0) > Number(best.bandwidth || 0)) return v;
-    return best;
-  });
+function hexToRgba(hex: string, alpha: number): string {
+  const normalized = hex.replace("#", "").trim();
+  const expanded = normalized.length === 3
+    ? normalized.split("").map((part) => `${part}${part}`).join("")
+    : normalized.padEnd(6, "0").slice(0, 6);
+  const red = Number.parseInt(expanded.slice(0, 2), 16) || 0;
+  const green = Number.parseInt(expanded.slice(2, 4), 16) || 0;
+  const blue = Number.parseInt(expanded.slice(4, 6), 16) || 0;
+  return `rgba(${red}, ${green}, ${blue}, ${clampNumber(alpha, 0, 1)})`;
+}
+
+function subtitleFontSize(scale: number): string {
+  const safeScale = clampNumber(scale, 0.8, 2.2);
+  return `clamp(${(1.15 * safeScale).toFixed(2)}rem, ${(1 * safeScale).toFixed(2)}rem + ${(0.85 * safeScale).toFixed(2)}vw, ${(1.9 * safeScale).toFixed(2)}rem)`;
+}
+
+function subtitleTextShadow(style: SubtitleAppearanceSettings["edgeStyle"], color: string): string {
+  switch (style) {
+    case "outline":
+      return [
+        `1px 0 0 ${color}`,
+        `-1px 0 0 ${color}`,
+        `0 1px 0 ${color}`,
+        `0 -1px 0 ${color}`,
+        `1px 1px 0 ${color}`,
+        `-1px 1px 0 ${color}`,
+        `1px -1px 0 ${color}`,
+        `-1px -1px 0 ${color}`,
+        "0 2px 5px rgba(0,0,0,0.85)",
+      ].join(", ");
+    case "raised":
+      return `0 1px 0 rgba(255,255,255,0.22), 1px 1px 0 ${color}, 2px 2px 4px rgba(0,0,0,0.75)`;
+    case "depressed":
+      return `0 -1px 0 rgba(255,255,255,0.18), -1px -1px 0 ${color}, -2px -2px 4px rgba(0,0,0,0.75)`;
+    case "none":
+      return "none";
+    case "shadow":
+    default:
+      return `0 2px 4px ${color}, 0 0 10px rgba(0,0,0,0.55)`;
+  }
+}
+
+function sanitizeSubtitleAppearance(raw: SubtitleAppearanceSettings): SubtitleAppearanceSettings {
+  return {
+    fontScale: clampNumber(Number(raw.fontScale) || DEFAULT_SUBTITLE_APPEARANCE.fontScale, 0.8, 2.2),
+    fontFamily: String(raw.fontFamily || DEFAULT_SUBTITLE_APPEARANCE.fontFamily),
+    textColor: String(raw.textColor || DEFAULT_SUBTITLE_APPEARANCE.textColor),
+    textOpacity: clampNumber(Number(raw.textOpacity) || 0, 0, 1),
+    edgeStyle: ["shadow", "outline", "raised", "depressed", "none"].includes(String(raw.edgeStyle))
+      ? raw.edgeStyle
+      : DEFAULT_SUBTITLE_APPEARANCE.edgeStyle,
+    edgeColor: String(raw.edgeColor || DEFAULT_SUBTITLE_APPEARANCE.edgeColor),
+    backgroundColor: String(raw.backgroundColor || DEFAULT_SUBTITLE_APPEARANCE.backgroundColor),
+    backgroundOpacity: clampNumber(Number(raw.backgroundOpacity) || 0, 0, 1),
+    windowColor: String(raw.windowColor || DEFAULT_SUBTITLE_APPEARANCE.windowColor),
+    windowOpacity: clampNumber(Number(raw.windowOpacity) || 0, 0, 1),
+  };
+}
+
+function sanitizeSubtitlePosition(raw: SubtitlePosition): SubtitlePosition {
+  return {
+    x: clampNumber(Number(raw.x) || 0, -640, 640),
+    y: clampNumber(Number(raw.y) || 0, -360, 220),
+  };
 }
 
 function readPlaybackCache<T>(key: string): T | null {
@@ -304,15 +388,22 @@ const PLAYER_STYLES = `
   .gx-cue {
     position: absolute; bottom: 80px; left: 0; right: 0;
     text-align: center; pointer-events: none; z-index: 20;
-    padding: 0 10%;
+    padding: 0 8%;
   }
+  .gx-cue-window {
+    display: inline-block;
+    max-width: min(96vw, 1200px);
+    border-radius: 8px;
+    pointer-events: auto;
+    cursor: grab;
+    user-select: none;
+  }
+  .gx-cue-window.dragging { cursor: grabbing; }
   .gx-cue span {
     display: inline-block;
-    background: rgba(0,0,0,0.65);
-    color: #fff; padding: 4px 12px; border-radius: 4px;
-    font-size: 1.05rem; line-height: 1.5;
+    max-width: min(92vw, 1100px);
+    border-radius: 6px;
     white-space: pre-line;
-    text-shadow: 1px 1px 3px rgba(0,0,0,0.8);
   }
 
   /* Controls overlay */
@@ -535,6 +626,21 @@ const PLAYER_STYLES = `
   .gx-settings-item.active { color: #fff; }
   .gx-settings-item .gx-check { opacity: 0; }
   .gx-settings-item.active .gx-check { opacity: 1; }
+  .gx-settings-field { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px; }
+  .gx-settings-field label { font-size: 11px; color: var(--player-text-dim); text-transform: uppercase; letter-spacing: 0.08em; }
+  .gx-settings-field input[type="range"] { width: 100%; accent-color: #ffffff; }
+  .gx-settings-field input[type="color"] { width: 100%; height: 34px; border: none; background: transparent; cursor: pointer; }
+  .gx-settings-field select {
+    width: 100%;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 8px;
+    color: #fff;
+    padding: 8px 10px;
+    font-size: 13px;
+  }
+  .gx-settings-split { display: grid; grid-template-columns: minmax(0, 1fr) 72px; gap: 10px; align-items: center; }
+  .gx-settings-value { font-size: 12px; color: var(--player-text-dim); text-align: right; }
   .gx-settings-divider {
     height: 1px; background: var(--player-border);
     margin: 4px 12px;
@@ -692,6 +798,7 @@ export default function VidSrcPlayer({
   const hlsRef = useRef<Hls | null>(null);
   const [hlsLevels, setHlsLevels] = useState<Array<{ height: number; bitrate: number }>>([]);
   const [selectedHlsLevel, setSelectedHlsLevel] = useState<number>(-1);
+  const [hlsAutoQuality, setHlsAutoQuality] = useState(true);
   const hideChromeTimeoutRef = useRef<number | null>(null);
   const subtitleInputRef = useRef<HTMLInputElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -766,7 +873,7 @@ export default function VidSrcPlayer({
   const [activeIndex, setActiveIndex] = useState(0);
   const [reloadKey, setReloadKey] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
-  const [statusText, setStatusText] = useState("Connecting");
+  const [, setStatusText] = useState("Connecting");
   const [errorText, setErrorText] = useState("");
   const [fallbackNotice, setFallbackNotice] = useState("");
   const [resolvedEmbedUrl, setResolvedEmbedUrl] = useState("");
@@ -788,11 +895,23 @@ export default function VidSrcPlayer({
   const [extracting, setExtracting] = useState(false);
   const [extractError, setExtractError] = useState("");
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [, setIsFullscreen] = useState(false);
+  const [subtitleAppearance, setSubtitleAppearance] = useState<SubtitleAppearanceSettings>(() =>
+    sanitizeSubtitleAppearance(
+      readJsonStorage<SubtitleAppearanceSettings>("local", SUBTITLE_APPEARANCE_STORAGE_KEY, DEFAULT_SUBTITLE_APPEARANCE)
+    )
+  );
+  const [subtitlePosition, setSubtitlePosition] = useState<SubtitlePosition>(() =>
+    sanitizeSubtitlePosition(
+      readJsonStorage<SubtitlePosition>("local", SUBTITLE_POSITION_STORAGE_KEY, DEFAULT_SUBTITLE_POSITION)
+    )
+  );
+  const [draggingSubtitle, setDraggingSubtitle] = useState(false);
+  const subtitleDragRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
 
   // Settings panel
   const [settingsOpen, setSettingsOpen] = useState(false);
-  type SettingsScreen = "main" | "quality" | "speed" | "subtitles" | "server" | "episodes";
+  type SettingsScreen = "main" | "quality" | "speed" | "subtitles" | "subtitleAppearance" | "server" | "episodes";
   const [settingsScreen, setSettingsScreen] = useState<SettingsScreen>("main");
 
   // Thumbnail hover preview
@@ -821,6 +940,33 @@ export default function VidSrcPlayer({
     () => hlsLevels.length > 1 || isMovieBoxQualityMode || isAnimeQualityMode,
     [hlsLevels, isMovieBoxQualityMode, isAnimeQualityMode]
   );
+  const hasAdaptiveHlsLevels = hlsLevels.length > 1;
+  const subtitleWindowStyle = useMemo<CSSProperties>(() => ({
+    background: hexToRgba(subtitleAppearance.windowColor, subtitleAppearance.windowOpacity),
+    padding: subtitleAppearance.windowOpacity > 0 ? "0.18em 0.36em" : 0,
+  }), [subtitleAppearance]);
+  const subtitleTextStyle = useMemo<CSSProperties>(() => {
+    const edgeColor = hexToRgba(subtitleAppearance.edgeColor, 1);
+    return {
+      background: hexToRgba(subtitleAppearance.backgroundColor, subtitleAppearance.backgroundOpacity),
+      color: hexToRgba(subtitleAppearance.textColor, subtitleAppearance.textOpacity),
+      padding: "0.28em 0.6em",
+      fontSize: subtitleFontSize(subtitleAppearance.fontScale),
+      lineHeight: 1.4,
+      fontWeight: 600,
+      letterSpacing: "0.01em",
+      fontFamily: subtitleAppearance.fontFamily,
+      textShadow: subtitleTextShadow(subtitleAppearance.edgeStyle, edgeColor),
+      WebkitTextStroke: subtitleAppearance.edgeStyle === "outline" ? `0.45px ${edgeColor}` : undefined,
+    };
+  }, [subtitleAppearance]);
+
+  useEffect(() => {
+    writeJsonStorage("local", SUBTITLE_APPEARANCE_STORAGE_KEY, subtitleAppearance);
+  }, [subtitleAppearance]);
+  useEffect(() => {
+    writeJsonStorage("local", SUBTITLE_POSITION_STORAGE_KEY, subtitlePosition);
+  }, [subtitlePosition]);
 
   useEffect(() => {
     setRuntimeSources(sources ?? []);
@@ -828,6 +974,28 @@ export default function VidSrcPlayer({
     setActiveSearchTitle(subtitleSearchTitle || title);
     setActiveEpisode(currentEpisode ?? null);
   }, [sources, subtitle, subtitleSearchTitle, currentEpisode, title]);
+
+  useEffect(() => {
+    if (!draggingSubtitle) return;
+    const onMove = (event: MouseEvent) => {
+      const drag = subtitleDragRef.current;
+      if (!drag) return;
+      setSubtitlePosition(sanitizeSubtitlePosition({
+        x: drag.originX + (event.clientX - drag.startX),
+        y: drag.originY + (event.clientY - drag.startY),
+      }));
+    };
+    const onUp = () => {
+      subtitleDragRef.current = null;
+      setDraggingSubtitle(false);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [draggingSubtitle]);
 
   useEffect(() => { setActiveSourceOptionId(sourceOptions?.[0]?.id ?? ""); }, [sourceOptions]);
 
@@ -848,7 +1016,7 @@ export default function VidSrcPlayer({
     }, 3000);
   }, []);
 
-  useEffect(() => { setActiveIndex(0); setHlsLevels([]); setSelectedHlsLevel(-1); }, [baseSources]);
+  useEffect(() => { setActiveIndex(0); setHlsLevels([]); setSelectedHlsLevel(-1); setHlsAutoQuality(true); }, [baseSources]);
   useEffect(() => { showControls(); return () => { if (hideChromeTimeoutRef.current) window.clearTimeout(hideChromeTimeoutRef.current); }; }, [episodeMenuOpen, showSubtitlePanel, settingsOpen, showControls]);
 
   // Keep controls visible when paused or errored
@@ -977,27 +1145,8 @@ export default function VidSrcPlayer({
   }, [API, activeSource]);
 
   useEffect(() => {
-    if (!activeSource || activeSource.kind !== "hls") { setResolvedPlaybackUrl(""); return; }
-    if (shouldKeepHlsProxied(activeSource)) { setResolvedPlaybackUrl(""); return; }
-    let cancelled = false;
     setResolvedPlaybackUrl("");
-    const resolveBestVariant = async () => {
-      const sourceKey = activeSource.externalUrl || activeSource.url;
-      const cachedUrl = readPlaybackCache<string>(`variant:${sourceKey}`);
-      if (cachedUrl) { setResolvedPlaybackUrl(cachedUrl); return; }
-      try {
-        const variants = await fetchStreamVariants(sourceKey, activeSource.requestHeaders);
-        if (cancelled || variants.length === 0) return;
-        const best = pickBestVariant(variants);
-        if (!best?.url || best.url === activeSource.url) return;
-        const nextUrl = shouldKeepHlsProxied(activeSource) ? buildStreamProxyUrl(API, best.url, activeSource.requestHeaders) : best.url;
-        writePlaybackCache(`variant:${sourceKey}`, nextUrl, VARIANT_CACHE_TTL_MS);
-        setResolvedPlaybackUrl(nextUrl);
-      } catch { if (!cancelled) setResolvedPlaybackUrl(""); }
-    };
-    void resolveBestVariant();
-    return () => { cancelled = true; };
-  }, [API, activeSource]);
+  }, [activeSource]);
 
   // Direct / HLS playback effect
   useEffect(() => {
@@ -1097,9 +1246,19 @@ export default function VidSrcPlayer({
         hls.attachMedia(video);
         hls.on(Hls.Events.MEDIA_ATTACHED, () => { hls.loadSource(playbackUrl); });
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          if (hls.levels.length > 0) { setHlsLevels(hls.levels.map(l => ({ height: l.height || 0, bitrate: l.bitrate || 0 }))); setSelectedHlsLevel(-1); hls.currentLevel = -1; }
+          if (hls.levels.length > 0) {
+            setHlsLevels(hls.levels.map(l => ({ height: l.height || 0, bitrate: l.bitrate || 0 })));
+            setSelectedHlsLevel(-1);
+            setHlsAutoQuality(true);
+            hls.currentLevel = -1;
+            hls.loadLevel = -1;
+            hls.nextLevel = -1;
+          }
           setStatusText("Buffering");
           void attemptPlayback();
+        });
+        hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
+          setSelectedHlsLevel(typeof data.level === "number" ? data.level : -1);
         });
         hls.on(Hls.Events.FRAG_BUFFERED, () => { if (!sourceReady) markSourceReady("Buffering"); });
         hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) goToNextSource("media_error"); });
@@ -1215,8 +1374,17 @@ export default function VidSrcPlayer({
         if (cancelled) return;
         const cues = parseSubtitleText(content);
         setSubtitleCues(cues);
+        if (!cues.length) {
+          setFallbackNotice("Subtitles loaded but no cues found — the file may be empty or in an unsupported format.");
+        }
       })
-      .catch(() => { if (!cancelled) setSubtitleCues([]); });
+      .catch(() => {
+        if (!cancelled) {
+          setSubtitleCues([]);
+          setSubtitlesEnabled(false);
+          setFallbackNotice("Could not load subtitles — CDN blocked the request. Try a different server or upload manually via the CC button.");
+        }
+      });
 
     return () => { cancelled = true; };
   }, [subtitleUrl]);
@@ -1245,13 +1413,40 @@ export default function VidSrcPlayer({
     setSettingsOpen(false); showControls();
   };
 
+  const updateSubtitleAppearance = <K extends keyof SubtitleAppearanceSettings>(key: K, value: SubtitleAppearanceSettings[K]) => {
+    setSubtitleAppearance((current) => sanitizeSubtitleAppearance({ ...current, [key]: value }));
+  };
+
+  const resetSubtitleAppearance = () => {
+    setSubtitleAppearance(DEFAULT_SUBTITLE_APPEARANCE);
+  };
+
+  const resetSubtitlePosition = () => {
+    setSubtitlePosition(DEFAULT_SUBTITLE_POSITION);
+  };
+
+  const handleSubtitleDragStart = (event: React.MouseEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+    subtitleDragRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: subtitlePosition.x,
+      originY: subtitlePosition.y,
+    };
+    setDraggingSubtitle(true);
+  };
+
   const handleEpisodeSwitch = async (episode: number) => {
     if ((!onSelectEpisode && !onSelectSourceOption) || episodeLoading || episode === activeEpisode) return;
     setEpisodeLoading(true); setErrorText(""); setFallbackNotice("");
     try {
       const preferredProvider = activeSource?.provider;
       const preferredLabel = activeSource?.label;
-      const next = onSelectSourceOption && activeSourceOptionId ? await onSelectSourceOption(activeSourceOptionId, episode) : await onSelectEpisode?.(episode);
+      const next = onSelectEpisode
+        ? await onSelectEpisode(episode)
+        : onSelectSourceOption && activeSourceOptionId
+          ? await onSelectSourceOption(activeSourceOptionId, episode)
+          : undefined;
       if (!next) throw new Error(`Could not load ${episodeLabel.toLowerCase()} ${episode}.`);
       const matchedIndex = next.sources.findIndex(s => s.provider === preferredProvider && s.label === preferredLabel);
       extractedSourcesRef.current = []; setExtractedSources([]); setRuntimeSources(next.sources);
@@ -1554,7 +1749,7 @@ export default function VidSrcPlayer({
   };
 
   // Settings helpers
-  const currentQualityLabel = selectedHlsLevel === -1
+  const currentQualityLabel = hlsAutoQuality || selectedHlsLevel === -1
     ? "Auto"
     : hlsLevels[selectedHlsLevel]?.height ? `${hlsLevels[selectedHlsLevel].height}p` : "Auto";
 
@@ -1609,8 +1804,15 @@ export default function VidSrcPlayer({
 
       {/* ---- Subtitle Cue ---- */}
       {currentCue && isDirectEngine && (
-        <div className="gx-cue" style={{ bottom: showChrome ? 90 : 24 }}>
-          <span>{currentCue}</span>
+        <div className="gx-cue" style={{ bottom: showChrome ? 90 : 24, transform: `translate(${subtitlePosition.x}px, ${subtitlePosition.y}px)` }}>
+          <div
+            className={`gx-cue-window${draggingSubtitle ? " dragging" : ""}`}
+            style={subtitleWindowStyle}
+            onMouseDown={handleSubtitleDragStart}
+            title="Drag subtitles"
+          >
+            <span style={subtitleTextStyle}>{currentCue}</span>
+          </div>
         </div>
       )}
 
@@ -1882,7 +2084,7 @@ export default function VidSrcPlayer({
                           <div className="gx-settings-row" onClick={() => setSettingsScreen("quality")}>
                             <span>Quality</span>
                             <div className="gx-settings-row-val">
-                              <span>{isAnimeQualityMode ? (allSources[activeIndex]?.quality ?? "Auto") : currentQualityLabel}</span>
+                              <span>{hasAdaptiveHlsLevels ? currentQualityLabel : (allSources[activeIndex]?.quality ?? activeSource?.label ?? "Auto")}</span>
                               <span className="gx-settings-chevron">›</span>
                             </div>
                           </div>
@@ -1894,7 +2096,7 @@ export default function VidSrcPlayer({
                             <span className="gx-settings-chevron">›</span>
                           </div>
                         </div>
-                        {!disableSubtitleSearch && (
+                        {(activeSubtitles.length > 0 || Boolean(subtitleUrl) || !disableSubtitleSearch) && (
                           <div className="gx-settings-row" onClick={() => setSettingsScreen("subtitles")}>
                             <span>Subtitles</span>
                             <div className="gx-settings-row-val">
@@ -1944,7 +2146,7 @@ export default function VidSrcPlayer({
                           Quality
                         </div>
                         <div className="gx-settings-list">
-                          {(isMovieBoxQualityMode || isAnimeQualityMode) ? (
+                          {!hasAdaptiveHlsLevels && (isMovieBoxQualityMode || isAnimeQualityMode) ? (
                             allSources.map((source, index) => (
                               <div key={source.id} className={`gx-settings-item${index === activeIndex ? " active" : ""}`} onClick={() => { handleSourceSwitch(index); setSettingsScreen("main"); }}>
                                 <span>{source.quality || source.label}</span>
@@ -1953,12 +2155,12 @@ export default function VidSrcPlayer({
                             ))
                           ) : (
                             <>
-                              <div className={`gx-settings-item${selectedHlsLevel === -1 ? " active" : ""}`} onClick={() => { setSelectedHlsLevel(-1); if (hlsRef.current) hlsRef.current.currentLevel = -1; setSettingsScreen("main"); }}>
+                              <div className={`gx-settings-item${hlsAutoQuality ? " active" : ""}`} onClick={() => { setHlsAutoQuality(true); setSelectedHlsLevel(-1); if (hlsRef.current) { hlsRef.current.currentLevel = -1; hlsRef.current.loadLevel = -1; hlsRef.current.nextLevel = -1; } setSettingsScreen("main"); }}>
                                 <span>Auto</span>
                                 <span className="gx-check" style={{ color: "var(--player-text-dim)", fontSize: 14 }}>✓</span>
                               </div>
                               {[...hlsLevels].map((l, i) => ({ ...l, index: i })).sort((a, b) => b.height - a.height).map(({ height, bitrate, index }) => (
-                                <div key={index} className={`gx-settings-item${selectedHlsLevel === index ? " active" : ""}`} onClick={() => { setSelectedHlsLevel(index); if (hlsRef.current) { hlsRef.current.currentLevel = index; hlsRef.current.loadLevel = index; hlsRef.current.nextLevel = index; } setSettingsScreen("main"); }}>
+                                <div key={index} className={`gx-settings-item${!hlsAutoQuality && selectedHlsLevel === index ? " active" : ""}`} onClick={() => { setHlsAutoQuality(false); setSelectedHlsLevel(index); if (hlsRef.current) { hlsRef.current.currentLevel = index; hlsRef.current.loadLevel = index; hlsRef.current.nextLevel = index; } setSettingsScreen("main"); }}>
                                   <span>{height > 0 ? `${height}p` : `Level ${index + 1}`}</span>
                                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                                     {bitrate > 0 && <small style={{ fontSize: 11, color: "var(--player-text-dimmer)" }}>{Math.round(bitrate / 1000)} kbps</small>}
@@ -2007,11 +2209,54 @@ export default function VidSrcPlayer({
                             </div>
                           ))}
                           <div className="gx-settings-divider" />
+                          <div className="gx-settings-item" onClick={() => setSettingsScreen("subtitleAppearance")}>
+                            <span>Appearance</span>
+                            <div className="gx-settings-row-val">
+                              <span style={{ color: "var(--player-text-dimmer)" }}>Style</span>
+                              <span className="gx-settings-chevron">â€º</span>
+                            </div>
+                          </div>
                           <div className="gx-settings-item" onClick={() => { setShowSubtitlePanel(true); setSettingsOpen(false); }}>
                             <span>Search subtitles…</span>
                           </div>
                           <div className="gx-settings-item" onClick={() => { subtitleInputRef.current?.click(); setSettingsOpen(false); }}>
                             <span>Load from file…</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {settingsScreen === "subtitleAppearance" && (
+                      <div className="gx-settings-screen">
+                        <div className="gx-settings-header">
+                          <button className="gx-settings-header-btn" onClick={() => setSettingsScreen("subtitles")}>â†</button>
+                          Subtitle Appearance
+                        </div>
+                        <div className="gx-settings-list">
+                          <div className="gx-settings-field">
+                            <div className="gx-settings-split">
+                              <label>Size</label>
+                              <span className="gx-settings-value">{subtitleAppearance.fontScale.toFixed(2)}Ã—</span>
+                            </div>
+                            <input type="range" min="0.8" max="2.2" step="0.05" value={subtitleAppearance.fontScale} onChange={(event) => updateSubtitleAppearance("fontScale", Number(event.target.value))} />
+                          </div>
+                          <div className="gx-settings-field">
+                            <div className="gx-settings-split">
+                              <label>Background Opacity</label>
+                              <span className="gx-settings-value">{Math.round(subtitleAppearance.backgroundOpacity * 100)}%</span>
+                            </div>
+                            <input type="range" min="0" max="1" step="0.05" value={subtitleAppearance.backgroundOpacity} onChange={(event) => updateSubtitleAppearance("backgroundOpacity", Number(event.target.value))} />
+                          </div>
+                          <div className="gx-settings-field">
+                            <label>Position</label>
+                            <div className="gx-settings-value" style={{ textAlign: "left" }}>Drag the subtitle with your mouse in the player.</div>
+                          </div>
+                          <div className="gx-settings-divider" />
+                          <div className="gx-settings-item" onClick={resetSubtitlePosition}>
+                            <span>Reset position</span>
+                          </div>
+                          <div className="gx-settings-item" onClick={resetSubtitleAppearance}>
+                            <span>Reset size/background</span>
                           </div>
                         </div>
                       </div>

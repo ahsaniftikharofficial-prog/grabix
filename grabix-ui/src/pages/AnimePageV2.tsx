@@ -318,9 +318,30 @@ export default function AnimePageV2() {
     const title = animeInfo?.anime?.info?.name ?? selectedAnime?.title ?? "Anime";
     const poster = animeInfo?.anime?.info?.poster ?? selectedAnime?.image;
     const episodes = animeInfo?.episodes ?? [];
-    const subs = (data.subtitles ?? []).filter(s => s.url && s.lang).map((s, i) => ({ id: `sub-${i}`, label: s.lang!, language: s.lang!.slice(0,2).toLowerCase(), url: s.url! }));
+
+    // Build subtitle tracks from a given episode's data.
+    // Filters out thumbnail sprite tracks and any tracks without a URL or language.
+    const buildSubs = (d: HiAnimeWatch) =>
+      (d.subtitles ?? [])
+        .filter(s => s.url && s.lang && !s.lang.toLowerCase().includes("thumbnail"))
+        .map((s, i) => ({
+          id: `sub-${i}`,
+          label: s.lang!,
+          language: s.lang!.slice(0, 2).toLowerCase(),
+          url: s.url!,
+        }));
+
+    // Build StreamSource array using THIS episode's subtitle data (not a closure).
     const buildSources = (d: HiAnimeWatch): StreamSource[] =>
-      (d.sources ?? []).map((s, i) => ({ id: `h-${i}`, label: s.quality ?? "Auto", provider: "HiAnime", kind: s.isM3U8 ? "hls" : "direct", url: s.url, quality: s.quality, subtitles: subs }));
+      (d.sources ?? []).map((s, i) => ({
+        id: `h-${i}`,
+        label: s.quality ?? "Auto",
+        provider: "HiAnime",
+        kind: s.isM3U8 ? "hls" : "direct",
+        url: s.url,
+        quality: s.quality,
+        subtitles: buildSubs(d),
+      }));
 
     setPlayer({
       title, poster, sources: buildSources(data),
@@ -331,8 +352,8 @@ export default function AnimePageV2() {
         const target = episodes.find(e => e.number === n);
         if (!target) throw new Error("Episode not found");
         const nd = await api().watch(target.id, server, category);
-        
-        return { sources: buildSources({ ...nd, subtitles: nd.subtitles }), subtitle: `${category === "sub" ? "SUB" : "DUB"} · Ep ${n}` };
+        // Use nd's own subtitles — buildSources(nd) reads nd.subtitles directly
+        return { sources: buildSources(nd), subtitle: `${category === "sub" ? "SUB" : "DUB"} · Ep ${n}` };
       },
     });
     setScreen("player");

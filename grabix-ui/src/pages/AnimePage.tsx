@@ -1437,7 +1437,7 @@ function AnimeDetail({
             // to see activeSubtitles.length > 0 but never load anything, breaking
             // the CC toggle and making subtitles appear as if they don't exist.
             const subs = (watchData.subtitles ?? [])
-              .filter((s) => Boolean(s.url))
+              .filter((s) => Boolean(s.url) && !(s.lang ?? "").toLowerCase().includes("thumbnail"))
               .map((s, si) => ({
                 id: s.lang ?? `sub-${si}`,
                 label: s.lang ?? "Subtitle",
