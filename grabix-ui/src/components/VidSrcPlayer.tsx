@@ -906,7 +906,10 @@ export default function VidSrcPlayer({
     return () => {
       if (hideChromeTimeoutRef.current) window.clearTimeout(hideChromeTimeoutRef.current);
       if (subtitleUrl.startsWith("blob:")) URL.revokeObjectURL(subtitleUrl);
-      if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+      // NOTE: do NOT destroy HLS here. HLS is already destroyed in the
+      // [activeSource, isDirectEngine, reloadKey, resolvedPlaybackUrl] effect
+      // cleanup. Destroying it here too would kill the stream every time the
+      // subtitle URL changes (e.g. on CC toggle), resetting playback to 0.
       if (audioContextRef.current) { void audioContextRef.current.close().catch(() => {}); audioContextRef.current = null; }
     };
   }, [subtitleUrl]);

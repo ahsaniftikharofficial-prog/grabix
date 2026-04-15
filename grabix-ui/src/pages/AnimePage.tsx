@@ -1432,13 +1432,18 @@ function AnimeDetail({
               (src) => src.isM3U8 || (!src.isEmbed && src.url && !src.url.includes("megacloud.blog"))
             );
             if (playableSources.length === 0) continue;
-            // Mirror V2: no requestHeaders so HLS plays directly from CDN
-            const subs = (watchData.subtitles ?? []).map((s, si) => ({
-              id: s.lang ?? `sub-${si}`,
-              label: s.lang ?? "Subtitle",
-              language: s.lang,
-              url: s.url ?? "",
-            }));
+            // Mirror V2: no requestHeaders so HLS plays directly from CDN.
+            // Filter out tracks with no URL — an empty string causes the player
+            // to see activeSubtitles.length > 0 but never load anything, breaking
+            // the CC toggle and making subtitles appear as if they don't exist.
+            const subs = (watchData.subtitles ?? [])
+              .filter((s) => Boolean(s.url))
+              .map((s, si) => ({
+                id: s.lang ?? `sub-${si}`,
+                label: s.lang ?? "Subtitle",
+                language: s.lang,
+                url: s.url!,
+              }));
             const sources: StreamSource[] = playableSources.map((src, i) => ({
               id: `hianime-sidecar-${epId}-${cat}-${i}`,
               label: `HiAnime ${cat === "dub" ? "DUB" : "SUB"}`,
