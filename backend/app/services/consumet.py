@@ -185,7 +185,7 @@ async def fetch_anime_watch(
 
     base = get_consumet_api_base()
     category = "dub" if str(audio).lower() == "dub" else "sub"
-    servers = [server] if server and server not in ("auto", "") else ["vidcloud", "vidstreaming"]
+    servers = [server] if server and server not in ("auto", "") else ["hd-1", "hd-2", "vidcloud", "vidstreaming"]
 
     try:
         async with _client(timeout=35.0) as c:

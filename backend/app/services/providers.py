@@ -557,9 +557,19 @@ def _map_consumet_watch_payload(provider: str, payload: dict[str, Any]) -> list[
     # always yields [] and makes the CC button say "off" even for sub episodes.
     payload_subtitles: list[dict[str, Any]] = list(payload.get("subtitles") or [])
 
+    # Embed-only URLs (raw megacloud.blog pages) cannot be played by a video
+    # element -- they require an iframe. Filter them out here so the backend
+    # never returns fake sources that open the player but never load.
+    _EMBED_URL_PATTERNS = ("megacloud.blog", "megacloud.tv", "rapid-cloud.co")
+
     mapped: list[dict[str, Any]] = []
     for index, source in enumerate(payload.get("sources") or []):
         if not isinstance(source, dict) or not source.get("url"):
+            continue
+        url_str = str(source.get("url") or "")
+        is_m3u8 = bool(source.get("isM3U8"))
+        # Skip raw embed page URLs unless they are explicitly marked as M3U8
+        if not is_m3u8 and any(p in url_str for p in _EMBED_URL_PATTERNS):
             continue
         # Prefer any source-level subtitles (rare), fall back to payload-level.
         effective_subtitles = list(source.get("subtitles") or []) or payload_subtitles
@@ -568,7 +578,7 @@ def _map_consumet_watch_payload(provider: str, payload: dict[str, Any]) -> list[
                 source_id=str(source.get("id") or f"{provider}-watch-{index}"),
                 label=str(source.get("label") or source.get("quality") or f"Source {index + 1}"),
                 provider=str(source.get("provider") or f"Consumet {provider}"),
-                kind=str(source.get("kind") or _infer_stream_kind(str(source.get("url") or ""), str(source.get("mimeType") or ""))),
+                kind=str(source.get("kind") or ("hls" if source.get("isM3U8") else _infer_stream_kind(str(source.get("url") or ""), str(source.get("mimeType") or "")))),
                 url=str(source.get("url") or ""),
                 description=str(source.get("description") or f"{provider} source"),
                 quality=str(source.get("quality") or "Auto"),
