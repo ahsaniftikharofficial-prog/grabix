@@ -144,7 +144,7 @@ export default function SubtitlePanel({
       }
 
       const content = await response.text();
-      const label = `${title} · ${makeLanguageLabel(language)} · ${result.format.toUpperCase()}`;
+      const label = `${title} - ${makeLanguageLabel(language)} - ${result.format.toUpperCase()}`;
       onSubtitleLoaded(content, label);
       onClose();
     } catch (err) {

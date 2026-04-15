@@ -1391,21 +1391,26 @@ function AnimeDetail({
 
   const mergeAnimeFallbackSources = async (
     primarySources: StreamSource[],
-    _targetEpisode = episode
+    _targetEpisode = episode,
+    requestedAudioOverride?: AudioPreference
   ): Promise<StreamSource[]> => {
-    if (normalizeAudioPreference(audio) === "hi") {
+    if (normalizeAudioPreference(requestedAudioOverride ?? audio) === "hi") {
       return primarySources;
     }
     return primarySources.filter((source) => !isMovieBoxSource(source));
   };
 
-  const resolvePlayableSources = async (targetEpisode = episode): Promise<StreamSource[]> => {
+  const resolvePlayableSources = async (
+    targetEpisode = episode,
+    overrides?: { audio?: AudioPreference; server?: AnimeServerOption }
+  ): Promise<StreamSource[]> => {
+    const requestedAudio = normalizeAudioPreference(overrides?.audio ?? audio);
+    const requestedServer = overrides?.server ?? server;
     // ── Fast path: call sidecar watch endpoint directly for HiAnime ───────────
     // This bypasses the slow backend resolution chain (~10-20s) and gets the
     // stream URL in ~200-500ms. Falls back to the existing path if it fails.
     if (anime.provider === "hianime") {
-      const normalizedAudio = normalizeAudioPreference(audio);
-      const cat = (hasDub && normalizedAudio === "en") ? "dub" : "sub";
+      const cat = (hasDub && requestedAudio === "en") ? "dub" : "sub";
       // Try episode ID from cache first, then from the fast sidecar episodes we loaded
       const cachedEps = episodeCacheRef.current[`hianime-${anime.id}`] ?? episodes;
       const ep = cachedEps.find((e) => Number(e.number) === Number(targetEpisode)) ?? cachedEps[0];
@@ -1414,7 +1419,7 @@ function AnimeDetail({
         // Mirror V2: try vidcloud first (V2 default), then hd-1 as fallback.
         // For hianime NEVER fall through to resolveAnimePlaybackSourcesViaBackend —
         // that chain returns embed/backend sources which cause "Couldn't load this source".
-        const serversToTry = ["vidcloud", "hd-1"] as const;
+        const serversToTry = requestedServer === "auto" ? (["hd-2", "hd-1"] as const) : ([requestedServer] as const);
         for (const tryServer of serversToTry) {
           try {
             const r = await fetch(
@@ -1453,7 +1458,7 @@ function AnimeDetail({
               quality: src.quality,
               subtitles: subs,
             }));
-            resolvedPlayableSourcesCacheRef.current[`play:${normalizedAudio}:${server}:${targetEpisode}`] = sources;
+            resolvedPlayableSourcesCacheRef.current[`play:${requestedAudio}:${requestedServer}:${targetEpisode}`] = sources;
             return sources;
           } catch {
             // Try next server
@@ -1466,7 +1471,10 @@ function AnimeDetail({
         );
       }
     }
-    return await resolveAnimePlaybackSourcesViaBackend(targetEpisode);
+    return await resolveAnimePlaybackSourcesViaBackend(targetEpisode, {
+      audio: requestedAudio,
+      server: requestedServer,
+    });
   };
 
   const buildSubtitleText = (targetEpisode = episode) => {
@@ -1493,10 +1501,14 @@ function AnimeDetail({
 
   const resolvePlayerServerOption = async (optionId: string, targetEpisode = episode) => {
     const [requestedServer, requestedAudio] = optionId.split(":") as [AnimeServerOption, AudioPreference];
-    const sources = await resolveAnimePlaybackSourcesViaBackend(targetEpisode, {
-      audio: requestedAudio,
-      server: requestedServer,
-    });
+    const sources = await mergeAnimeFallbackSources(
+      await resolvePlayableSources(targetEpisode, {
+        audio: requestedAudio,
+        server: requestedServer,
+      }),
+      targetEpisode,
+      requestedAudio
+    );
     if (sources.length === 0) {
       throw new Error(`No playable source was found for ${optionId.replace(":", " ").toUpperCase()}.`);
     }
@@ -1524,7 +1536,7 @@ function AnimeDetail({
 
     const warm = async () => {
       try {
-        await resolveAnimePlaybackSourcesViaBackend(episode, {
+        await resolvePlayableSources(episode, {
           audio: normalizedAudio,
           server,
         });
@@ -1537,7 +1549,7 @@ function AnimeDetail({
   }, [audio, server, episode, totalEpisodes, resolvedAnime, candidateAnimes]);
 
   const buildPlayerPayload = async (targetEpisode = episode) => {
-    const sources = await mergeAnimeFallbackSources(await resolvePlayableSources(targetEpisode), targetEpisode);
+    const sources = await mergeAnimeFallbackSources(await resolvePlayableSources(targetEpisode), targetEpisode, audio);
     const normalizedAudio = normalizeAudioPreference(audio);
     if (sources.length === 0) {
       throw new Error(

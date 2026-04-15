@@ -63,6 +63,10 @@ function mapMovieBoxSeriesToShow(item: MovieBoxItem): Show {
   };
 }
 
+function isTvSeriesItem(item: MovieBoxItem): boolean {
+  return item.moviebox_media_type === "series" && item.media_type !== "anime";
+}
+
 function getShowPoster(show: Show): string {
   if (show.poster_url) return show.poster_url;
   if (show.poster_path) return `${IMG_BASE}${show.poster_path}`;
@@ -105,14 +109,24 @@ export default function TVSeriesPage() {
         onair: "on_the_air",
       };
       const data = await discoverTmdbMedia("tv", endpoints[nextTab], nextPage);
+      if (!data?.results) throw new Error("TMDB TV discover unavailable");
       const nextShows = (data.results ?? []) as Show[];
       setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
     } catch {
       try {
         const discover = await fetchMovieBoxDiscover();
-        const nextShows = (discover.sections ?? [])
-          .flatMap((section) => section.items ?? [])
-          .filter((item) => item.moviebox_media_type === "series")
+        const sections = discover.sections ?? [];
+        const selectedItems = (
+          nextTab === "toprated"
+            ? sections.filter((section) => section.id === "top-rated")
+            : nextTab === "popular"
+              ? sections.filter((section) => section.id === "series" || section.id === "most-popular")
+              : nextTab === "onair"
+                ? sections.filter((section) => section.id === "recent")
+                : sections.filter((section) => section.id === "recent" || section.id === "series")
+        ).flatMap((section) => section.items ?? []);
+        const nextShows = selectedItems
+          .filter(isTvSeriesItem)
           .map(mapMovieBoxSeriesToShow);
         setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
         if (nextShows.length === 0) {
@@ -132,12 +146,13 @@ export default function TVSeriesPage() {
     setPageError("");
     try {
       const data = await searchTmdbMedia("tv", nextQuery, nextPage);
+      if (!data?.results) throw new Error("TMDB TV search unavailable");
       const nextShows = (data.results ?? []) as Show[];
       setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
     } catch {
       try {
         const data = await searchMovieBox({ query: nextQuery, mediaType: "series", perPage: 24, sortBy: "search" });
-        const nextShows = (data.items ?? []).map(mapMovieBoxSeriesToShow);
+        const nextShows = (data.items ?? []).filter(isTvSeriesItem).map(mapMovieBoxSeriesToShow);
         setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
         if (nextShows.length === 0) {
           setPageError("TV search could not be completed right now.");

@@ -115,6 +115,76 @@ async def get_trending_manga(page: int = 1, per_page: int = 20) -> list[dict]:
 
 
 
+async def get_popular_manga(page: int = 1, per_page: int = 20) -> list[dict]:
+    cache_key = f"anilist:popular:{page}:{per_page}"
+    cached = await get_cached(cache_key)
+    if cached:
+        return list(cached["data"])
+
+    query = """
+    query ($page: Int, $perPage: Int) {
+      Page(page: $page, perPage: $perPage) {
+        media(type: MANGA, sort: POPULARITY_DESC) {
+          id
+          idMal
+          seasonYear
+          title { romaji english native }
+          coverImage { large }
+          averageScore
+          genres
+          status
+          description(asHtml: false)
+        }
+      }
+    }
+    """
+    try:
+        data = await anilist_request(query, {"page": page, "perPage": per_page})
+        items = [_map_manga(item) for item in (data.get("Page", {}).get("media") or [])]
+        await set_cached(cache_key, items, "anilist", expires_hours=1)
+        return items
+    except Exception as exc:
+        from app.services.logging_utils import get_logger
+        get_logger("manga").warning(f"AniList popular failed: {exc}, using Jikan fallback.")
+        from app.services.manga_jikan import get_top_manga
+        return await get_top_manga(page=page)
+
+
+async def get_top_rated_manga(page: int = 1, per_page: int = 20) -> list[dict]:
+    cache_key = f"anilist:top-rated:{page}:{per_page}"
+    cached = await get_cached(cache_key)
+    if cached:
+        return list(cached["data"])
+
+    query = """
+    query ($page: Int, $perPage: Int) {
+      Page(page: $page, perPage: $perPage) {
+        media(type: MANGA, sort: SCORE_DESC) {
+          id
+          idMal
+          seasonYear
+          title { romaji english native }
+          coverImage { large }
+          averageScore
+          genres
+          status
+          description(asHtml: false)
+        }
+      }
+    }
+    """
+    try:
+        data = await anilist_request(query, {"page": page, "perPage": per_page})
+        items = [_map_manga(item) for item in (data.get("Page", {}).get("media") or [])]
+        await set_cached(cache_key, items, "anilist", expires_hours=1)
+        return items
+    except Exception as exc:
+        from app.services.logging_utils import get_logger
+        get_logger("manga").warning(f"AniList top rated failed: {exc}, using Jikan fallback.")
+        from app.services.manga_jikan import get_top_manga
+        return await get_top_manga(page=page)
+
+
 async def search_manga(query_text: str, page: int = 1) -> list[dict]:
     cache_key = f"anilist:search:{query_text.strip().lower()}:{page}"
     cached = await get_cached(cache_key)

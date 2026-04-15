@@ -1,4 +1,4 @@
-# build-installer.ps1
+﻿# build-installer.ps1
 # Deterministic GRABIX installer build for the PyO3 embedded backend edition.
 
 param(

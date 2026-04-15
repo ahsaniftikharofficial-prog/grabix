@@ -205,7 +205,7 @@ function findCurrentCue(cues: SubtitleCue[], t: number): SubtitleCue | null {
 }
 
 const DEFAULT_SUBTITLE_APPEARANCE: SubtitleAppearanceSettings = {
-  fontScale: 1.15,
+  fontScale: 1.05,
   fontFamily: "Arial, Helvetica, sans-serif",
   textColor: "#ffffff",
   textOpacity: 1,
@@ -696,6 +696,11 @@ const PLAYER_STYLES = `
     position: absolute; inset: 0;
     display: flex; align-items: center; justify-content: center;
     z-index: 8; pointer-events: none;
+    background: radial-gradient(circle at center, rgba(0,0,0,0.34) 0%, rgba(0,0,0,0.56) 100%);
+  }
+  .gx-spinner-panel {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px;
   }
   .gx-spinner {
     width: 32px; height: 32px;
@@ -705,6 +710,13 @@ const PLAYER_STYLES = `
     animation: gx-spin 0.8s linear infinite;
   }
   @keyframes gx-spin { to { transform: rotate(360deg); } }
+  .gx-spinner-label {
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.65);
+  }
 
   /* Error / notice */
   .gx-error {
@@ -796,6 +808,7 @@ export default function VidSrcPlayer({
   const rootRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const previewHlsRef = useRef<Hls | null>(null);
   const [hlsLevels, setHlsLevels] = useState<Array<{ height: number; bitrate: number }>>([]);
   const [selectedHlsLevel, setSelectedHlsLevel] = useState<number>(-1);
   const [hlsAutoQuality, setHlsAutoQuality] = useState(true);
@@ -807,6 +820,7 @@ export default function VidSrcPlayer({
   const embedLoadedRef = useRef(false);
   const progressBarWidthRef = useRef(0);
   const progressBarRef = useRef<HTMLDivElement>(null);
+  const sourceRetryCountsRef = useRef<Record<string, number>>({});
 
   // Thumbnail preview refs
   const previewVideoRef = useRef<HTMLVideoElement>(null);
@@ -873,7 +887,7 @@ export default function VidSrcPlayer({
   const [activeIndex, setActiveIndex] = useState(0);
   const [reloadKey, setReloadKey] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
-  const [, setStatusText] = useState("Connecting");
+  const [statusText, setStatusText] = useState("Connecting");
   const [errorText, setErrorText] = useState("");
   const [fallbackNotice, setFallbackNotice] = useState("");
   const [resolvedEmbedUrl, setResolvedEmbedUrl] = useState("");
@@ -1092,16 +1106,35 @@ export default function VidSrcPlayer({
 
   const goToNextSource = (reason: FailureKind) => {
     const message = failureLabel(reason);
+    const currentSourceKey = activeSource ? `${activeIndex}:${activeSource.externalUrl || activeSource.url}` : String(activeIndex);
+    const currentRetryCount = sourceRetryCountsRef.current[currentSourceKey] ?? 0;
+    const canRetryCurrentSource =
+      Boolean(activeSource) &&
+      (activeSource.kind === "hls" || activeSource.kind === "direct") &&
+      currentRetryCount < 5;
+
+    if (canRetryCurrentSource) {
+      sourceRetryCountsRef.current[currentSourceKey] = currentRetryCount + 1;
+      setErrorText("");
+      setIsLoading(true);
+      setIsPlaying(false);
+      setStatusText("Retrying");
+      setFallbackNotice(`${message} Retrying stream (${currentRetryCount + 1}/5)...`);
+      setReloadKey((key) => key + 1);
+      return;
+    }
     if (hasFallback) {
       const immediateNextIndex = activeIndex + 1;
       const preparedSiblingIndex = findPreparedSiblingIndex(immediateNextIndex);
       const nextIndex = preparedSiblingIndex >= 0 ? preparedSiblingIndex : immediateNextIndex;
       const nextSource = allSources[nextIndex];
+      sourceRetryCountsRef.current[currentSourceKey] = 0;
       setFallbackNotice(`${message} Switched to ${nextSource.label} (${nextSource.provider}).`);
       setActiveIndex(nextIndex);
       setReloadKey((key) => key + 1);
       return;
     }
+    sourceRetryCountsRef.current[currentSourceKey] = 0;
     setErrorText(message);
     setIsLoading(false);
     setStatusText("Failed");
@@ -1110,8 +1143,8 @@ export default function VidSrcPlayer({
   // Source setup
   useEffect(() => {
     setIsLoading(true);
+    setIsPlaying(false);
     setErrorText("");
-    setFallbackNotice("");
     setStatusText(activeSource ? `Loading ${activeSource.provider}` : "No source");
     setResolvedEmbedUrl("");
     setEpisodeMenuOpen(false);
@@ -1127,7 +1160,7 @@ export default function VidSrcPlayer({
       const noticeTimeout = window.setTimeout(() => {
         if (!embedLoadedRef.current) {
           embedLoadedRef.current = true;
-          setFallbackNotice("Stream is taking a while — still connecting. Use the server picker to switch if needed.");
+          setFallbackNotice("Stream is taking a while and is still connecting. Use the server picker to switch if needed.");
           setIsLoading(false);
         }
       }, 45_000);
@@ -1153,6 +1186,21 @@ export default function VidSrcPlayer({
     if (!activeSource || !isDirectEngine) return;
     const video = videoRef.current;
     if (!video) return;
+    let bufferTimeoutId: number | null = null;
+    const clearBufferTimeout = () => {
+      if (bufferTimeoutId !== null) {
+        window.clearTimeout(bufferTimeoutId);
+        bufferTimeoutId = null;
+      }
+    };
+    const armBufferTimeout = () => {
+      clearBufferTimeout();
+      bufferTimeoutId = window.setTimeout(() => {
+        if (!video.paused) {
+          goToNextSource("media_error");
+        }
+      }, 12000);
+    };
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
     video.pause();
     video.removeAttribute("src");
@@ -1183,13 +1231,23 @@ export default function VidSrcPlayer({
         setFallbackNotice("Stream is ready. Press play if it does not start automatically.");
       }
     };
+    const handleLoadStart = () => { setIsLoading(true); setStatusText("Loading"); setIsPlaying(false); };
     const handleCanPlay = () => markSourceReady("Ready");
-    const handleLoadedMetadata = () => markSourceReady("Ready");
+    const handleLoadedMetadata = () => {
+      const d = video.duration || 0;
+      durationRef.current = d;
+      setDuration(d);
+      if (rangeRef.current) rangeRef.current.max = String(d);
+    };
     const handleLoadedData = () => markSourceReady("Ready");
     const handleError = () => { sourceReady = true; goToNextSource(activeSource.kind === "local" ? "open_failed" : "media_error"); };
-    const handleWaiting = () => { setIsLoading(true); setStatusText("Buffering"); };
+    const handleWaiting = () => { setIsLoading(true); setStatusText("Buffering"); armBufferTimeout(); };
+    const handleStalled = () => { setIsLoading(true); setStatusText("Buffering"); armBufferTimeout(); };
     const handlePlaying = () => {
       sourceReady = true;
+      clearBufferTimeout();
+      const currentSourceKey = `${activeIndex}:${activeSource.externalUrl || activeSource.url}`;
+      sourceRetryCountsRef.current[currentSourceKey] = 0;
       if (shouldRestoreAudioAfterStart) {
         video.muted = originalMuted;
         if (!originalMuted) video.volume = originalVolume || 1;
@@ -1226,11 +1284,13 @@ export default function VidSrcPlayer({
       if (rangeRef.current) rangeRef.current.max = String(d);
     };
     const handleVolumeChange = () => { setVolume(video.volume); setIsMuted(video.muted); };
+    video.addEventListener("loadstart", handleLoadStart);
     video.addEventListener("canplay", handleCanPlay);
     video.addEventListener("loadedmetadata", handleLoadedMetadata);
     video.addEventListener("loadeddata", handleLoadedData);
     video.addEventListener("error", handleError);
     video.addEventListener("waiting", handleWaiting);
+    video.addEventListener("stalled", handleStalled);
     video.addEventListener("playing", handlePlaying);
     video.addEventListener("pause", handlePause);
     video.addEventListener("timeupdate", handleTimeUpdate);
@@ -1270,12 +1330,15 @@ export default function VidSrcPlayer({
       void attemptPlayback();
     }
     return () => {
+      clearBufferTimeout();
       window.clearTimeout(startupTimeout);
+      video.removeEventListener("loadstart", handleLoadStart);
       video.removeEventListener("canplay", handleCanPlay);
       video.removeEventListener("loadedmetadata", handleLoadedMetadata);
       video.removeEventListener("loadeddata", handleLoadedData);
       video.removeEventListener("error", handleError);
       video.removeEventListener("waiting", handleWaiting);
+      video.removeEventListener("stalled", handleStalled);
       video.removeEventListener("playing", handlePlaying);
       video.removeEventListener("pause", handlePause);
       video.removeEventListener("timeupdate", handleTimeUpdate);
@@ -1290,15 +1353,42 @@ export default function VidSrcPlayer({
     if (!isDirectEngine || !activeSource?.url) return;
     const pv = previewVideoRef.current;
     if (!pv) return;
+    if (previewHlsRef.current) {
+      previewHlsRef.current.destroy();
+      previewHlsRef.current = null;
+    }
     if (activeSource.kind === "hls") {
       const url = resolvedPlaybackUrl || (shouldKeepHlsProxied(activeSource) ? buildStreamProxyUrl(API, activeSource.url, activeSource.requestHeaders) : activeSource.url);
-      pv.src = url;
+      if (Hls.isSupported()) {
+        const previewHls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: false,
+          startFragPrefetch: false,
+          maxBufferLength: 8,
+          maxMaxBufferLength: 16,
+          backBufferLength: 8,
+          manifestLoadingMaxRetry: 1,
+          fragLoadingMaxRetry: 1,
+          levelLoadingMaxRetry: 1,
+        });
+        previewHlsRef.current = previewHls;
+        previewHls.attachMedia(pv);
+        previewHls.on(Hls.Events.MEDIA_ATTACHED, () => { previewHls.loadSource(url); });
+      } else {
+        pv.src = url;
+      }
     } else {
       pv.src = activeSource.url;
     }
     pv.muted = true;
-    pv.preload = "none";
-  }, [activeSource, isDirectEngine, resolvedPlaybackUrl]);
+    pv.preload = "metadata";
+    return () => {
+      if (previewHlsRef.current) {
+        previewHlsRef.current.destroy();
+        previewHlsRef.current = null;
+      }
+    };
+  }, [API, activeSource, isDirectEngine, resolvedPlaybackUrl]);
 
   // Audio boost
   useEffect(() => {
@@ -1355,8 +1445,8 @@ export default function VidSrcPlayer({
           window.clearTimeout(directTimer);
         }
       } catch {
-        // CORS policy, missing Referer, or network error —
-        // HiAnime / MegaCloud CDN subtitles always land here.
+        // CORS policy, missing Referer, or network error.
+        // Some subtitle CDNs fail here and need the backend proxy.
       }
 
       // Backend proxy path: the server has no CORS restrictions and forwards
@@ -1375,14 +1465,14 @@ export default function VidSrcPlayer({
         const cues = parseSubtitleText(content);
         setSubtitleCues(cues);
         if (!cues.length) {
-          setFallbackNotice("Subtitles loaded but no cues found — the file may be empty or in an unsupported format.");
+          setFallbackNotice("Subtitles loaded but no cues were found. The file may be empty or use an unsupported format.");
         }
       })
       .catch(() => {
         if (!cancelled) {
           setSubtitleCues([]);
           setSubtitlesEnabled(false);
-          setFallbackNotice("Could not load subtitles — CDN blocked the request. Try a different server or upload manually via the CC button.");
+          setFallbackNotice("Could not load subtitles. The CDN blocked the request. Try a different server or load a local file.");
         }
       });
 
@@ -1408,7 +1498,12 @@ export default function VidSrcPlayer({
   // ---------------------------------------------------------------------------
 
   const handleSourceSwitch = (index: number) => {
-    setActiveIndex(index); setErrorText(""); setFallbackNotice(""); setExtractError("");
+    setIsLoading(true); setIsPlaying(false); setDuration(0);
+    const nextSource = allSources[index];
+    if (nextSource) {
+      sourceRetryCountsRef.current[`${index}:${nextSource.externalUrl || nextSource.url}`] = 0;
+    }
+    setActiveIndex(index); setErrorText(""); setFallbackNotice("Switching stream..."); setExtractError("");
     setReloadKey((key) => key + 1); setEpisodeMenuOpen(false);
     setSettingsOpen(false); showControls();
   };
@@ -1438,7 +1533,7 @@ export default function VidSrcPlayer({
 
   const handleEpisodeSwitch = async (episode: number) => {
     if ((!onSelectEpisode && !onSelectSourceOption) || episodeLoading || episode === activeEpisode) return;
-    setEpisodeLoading(true); setErrorText(""); setFallbackNotice("");
+    setEpisodeLoading(true); setIsLoading(true); setIsPlaying(false); setErrorText(""); setFallbackNotice(`Loading ${episodeLabel.toLowerCase()} ${episode}...`);
     try {
       const preferredProvider = activeSource?.provider;
       const preferredLabel = activeSource?.label;
@@ -1459,12 +1554,28 @@ export default function VidSrcPlayer({
 
   const handleSourceOptionSwitch = async (optionId: string) => {
     if (!onSelectSourceOption || optionId === activeSourceOptionId) return;
-    setEpisodeLoading(true); setErrorText(""); setFallbackNotice("");
+    setEpisodeLoading(true); setIsLoading(true); setIsPlaying(false); setErrorText(""); setFallbackNotice("Switching server...");
     try {
-      const next = await onSelectSourceOption(optionId, activeEpisode ?? currentEpisode ?? undefined);
+      setActiveSourceOptionId(optionId);
+      const targetEpisode = activeEpisode ?? currentEpisode ?? undefined;
+      let next: Awaited<ReturnType<NonNullable<Props["onSelectSourceOption"]>>> | undefined;
+      let lastError: unknown = null;
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        try {
+          next = await onSelectSourceOption(optionId, targetEpisode);
+          break;
+        } catch (error) {
+          lastError = error;
+          if (attempt < 5) {
+            setFallbackNotice(`Switching server... retrying link fetch (${attempt}/5)`);
+            await new Promise((resolve) => window.setTimeout(resolve, 250));
+          }
+        }
+      }
+      if (!next) throw lastError instanceof Error ? lastError : new Error("Could not switch server.");
       extractedSourcesRef.current = []; setExtractedSources([]); setRuntimeSources(next.sources);
       setActiveSubtitleText(next.subtitle || ""); setActiveSearchTitle(next.subtitleSearchTitle || title);
-      setActiveSourceOptionId(optionId); setActiveIndex(0); setReloadKey((key) => key + 1);
+      setActiveIndex(0); setReloadKey((key) => key + 1);
       setSettingsOpen(false);
     } catch (error) { setFallbackNotice(error instanceof Error ? error.message : "Could not switch server."); }
     finally { setEpisodeLoading(false); }
@@ -1502,12 +1613,31 @@ export default function VidSrcPlayer({
     const file = event.target.files?.[0];
     if (!file) return;
     if (subtitleUrl.startsWith("blob:")) URL.revokeObjectURL(subtitleUrl);
-    const objectUrl = URL.createObjectURL(file);
-    setSubtitleUrl(objectUrl); setSubtitleName(file.name); setSubtitlesEnabled(true);
     currentCueRef.current = "";
-    setSubtitleCues([]); setCurrentCue("");
+    setSubtitleUrl("");
+    setSubtitleName(file.name);
+    setSubtitlesEnabled(true);
+    setSubtitleCues([]);
+    setCurrentCue("");
     setShowSubtitlePanel(false);
-    setFallbackNotice(`Loaded subtitles: ${file.name}`); event.target.value = "";
+    void file.text()
+      .then((content) => {
+        const cues = parseSubtitleText(content);
+        setSubtitleCues(cues);
+        setFallbackNotice(
+          cues.length > 0
+            ? `Loaded subtitles: ${file.name}`
+            : `Loaded ${file.name}, but no subtitle cues were found.`
+        );
+      })
+      .catch(() => {
+        setSubtitleName("");
+        setSubtitlesEnabled(false);
+        setSubtitleCues([]);
+        setCurrentCue("");
+        setFallbackNotice(`Could not read subtitle file: ${file.name}`);
+      });
+    event.target.value = "";
   };
 
   const handleSubtitleSelect = (url: string, label: string) => {
@@ -1552,7 +1682,7 @@ export default function VidSrcPlayer({
     if (subtitleUrl.startsWith("blob:")) URL.revokeObjectURL(subtitleUrl);
     const cues = parseSubtitleText(content);
     currentCueRef.current = "";
-    setSubtitleUrl(""); setSubtitleName(label); setSubtitleCues(cues); setCurrentCue("");
+    setSubtitleUrl(""); setSubtitleName(label); setSubtitlesEnabled(true); setSubtitleCues(cues); setCurrentCue("");
     setShowSubtitlePanel(false); setFallbackNotice(`Loaded subtitles: ${label}`);
   };
 
@@ -1724,8 +1854,7 @@ export default function VidSrcPlayer({
 
     if (previewSeekedCleanupRef.current) { previewSeekedCleanupRef.current(); previewSeekedCleanupRef.current = null; }
 
-    pv.currentTime = hoverTime;
-    const onSeeked = () => {
+    const drawPreviewFrame = () => {
       if (!previewHoveringRef.current) { pv.removeEventListener("seeked", onSeeked); previewSeekedCleanupRef.current = null; return; }
       try {
         const ctx = canvas.getContext("2d");
@@ -1738,6 +1867,25 @@ export default function VidSrcPlayer({
       pv.removeEventListener("seeked", onSeeked);
       previewSeekedCleanupRef.current = null;
     };
+    const onSeeked = () => { drawPreviewFrame(); };
+    const seekToHoverTime = () => {
+      try {
+        pv.currentTime = hoverTime;
+      } catch {
+        setHoverPreview({ x, time: hoverTime, dataUrl: "", visible: true });
+      }
+    };
+    if (pv.readyState < 1) {
+      const onLoadedMetadata = () => {
+        pv.removeEventListener("loadedmetadata", onLoadedMetadata);
+        seekToHoverTime();
+      };
+      pv.addEventListener("loadedmetadata", onLoadedMetadata, { once: true });
+      pv.load();
+      setHoverPreview({ x, time: hoverTime, dataUrl: "", visible: true });
+    } else {
+      seekToHoverTime();
+    }
     pv.addEventListener("seeked", onSeeked);
     previewSeekedCleanupRef.current = () => pv.removeEventListener("seeked", onSeeked);
   }, [isDirectEngine]);
@@ -1771,7 +1919,7 @@ export default function VidSrcPlayer({
       onMouseMove={showControls}
       onClick={handleShellClick}
     >
-      <input ref={subtitleInputRef} type="file" accept=".vtt,text/vtt" style={{ display: "none" }} onChange={onSubtitlePicked} />
+      <input ref={subtitleInputRef} type="file" accept=".vtt,.srt,text/vtt,application/x-subrip,.sub,.txt" style={{ display: "none" }} onChange={onSubtitlePicked} />
       {/* Hidden elements for preview generation */}
       <video ref={previewVideoRef} style={{ display: "none" }} muted playsInline crossOrigin="anonymous" />
       <canvas ref={previewCanvasRef} style={{ display: "none" }} />
@@ -1827,7 +1975,10 @@ export default function VidSrcPlayer({
       {/* ---- Buffering/Loading spinner ---- */}
       {isLoading && (
         <div className="gx-spinner-wrap">
-          <div className="gx-spinner" />
+          <div className="gx-spinner-panel">
+            <div className="gx-spinner" />
+            <div className="gx-spinner-label">{statusText || "Loading"}</div>
+          </div>
         </div>
       )}
 
@@ -2194,33 +2345,33 @@ export default function VidSrcPlayer({
                     {settingsScreen === "subtitles" && (
                       <div className="gx-settings-screen">
                         <div className="gx-settings-header">
-                          <button className="gx-settings-header-btn" onClick={() => setSettingsScreen("main")}>←</button>
+                          <button className="gx-settings-header-btn" onClick={() => setSettingsScreen("main")}>{"<"}</button>
                           Subtitles
                         </div>
                         <div className="gx-settings-list">
                           <div className={`gx-settings-item${!subtitlesEnabled ? " active" : ""}`} onClick={() => { clearSubtitles(); setSettingsScreen("main"); }}>
                             <span>Off</span>
-                            <span className="gx-check" style={{ color: "var(--player-text-dim)", fontSize: 14 }}>✓</span>
+                            <span className="gx-check" style={{ color: "var(--player-text-dim)", fontSize: 14 }}>OK</span>
                           </div>
                           {activeSubtitles.map(track => (
                             <div key={track.url} className={`gx-settings-item${subtitlesEnabled && subtitleUrl === track.url ? " active" : ""}`} onClick={() => { handleSubtitleSelect(track.url, track.label); setSettingsScreen("main"); }}>
                               <span>{track.label}</span>
-                              <span className="gx-check" style={{ color: "var(--player-text-dim)", fontSize: 14 }}>✓</span>
+                              <span className="gx-check" style={{ color: "var(--player-text-dim)", fontSize: 14 }}>OK</span>
                             </div>
                           ))}
                           <div className="gx-settings-divider" />
                           <div className="gx-settings-item" onClick={() => setSettingsScreen("subtitleAppearance")}>
                             <span>Appearance</span>
                             <div className="gx-settings-row-val">
-                              <span style={{ color: "var(--player-text-dimmer)" }}>Style</span>
-                              <span className="gx-settings-chevron">â€º</span>
+                              <span style={{ color: "var(--player-text-dimmer)" }}>Size and background</span>
+                              <span className="gx-settings-chevron">{">"}</span>
                             </div>
                           </div>
                           <div className="gx-settings-item" onClick={() => { setShowSubtitlePanel(true); setSettingsOpen(false); }}>
-                            <span>Search subtitles…</span>
+                            <span>Search subtitles...</span>
                           </div>
                           <div className="gx-settings-item" onClick={() => { subtitleInputRef.current?.click(); setSettingsOpen(false); }}>
-                            <span>Load from file…</span>
+                            <span>Load from file...</span>
                           </div>
                         </div>
                       </div>
@@ -2229,14 +2380,14 @@ export default function VidSrcPlayer({
                     {settingsScreen === "subtitleAppearance" && (
                       <div className="gx-settings-screen">
                         <div className="gx-settings-header">
-                          <button className="gx-settings-header-btn" onClick={() => setSettingsScreen("subtitles")}>â†</button>
+                          <button className="gx-settings-header-btn" onClick={() => setSettingsScreen("subtitles")}>{"<"}</button>
                           Subtitle Appearance
                         </div>
                         <div className="gx-settings-list">
                           <div className="gx-settings-field">
                             <div className="gx-settings-split">
                               <label>Size</label>
-                              <span className="gx-settings-value">{subtitleAppearance.fontScale.toFixed(2)}Ã—</span>
+                              <span className="gx-settings-value">{subtitleAppearance.fontScale.toFixed(2)}x</span>
                             </div>
                             <input type="range" min="0.8" max="2.2" step="0.05" value={subtitleAppearance.fontScale} onChange={(event) => updateSubtitleAppearance("fontScale", Number(event.target.value))} />
                           </div>
@@ -2324,3 +2475,4 @@ export default function VidSrcPlayer({
     </div>
   );
 }
+

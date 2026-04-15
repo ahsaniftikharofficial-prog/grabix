@@ -12,6 +12,8 @@ export const BACKEND_BASE = BACKEND_API;
 
 export const MANGA_ENDPOINTS = {
   trending: (page = 1) => `${BACKEND_BASE}/manga/trending?page=${page}`,
+  popular: (page = 1) => `${BACKEND_BASE}/manga/popular?page=${page}`,
+  topRated: (page = 1) => `${BACKEND_BASE}/manga/top-rated?page=${page}`,
   search: (query: string, source = "anilist", page = 1) =>
     `${BACKEND_BASE}/manga/search?query=${encodeURIComponent(query)}&source=${source}&page=${page}`,
   details: (id: string | number, source = "anilist_id") =>
@@ -129,6 +131,24 @@ export async function fetchTrendingManga(page = 1): Promise<MangaDiscoveryItem[]
   const data = await getCachedMangaJson<{ items: MangaDiscoveryItem[] }>(
     `manga:trending:${page}`,
     MANGA_ENDPOINTS.trending(page),
+    300_000
+  );
+  return data.items ?? [];
+}
+
+export async function fetchPopularManga(page = 1): Promise<MangaDiscoveryItem[]> {
+  const data = await getCachedMangaJson<{ items: MangaDiscoveryItem[] }>(
+    `manga:popular:${page}`,
+    MANGA_ENDPOINTS.popular(page),
+    300_000
+  );
+  return data.items ?? [];
+}
+
+export async function fetchTopRatedManga(page = 1): Promise<MangaDiscoveryItem[]> {
+  const data = await getCachedMangaJson<{ items: MangaDiscoveryItem[] }>(
+    `manga:top-rated:${page}`,
+    MANGA_ENDPOINTS.topRated(page),
     300_000
   );
   return data.items ?? [];

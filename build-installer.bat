@@ -8,7 +8,7 @@ echo   GRABIX Installer Build
 echo ==========================================
 echo.
 
-C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -File "%~dp0build-installer.ps1"
+C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -File "%~dp0build-installer.ps1" %*
 set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.

@@ -7,8 +7,10 @@ from fastapi.responses import Response
 
 from app.services.manga_anilist import (
     get_manga_by_id,
+    get_popular_manga,
     get_manga_recommendations,
     get_seasonal_manga,
+    get_top_rated_manga,
     get_trending_manga,
     search_manga as anilist_search_manga,
 )
@@ -81,6 +83,16 @@ def _is_allowed_manga_image_url(url: str) -> bool:
 @router.get("/trending")
 async def manga_trending(page: int = 1):
     return {"items": await get_trending_manga(page=page)}
+
+
+@router.get("/popular")
+async def manga_popular(page: int = 1):
+    return {"items": await get_popular_manga(page=page)}
+
+
+@router.get("/top-rated")
+async def manga_top_rated(page: int = 1):
+    return {"items": await get_top_rated_manga(page=page)}
 
 
 @router.get("/search")

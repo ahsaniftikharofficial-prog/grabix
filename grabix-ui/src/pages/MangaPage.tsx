@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchConsumetMangaChapters,
-  fetchConsumetMangaDiscover,
   fetchConsumetMangaRead,
   searchConsumetManga,
   type ConsumetChapter,
@@ -9,13 +8,13 @@ import {
 } from "../lib/consumetProviders";
 import {
   fetchComickChapters,
-  fetchComickFrontpage,
   fetchComickPages,
   fetchMangaChapters,
   fetchMangaDetails,
   fetchMangaPages,
+  fetchPopularManga,
   fetchMangaRecommendations,
-  fetchSeasonalManga,
+  fetchTopRatedManga,
   fetchTrendingManga,
   searchManga,
   toMangaImageProxy,
@@ -41,6 +40,7 @@ import { createCbzBlob, triggerFileDownload } from "../lib/mangaZip";
 
 type ReaderState = { chapterIndex: number; chapter: MangaChapter };
 type ChapterSource = "auto" | "mangadex" | "consumet" | "comick";
+type MangaBrowseTab = "trending" | "popular" | "toprated";
 type DownloadState = {
   status: "idle" | "downloading" | "paused" | "done" | "error";
   message?: string;
@@ -67,14 +67,6 @@ const LANGUAGE_OPTIONS = [
   { label: "Spanish", value: "es" },
   { label: "French", value: "fr" },
 ];
-
-function currentSeason(): string {
-  const month = new Date().getMonth() + 1;
-  if (month <= 3) return "WINTER";
-  if (month <= 6) return "SPRING";
-  if (month <= 9) return "SUMMER";
-  return "FALL";
-}
 
 function coverFallback(title: string): string {
   return `https://via.placeholder.com/300x420/1b1f2a/e5e7eb?text=${encodeURIComponent((title || "M").slice(0, 1).toUpperCase())}`;
@@ -235,52 +227,14 @@ function MangaCard({
   );
 }
 
-function HorizontalRail({
-  title,
-  subtitle,
-  items,
-  onOpen,
-  onRead,
-  onDownloadAll,
-}: {
-  title: string;
-  subtitle?: string;
-  items: MangaDiscoveryItem[];
-  onOpen: (item: MangaDiscoveryItem) => void;
-  onRead: (item: MangaDiscoveryItem) => void;
-  onDownloadAll: (item: MangaDiscoveryItem) => void;
-}) {
-  return (
-    <section>
-      <div style={{ marginBottom: 12 }}>
-        <div style={{ fontSize: 16, fontWeight: 700 }}>{title}</div>
-        {subtitle ? <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>{subtitle}</div> : null}
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(165px, 1fr))", gap: 14 }}>
-        {items.map((item) => {
-          return (
-            <MangaCard
-              key={`${title}-${item.anilist_id ?? item.mangadex_id ?? item.title}`}
-              item={item}
-              onOpen={() => onOpen(item)}
-              onRead={() => onRead(item)}
-              onDownloadAll={() => onDownloadAll(item)}
-            />
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
 export default function MangaPage() {
   const { adultContentBlocked } = useContentFilter();
   const [searchText, setSearchText] = useState("");
   const [query, setQuery] = useState("");
+  const [browseTab, setBrowseTab] = useState<MangaBrowseTab>("trending");
   const [trending, setTrending] = useState<MangaDiscoveryItem[]>([]);
-  const [seasonal, setSeasonal] = useState<MangaDiscoveryItem[]>([]);
-  const [comickHot, setComickHot] = useState<MangaDiscoveryItem[]>([]);
-  const [consumetHot, setConsumetHot] = useState<MangaDiscoveryItem[]>([]);
+  const [browsePage, setBrowsePage] = useState(1);
+  const [browseHasMore, setBrowseHasMore] = useState(true);
   const [searchResults, setSearchResults] = useState<MangaDiscoveryItem[]>([]);
   const [homeLoading, setHomeLoading] = useState(true);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -307,13 +261,10 @@ export default function MangaPage() {
   const [chapterDownloadStates, setChapterDownloadStates] = useState<Record<string, DownloadState>>({});
   const [downloadedChapterKeys, setDownloadedChapterKeys] = useState<Set<string>>(new Set());
   const chapterDownloadSessionsRef = useRef<Record<string, ChapterDownloadSession>>({});
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  const season = useMemo(() => currentSeason(), []);
-  const seasonYear = useMemo(() => new Date().getFullYear(), []);
   const filteredTrending = useMemo(() => filterAdultContent(trending, adultContentBlocked), [trending, adultContentBlocked]);
-  const filteredSeasonal = useMemo(() => filterAdultContent(seasonal, adultContentBlocked), [seasonal, adultContentBlocked]);
-  const filteredComickHot = useMemo(() => filterAdultContent(comickHot, adultContentBlocked), [comickHot, adultContentBlocked]);
-  const filteredConsumetHot = useMemo(() => filterAdultContent(consumetHot, adultContentBlocked), [consumetHot, adultContentBlocked]);
   const filteredSearchResults = useMemo(() => filterAdultContent(searchResults, adultContentBlocked), [searchResults, adultContentBlocked]);
   const filteredRecommendations = useMemo(() => filterAdultContent(recommendations, adultContentBlocked), [recommendations, adultContentBlocked]);
   const updateChapterDownloadState = (mangaKey: string, chapterId: string, next: DownloadState) => {
@@ -619,51 +570,62 @@ export default function MangaPage() {
     }
   };
 
-  const loadHome = async () => {
+  const loadDiscover = async (nextTab: MangaBrowseTab, nextPage = 1) => {
     setHomeLoading(true);
     setHomeError(null);
     try {
-      const [trendingResult, seasonalResult] = await Promise.allSettled([
-        fetchTrendingManga(1),
-        fetchSeasonalManga(seasonYear, season),
-      ]);
-
-      const nextTrending = trendingResult.status === "fulfilled" ? trendingResult.value : [];
-      const nextSeasonal = seasonalResult.status === "fulfilled" ? seasonalResult.value : [];
-
-      setTrending(nextTrending);
-      setSeasonal(nextSeasonal);
-
-      if (!nextTrending.length && !nextSeasonal.length) {
-        const reasons = [trendingResult, seasonalResult]
-          .filter((result): result is PromiseRejectedResult => result.status === "rejected")
-          .map((result) => (result.reason instanceof Error ? result.reason.message : "Could not load manga discovery."));
-        setHomeError(reasons[0] || "Could not load manga discovery.");
+      const loader = nextTab === "popular"
+        ? fetchPopularManga
+        : nextTab === "toprated"
+          ? fetchTopRatedManga
+          : fetchTrendingManga;
+      const items = dedupeMangaItems(await loader(nextPage));
+      setTrending((current) => (nextPage === 1 ? items : dedupeMangaItems([...current, ...items])));
+      setBrowseHasMore(items.length > 0);
+      if (nextPage === 1 && items.length === 0) {
+        setHomeError("Could not load manga discovery.");
+      }
+    } catch (error) {
+      if (nextPage === 1) {
+        setTrending([]);
+        setHomeError(error instanceof Error ? error.message : "Could not load manga discovery.");
+      } else {
+        setBrowseHasMore(false);
       }
     } finally {
       setHomeLoading(false);
     }
-
-    void Promise.allSettled([
-      fetchComickFrontpage("trending", 1, 12, 7),
-      fetchConsumetMangaDiscover("trending", 1),
-    ]).then(([comickResult, consumetResult]) => {
-      const nextComickHot = comickResult.status === "fulfilled" ? comickResult.value : [];
-      const nextConsumetHot = consumetResult.status === "fulfilled"
-        ? consumetResult.value.map(mapConsumetMangaToDiscovery)
-        : [];
-      setComickHot(nextComickHot);
-      setConsumetHot(nextConsumetHot);
-    }).catch(() => {
-      // secondary manga rails are optional
-    });
   };
 
-  useEffect(() => { void loadHome(); }, []);
+  useEffect(() => {
+    if (query.trim() || selectedItem || reader) return;
+    setBrowsePage(1);
+    setBrowseHasMore(true);
+    void loadDiscover(browseTab, 1);
+  }, [browseTab, query, selectedItem, reader]);
 
   useEffect(() => {
     void hydrateOfflineFlags();
   }, []);
+
+  useEffect(() => {
+    if (query.trim() || selectedItem || reader) return;
+    const root = scrollRef.current;
+    const node = bottomRef.current;
+    if (!root || !node) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting) && !homeLoading && browseHasMore) {
+          const nextPage = browsePage + 1;
+          setBrowsePage(nextPage);
+          void loadDiscover(browseTab, nextPage);
+        }
+      },
+      { root, rootMargin: "240px 0px" }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [browseHasMore, browsePage, browseTab, homeLoading, query, selectedItem, reader]);
 
   useEffect(() => {
     if (!query.trim()) {
@@ -875,7 +837,7 @@ export default function MangaPage() {
       <div style={{ padding: "14px 24px", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <div>
           <div style={{ fontSize: 16, fontWeight: 600 }}>Manga</div>
-          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 1 }}>AniList discovery, Jikan metadata, plus switchable Consumet, MangaDex, and Comick readers</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 1 }}>Trending, popular, and top-rated manga with the existing reader stack</div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <div style={{ position: "relative" }}>
@@ -886,21 +848,56 @@ export default function MangaPage() {
           {(query || selectedItem) && <button className="btn btn-ghost" onClick={() => { setSearchText(""); setQuery(""); setSelectedItem(null); setReader(null); }}><IconX size={13} /> Clear</button>}
         </div>
       </div>
-      <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
+      {!selectedItem && !reader && !query && (
+        <div style={{ display: "flex", gap: 4, padding: "10px 24px 0", background: "var(--bg-surface)", borderBottom: "1px solid var(--border)" }}>
+          {[
+            { id: "trending" as MangaBrowseTab, label: "Trending" },
+            { id: "popular" as MangaBrowseTab, label: "Popular" },
+            { id: "toprated" as MangaBrowseTab, label: "Top Rated" },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setBrowseTab(tab.id)}
+              style={{ padding: "7px 16px", fontSize: 13, fontWeight: 500, border: "none", cursor: "pointer", background: "transparent", borderBottom: browseTab === tab.id ? "2px solid var(--accent)" : "2px solid transparent", color: browseTab === tab.id ? "var(--accent)" : "var(--text-muted)", transition: "var(--transition)", borderRadius: 0 }}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      )}
+      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
         {!selectedItem && !reader && !query && (
           homeLoading ? <LoadingGrid count={10} /> : homeError ? (
             <PageErrorState
               title="Manga home is unavailable right now"
               subtitle={homeError}
-              onRetry={() => void loadHome()}
+              onRetry={() => void loadDiscover(browseTab, 1)}
             />
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
-              <HorizontalRail title="Trending Now" subtitle="Powered by AniList discovery" items={filteredTrending} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownloadAll={(item) => void handleDownloadAll(item)} />
-              <HorizontalRail title={`${season.charAt(0)}${season.slice(1).toLowerCase()} Picks`} subtitle={`Seasonal manga for ${seasonYear}`} items={filteredSeasonal} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownloadAll={(item) => void handleDownloadAll(item)} />
-              {filteredConsumetHot.length > 0 && <HorizontalRail title="Consumet MangaDex" subtitle="Primary manga reader matches from Consumet" items={filteredConsumetHot} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownloadAll={(item) => void handleDownloadAll(item)} />}
-              {filteredComickHot.length > 0 && <HorizontalRail title="Comick Hot" subtitle="Backup reader picks for long series" items={filteredComickHot} onOpen={(item) => void openDetails(item)} onRead={(item) => void handleRead(item)} onDownloadAll={(item) => void handleDownloadAll(item)} />}
-            </div>
+            filteredTrending.length === 0 ? (
+              <PageEmptyState
+                title="No manga are available here yet"
+                subtitle="Try another section or refresh this page."
+              />
+            ) : (
+              <>
+                <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+                  {browseTab === "popular" ? "Most followed and most-read manga." : browseTab === "toprated" ? "Highest-rated manga ranked by score." : "What is trending right now."}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 14 }}>
+                  {filteredTrending.map((item) => (
+                    <MangaCard
+                      key={`${browseTab}-${item.anilist_id ?? item.mangadex_id ?? item.title}`}
+                      item={item}
+                      onOpen={() => void openDetails(item)}
+                      onRead={() => void handleRead(item)}
+                      onDownloadAll={() => void handleDownloadAll(item)}
+                    />
+                  ))}
+                </div>
+                <div ref={bottomRef} style={{ height: 24 }} />
+              </>
+            )
           )
         )}
         {!selectedItem && !reader && !!query && (

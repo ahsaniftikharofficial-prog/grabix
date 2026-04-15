@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { discoverTmdbMedia, TMDB_IMAGE_BASE as IMG_BASE } from "../lib/tmdb";
+import { TMDB_IMAGE_BASE as IMG_BASE } from "../lib/tmdb";
 import { fetchMovieBoxDiscover, type MovieBoxItem } from "../lib/streamProviders";
 
 const API        = "https://api.imdbapi.dev";
@@ -28,6 +28,67 @@ interface AnimeEntry {
 }
 interface FallbackAnimeEntry {
   id: string; title: string; score: number; rank: number; poster?: string; year?: number;
+}
+interface CanonicalTitle {
+  title: string;
+  year?: number;
+  kind: "movie" | "tv";
+}
+
+const CANONICAL_TOP_MOVIES: CanonicalTitle[] = [
+  { title: "The Shawshank Redemption", year: 1994, kind: "movie" },
+  { title: "The Godfather", year: 1972, kind: "movie" },
+  { title: "The Dark Knight", year: 2008, kind: "movie" },
+  { title: "The Godfather Part II", year: 1974, kind: "movie" },
+  { title: "12 Angry Men", year: 1957, kind: "movie" },
+  { title: "Schindler's List", year: 1993, kind: "movie" },
+  { title: "The Lord of the Rings: The Return of the King", year: 2003, kind: "movie" },
+  { title: "Pulp Fiction", year: 1994, kind: "movie" },
+  { title: "The Lord of the Rings: The Fellowship of the Ring", year: 2001, kind: "movie" },
+  { title: "The Good, the Bad and the Ugly", year: 1966, kind: "movie" },
+  { title: "Forrest Gump", year: 1994, kind: "movie" },
+  { title: "Fight Club", year: 1999, kind: "movie" },
+  { title: "The Lord of the Rings: The Two Towers", year: 2002, kind: "movie" },
+  { title: "Inception", year: 2010, kind: "movie" },
+  { title: "Star Wars: Episode V - The Empire Strikes Back", year: 1980, kind: "movie" },
+  { title: "The Matrix", year: 1999, kind: "movie" },
+  { title: "Goodfellas", year: 1990, kind: "movie" },
+  { title: "One Flew Over the Cuckoo's Nest", year: 1975, kind: "movie" },
+  { title: "Se7en", year: 1995, kind: "movie" },
+  { title: "Interstellar", year: 2014, kind: "movie" },
+];
+
+const CANONICAL_TOP_TV: CanonicalTitle[] = [
+  { title: "Breaking Bad", year: 2008, kind: "tv" },
+  { title: "Planet Earth II", year: 2016, kind: "tv" },
+  { title: "Planet Earth", year: 2006, kind: "tv" },
+  { title: "Band of Brothers", year: 2001, kind: "tv" },
+  { title: "Chernobyl", year: 2019, kind: "tv" },
+  { title: "The Wire", year: 2002, kind: "tv" },
+  { title: "Avatar: The Last Airbender", year: 2005, kind: "tv" },
+  { title: "Blue Planet II", year: 2017, kind: "tv" },
+  { title: "The Sopranos", year: 1999, kind: "tv" },
+  { title: "Cosmos: A Spacetime Odyssey", year: 2014, kind: "tv" },
+  { title: "Cosmos", year: 1980, kind: "tv" },
+  { title: "Game of Thrones", year: 2011, kind: "tv" },
+  { title: "Our Planet", year: 2019, kind: "tv" },
+  { title: "Sherlock", year: 2010, kind: "tv" },
+  { title: "The Office", year: 2005, kind: "tv" },
+  { title: "Friends", year: 1994, kind: "tv" },
+  { title: "True Detective", year: 2014, kind: "tv" },
+  { title: "Arcane", year: 2021, kind: "tv" },
+  { title: "The Twilight Zone", year: 1959, kind: "tv" },
+  { title: "Attack on Titan", year: 2013, kind: "tv" },
+];
+
+function canonicalTitlesToFallback(entries: CanonicalTitle[]): MovieBoxItem[] {
+  return entries.map((entry, index) => ({
+    id: `canonical-${entry.kind}-${index}-${entry.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+    title: entry.title,
+    year: entry.year,
+    media_type: entry.kind === "movie" ? "movie" : "series",
+    moviebox_media_type: entry.kind === "movie" ? "movie" : "series",
+  }));
 }
 
 function getRatingColor(r: number|null): string {
@@ -98,33 +159,71 @@ export default function RatingsPage() {
   const [fallbackMovies, setFallbackMovies] = useState<MovieBoxItem[]>([]);
   const [fallbackTv, setFallbackTv]         = useState<MovieBoxItem[]>([]);
   const [fallbackAnime, setFallbackAnime]   = useState<FallbackAnimeEntry[]>([]);
+  const [movieSourceLabel, setMovieSourceLabel] = useState("IMDb");
+  const [tvSourceLabel, setTvSourceLabel]       = useState("IMDb");
   const [topLoading, setTopLoading]   = useState(false);
   const debounce = useRef<ReturnType<typeof setTimeout>|null>(null);
+
+  const fetchCanonicalTopList = useCallback(async (entries: CanonicalTitle[]): Promise<MovieBoxItem[]> => {
+    const settled = await Promise.allSettled(entries.map(async (entry) => {
+      const response = await fetch(`${API}/search/titles?query=${encodeURIComponent(entry.title)}&limit=10`);
+      const payload = await response.json();
+      const titles: SearchResult[] = payload.titles ?? [];
+      const picked =
+        titles.find((item) =>
+          item.primaryTitle?.toLowerCase() === entry.title.toLowerCase() &&
+          (!entry.year || item.startYear === entry.year) &&
+          (entry.kind === "movie" ? !IS_SERIES(item.type) : IS_SERIES(item.type))
+        ) ||
+        titles.find((item) => entry.kind === "movie" ? !IS_SERIES(item.type) : IS_SERIES(item.type)) ||
+        titles[0];
+      if (!picked) return null;
+      return {
+        id: picked.id,
+        title: picked.primaryTitle,
+        year: picked.startYear,
+        poster: picked.primaryImage?.url,
+        poster_proxy: picked.primaryImage?.url,
+        media_type: entry.kind === "movie" ? "movie" : "series",
+        moviebox_media_type: entry.kind === "movie" ? "movie" : "series",
+        imdb_rating: picked.rating?.aggregateRating,
+        imdb_rating_count: picked.rating?.voteCount,
+      } as MovieBoxItem;
+    }));
+    return settled
+      .filter((item): item is PromiseFulfilledResult<MovieBoxItem | null> => item.status === "fulfilled")
+      .map((item) => item.value)
+      .filter((item): item is MovieBoxItem => Boolean(item));
+  }, []);
 
   // ── Load top lists: TMDB for movies/TV, Jikan for anime ──────────────────
   const loadTopLists = useCallback(async () => {
     setTopLoading(true);
     setTopMovies([]); setTopTv([]); setTopAnime([]);
     setFallbackMovies([]); setFallbackTv([]); setFallbackAnime([]);
+    let canonicalMovies: MovieBoxItem[] = canonicalTitlesToFallback(CANONICAL_TOP_MOVIES);
+    let canonicalTv: MovieBoxItem[] = canonicalTitlesToFallback(CANONICAL_TOP_TV);
     // Movies — 3 pages (~60 items)
+    setMovieSourceLabel("Canonical IMDb");
+    setFallbackMovies(canonicalMovies);
     try {
-      const pages = await Promise.allSettled([1,2,3].map(p =>
-        discoverTmdbMedia("movie", "top_rated", p)
-      ));
-      const movies: TmdbMovie[] = pages
-        .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled")
-        .flatMap(r => r.value?.results ?? []);
-      setTopMovies(movies);
+      const enrichedMovies = await fetchCanonicalTopList(CANONICAL_TOP_MOVIES);
+      if (enrichedMovies.length > 0) {
+        canonicalMovies = enrichedMovies;
+        setMovieSourceLabel("IMDb");
+        setFallbackMovies(enrichedMovies);
+      }
     } catch { /* silent */ }
     // TV — 3 pages (~60 items)
+    setTvSourceLabel("Canonical IMDb");
+    setFallbackTv(canonicalTv);
     try {
-      const pages = await Promise.allSettled([1,2,3].map(p =>
-        discoverTmdbMedia("tv", "top_rated", p)
-      ));
-      const shows: TmdbShow[] = pages
-        .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled")
-        .flatMap(r => r.value?.results ?? []);
-      setTopTv(shows);
+      const enrichedTv = await fetchCanonicalTopList(CANONICAL_TOP_TV);
+      if (enrichedTv.length > 0) {
+        canonicalTv = enrichedTv;
+        setTvSourceLabel("IMDb");
+        setFallbackTv(enrichedTv);
+      }
     } catch { /* silent */ }
     try {
       const discover = await fetchMovieBoxDiscover();
@@ -140,8 +239,14 @@ export default function RatingsPage() {
             return Number(b.imdb_rating_count || 0) - Number(a.imdb_rating_count || 0);
           });
 
-      setFallbackMovies(sortByRating(allItems.filter((item) => item.moviebox_media_type === "movie")).slice(0, 60));
-      setFallbackTv(sortByRating(allItems.filter((item) => item.moviebox_media_type === "series" && item.media_type !== "anime")).slice(0, 60));
+      if (canonicalMovies.length === 0) {
+        setMovieSourceLabel("MovieBox");
+        setFallbackMovies(sortByRating(allItems.filter((item) => item.moviebox_media_type === "movie")).slice(0, 60));
+      }
+      if (canonicalTv.length === 0) {
+        setTvSourceLabel("MovieBox");
+        setFallbackTv(sortByRating(allItems.filter((item) => item.moviebox_media_type === "series" && item.media_type !== "anime")).slice(0, 60));
+      }
       setFallbackAnime(
         sortByRating(allItems.filter((item) => item.media_type === "anime" || item.is_anime))
           .slice(0, 60)
@@ -167,7 +272,7 @@ export default function RatingsPage() {
       setTopAnime(collected.filter((item, index, arr) => index === arr.findIndex((candidate) => candidate.mal_id === item.mal_id)));
     } catch { /* silent */ }
     setTopLoading(false);
-  }, []);
+  }, [fetchCanonicalTopList]);
 
   useEffect(() => { loadTopLists(); }, [loadTopLists]);
 
@@ -602,7 +707,7 @@ export default function RatingsPage() {
             {/* Movies */}
             {activeTab==="movies" && (visibleMovies.length===0 && topLoading ? <SkeletonGrid /> : (
               <>
-                <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:12 }}>{visibleMovies.length} Top Rated Movies · {topMovies.length > 0 ? "TMDB" : "MovieBox"}</div>
+                <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:12 }}>{visibleMovies.length} Top Rated Movies · {movieSourceLabel}</div>
                 <div className="rat-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
                   {visibleMovies.map((m,i) => (
                     <div key={"id" in m ? m.id : i} className="rat-card"
@@ -632,7 +737,7 @@ export default function RatingsPage() {
             {/* TV */}
             {activeTab==="tv" && (visibleTv.length===0 && topLoading ? <SkeletonGrid /> : (
               <>
-                <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:12 }}>{visibleTv.length} Top Rated TV Series · {topTv.length > 0 ? "TMDB" : "MovieBox"}</div>
+                <div style={{ fontSize:12, color:"var(--text-muted)", marginBottom:12 }}>{visibleTv.length} Top Rated TV Series · {tvSourceLabel}</div>
                 <div className="rat-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(144px,1fr))", gap:12 }}>
                   {visibleTv.map((s,i) => (
                     <div key={"id" in s ? s.id : i} className="rat-card"
@@ -673,7 +778,7 @@ export default function RatingsPage() {
                           ? <img src={a.images.jpg.large_image_url} alt={a.title} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
                           : a.poster
                             ? <img src={a.poster} alt={a.title} style={{ width:"100%", aspectRatio:"2/3", objectFit:"cover", display:"block" }} />
-                            : <div style={{ width:"100%", aspectRatio:"2/3", background:"var(--bg-surface2)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:32 }}>✨</div>}
+                            : <div style={{ width:"100%", aspectRatio:"2/3", background:"var(--bg-surface2)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:32 }}>âœ¨</div>}
                         <div style={{ position:"absolute", top:6, left:6, background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:10, fontWeight:700, borderRadius:4, padding:"2px 6px" }}>#{i+1}</div>
                         {a.score>0 && <RatingBadge r={a.score} />}
                       </div>
