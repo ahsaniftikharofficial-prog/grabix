@@ -59,6 +59,87 @@ const CANONICAL_TOP_MOVIES: CanonicalTitle[] = [
   { title: "One Flew Over the Cuckoo's Nest", year: 1975, kind: "movie" },
   { title: "Se7en", year: 1995, kind: "movie" },
   { title: "Interstellar", year: 2014, kind: "movie" },
+  { title: "It's a Wonderful Life", year: 1946, kind: "movie" },
+  { title: "The Silence of the Lambs", year: 1991, kind: "movie" },
+  { title: "Saving Private Ryan", year: 1998, kind: "movie" },
+  { title: "City of God", year: 2002, kind: "movie" },
+  { title: "Life Is Beautiful", year: 1997, kind: "movie" },
+  { title: "The Green Mile", year: 1999, kind: "movie" },
+  { title: "Star Wars: Episode IV - A New Hope", year: 1977, kind: "movie" },
+  { title: "Terminator 2: Judgment Day", year: 1991, kind: "movie" },
+  { title: "Back to the Future", year: 1985, kind: "movie" },
+  { title: "Spirited Away", year: 2001, kind: "movie" },
+  { title: "The Pianist", year: 2002, kind: "movie" },
+  { title: "Psycho", year: 1960, kind: "movie" },
+  { title: "Parasite", year: 2019, kind: "movie" },
+  { title: "Leon: The Professional", year: 1994, kind: "movie" },
+  { title: "The Lion King", year: 1994, kind: "movie" },
+  { title: "American History X", year: 1998, kind: "movie" },
+  { title: "Gladiator", year: 2000, kind: "movie" },
+  { title: "The Departed", year: 2006, kind: "movie" },
+  { title: "Whiplash", year: 2014, kind: "movie" },
+  { title: "The Prestige", year: 2006, kind: "movie" },
+  { title: "The Usual Suspects", year: 1995, kind: "movie" },
+  { title: "Casablanca", year: 1942, kind: "movie" },
+  { title: "Grave of the Fireflies", year: 1988, kind: "movie" },
+  { title: "Rear Window", year: 1954, kind: "movie" },
+  { title: "Cinema Paradiso", year: 1988, kind: "movie" },
+  { title: "Alien", year: 1979, kind: "movie" },
+  { title: "Apocalypse Now", year: 1979, kind: "movie" },
+  { title: "Memento", year: 2000, kind: "movie" },
+  { title: "Raiders of the Lost Ark", year: 1981, kind: "movie" },
+  { title: "The Shining", year: 1980, kind: "movie" },
+  { title: "WALL·E", year: 2008, kind: "movie" },
+  { title: "Django Unchained", year: 2012, kind: "movie" },
+  { title: "Paths of Glory", year: 1957, kind: "movie" },
+  { title: "The Dark Knight Rises", year: 2012, kind: "movie" },
+  { title: "Princess Mononoke", year: 1997, kind: "movie" },
+  { title: "Oldboy", year: 2003, kind: "movie" },
+  { title: "Once Upon a Time in the West", year: 1968, kind: "movie" },
+  { title: "Avengers: Endgame", year: 2019, kind: "movie" },
+  { title: "The Wolf of Wall Street", year: 2013, kind: "movie" },
+  { title: "Das Boot", year: 1981, kind: "movie" },
+  { title: "Coco", year: 2017, kind: "movie" },
+  { title: "American Beauty", year: 1999, kind: "movie" },
+  { title: "Braveheart", year: 1995, kind: "movie" },
+  { title: "3 Idiots", year: 2009, kind: "movie" },
+  { title: "Toy Story", year: 1995, kind: "movie" },
+  { title: "Inglourious Basterds", year: 2009, kind: "movie" },
+  { title: "Your Name", year: 2016, kind: "movie" },
+  { title: "Good Will Hunting", year: 1997, kind: "movie" },
+  { title: "Requiem for a Dream", year: 2000, kind: "movie" },
+  { title: "2001: A Space Odyssey", year: 1968, kind: "movie" },
+  { title: "Toy Story 3", year: 2010, kind: "movie" },
+  { title: "Full Metal Jacket", year: 1987, kind: "movie" },
+  { title: "Eternal Sunshine of the Spotless Mind", year: 2004, kind: "movie" },
+  { title: "A Beautiful Mind", year: 2001, kind: "movie" },
+  { title: "Amelie", year: 2001, kind: "movie" },
+  { title: "The Sting", year: 1973, kind: "movie" },
+  { title: "Lawrence of Arabia", year: 1962, kind: "movie" },
+  { title: "Come and See", year: 1985, kind: "movie" },
+  { title: "Scarface", year: 1983, kind: "movie" },
+  { title: "Reservoir Dogs", year: 1992, kind: "movie" },
+  { title: "Heat", year: 1995, kind: "movie" },
+  { title: "Up", year: 2009, kind: "movie" },
+  { title: "Monty Python and the Holy Grail", year: 1975, kind: "movie" },
+  { title: "A Clockwork Orange", year: 1971, kind: "movie" },
+  { title: "Die Hard", year: 1988, kind: "movie" },
+  { title: "The Truman Show", year: 1998, kind: "movie" },
+  { title: "No Country for Old Men", year: 2007, kind: "movie" },
+  { title: "Catch Me If You Can", year: 2002, kind: "movie" },
+  { title: "The Intouchables", year: 2011, kind: "movie" },
+  { title: "Pan's Labyrinth", year: 2006, kind: "movie" },
+  { title: "How to Train Your Dragon", year: 2010, kind: "movie" },
+  { title: "Dr. Strangelove or: How I Learned to Stop Worrying and Love the Bomb", year: 1964, kind: "movie" },
+  { title: "Sunset Blvd.", year: 1950, kind: "movie" },
+  { title: "Witness for the Prosecution", year: 1957, kind: "movie" },
+  { title: "Avengers: Infinity War", year: 2018, kind: "movie" },
+  { title: "The Grand Budapest Hotel", year: 2014, kind: "movie" },
+  { title: "Inside Out", year: 2015, kind: "movie" },
+  { title: "Mad Max: Fury Road", year: 2015, kind: "movie" },
+  { title: "Gone with the Wind", year: 1939, kind: "movie" },
+  { title: "The Bridge on the River Kwai", year: 1957, kind: "movie" },
+  { title: "Jojo Rabbit", year: 2019, kind: "movie" },
 ];
 
 const CANONICAL_TOP_TV: CanonicalTitle[] = [
@@ -72,16 +153,96 @@ const CANONICAL_TOP_TV: CanonicalTitle[] = [
   { title: "Blue Planet II", year: 2017, kind: "tv" },
   { title: "The Sopranos", year: 1999, kind: "tv" },
   { title: "Cosmos: A Spacetime Odyssey", year: 2014, kind: "tv" },
-  { title: "Cosmos", year: 1980, kind: "tv" },
   { title: "Game of Thrones", year: 2011, kind: "tv" },
   { title: "Our Planet", year: 2019, kind: "tv" },
   { title: "Sherlock", year: 2010, kind: "tv" },
   { title: "The Office", year: 2005, kind: "tv" },
-  { title: "Friends", year: 1994, kind: "tv" },
   { title: "True Detective", year: 2014, kind: "tv" },
   { title: "Arcane", year: 2021, kind: "tv" },
   { title: "The Twilight Zone", year: 1959, kind: "tv" },
   { title: "Attack on Titan", year: 2013, kind: "tv" },
+  { title: "Rick and Morty", year: 2013, kind: "tv" },
+  { title: "Succession", year: 2018, kind: "tv" },
+  { title: "Fleabag", year: 2016, kind: "tv" },
+  { title: "The Boys", year: 2019, kind: "tv" },
+  { title: "Ozark", year: 2017, kind: "tv" },
+  { title: "Dark", year: 2017, kind: "tv" },
+  { title: "Better Call Saul", year: 2015, kind: "tv" },
+  { title: "Mindhunter", year: 2017, kind: "tv" },
+  { title: "Black Mirror", year: 2011, kind: "tv" },
+  { title: "Peaky Blinders", year: 2013, kind: "tv" },
+  { title: "Fargo", year: 2014, kind: "tv" },
+  { title: "The Crown", year: 2016, kind: "tv" },
+  { title: "The Mandalorian", year: 2019, kind: "tv" },
+  { title: "Narcos", year: 2015, kind: "tv" },
+  { title: "Stranger Things", year: 2016, kind: "tv" },
+  { title: "The Bear", year: 2022, kind: "tv" },
+  { title: "Seinfeld", year: 1989, kind: "tv" },
+  { title: "Mr. Robot", year: 2015, kind: "tv" },
+  { title: "House", year: 2004, kind: "tv" },
+  { title: "Lost", year: 2004, kind: "tv" },
+  { title: "Prison Break", year: 2005, kind: "tv" },
+  { title: "Dexter", year: 2006, kind: "tv" },
+  { title: "Mad Men", year: 2007, kind: "tv" },
+  { title: "Hannibal", year: 2013, kind: "tv" },
+  { title: "Silicon Valley", year: 2014, kind: "tv" },
+  { title: "Vikings", year: 2013, kind: "tv" },
+  { title: "Firefly", year: 2002, kind: "tv" },
+  { title: "Arrested Development", year: 2003, kind: "tv" },
+  { title: "Parks and Recreation", year: 2009, kind: "tv" },
+  { title: "Brooklyn Nine-Nine", year: 2013, kind: "tv" },
+  { title: "The Americans", year: 2013, kind: "tv" },
+  { title: "Gravity Falls", year: 2012, kind: "tv" },
+  { title: "Fullmetal Alchemist: Brotherhood", year: 2009, kind: "tv" },
+  { title: "Death Note", year: 2006, kind: "tv" },
+  { title: "Hunter x Hunter", year: 2011, kind: "tv" },
+  { title: "Demon Slayer: Kimetsu no Yaiba", year: 2019, kind: "tv" },
+  { title: "Mob Psycho 100", year: 2016, kind: "tv" },
+  { title: "Jujutsu Kaisen", year: 2020, kind: "tv" },
+  { title: "Steins;Gate", year: 2011, kind: "tv" },
+  { title: "Code Geass: Lelouch of the Rebellion", year: 2006, kind: "tv" },
+  { title: "Cowboy Bebop", year: 1998, kind: "tv" },
+  { title: "Neon Genesis Evangelion", year: 1995, kind: "tv" },
+  { title: "Invincible", year: 2021, kind: "tv" },
+  { title: "Squid Game", year: 2021, kind: "tv" },
+  { title: "Money Heist", year: 2017, kind: "tv" },
+  { title: "The Last of Us", year: 2023, kind: "tv" },
+  { title: "Severance", year: 2022, kind: "tv" },
+  { title: "The White Lotus", year: 2021, kind: "tv" },
+  { title: "House of the Dragon", year: 2022, kind: "tv" },
+  { title: "Andor", year: 2022, kind: "tv" },
+  { title: "Shogun", year: 2024, kind: "tv" },
+  { title: "Ted Lasso", year: 2020, kind: "tv" },
+  { title: "Euphoria", year: 2019, kind: "tv" },
+  { title: "Yellowstone", year: 2018, kind: "tv" },
+  { title: "The Witcher", year: 2019, kind: "tv" },
+  { title: "Lupin", year: 2021, kind: "tv" },
+  { title: "Elite", year: 2018, kind: "tv" },
+  { title: "Twin Peaks", year: 1990, kind: "tv" },
+  { title: "Friends", year: 1994, kind: "tv" },
+  { title: "Cosmos", year: 1980, kind: "tv" },
+  { title: "BoJack Horseman", year: 2014, kind: "tv" },
+  { title: "The Simpsons", year: 1989, kind: "tv" },
+  { title: "Westworld", year: 2016, kind: "tv" },
+  { title: "Vinland Saga", year: 2019, kind: "tv" },
+  { title: "One Piece", year: 1999, kind: "tv" },
+  { title: "Naruto", year: 2002, kind: "tv" },
+  { title: "Dragon Ball Z", year: 1989, kind: "tv" },
+  { title: "Battlestar Galactica", year: 2004, kind: "tv" },
+  { title: "Homeland", year: 2011, kind: "tv" },
+  { title: "Downton Abbey", year: 2010, kind: "tv" },
+  { title: "Justified", year: 2010, kind: "tv" },
+  { title: "The Walking Dead", year: 2010, kind: "tv" },
+  { title: "Hacks", year: 2021, kind: "tv" },
+  { title: "Spy x Family", year: 2022, kind: "tv" },
+  { title: "My Hero Academia", year: 2016, kind: "tv" },
+  { title: "The Penguin", year: 2024, kind: "tv" },
+  { title: "Rings of Power", year: 2022, kind: "tv" },
+  { title: "Abbott Elementary", year: 2021, kind: "tv" },
+  { title: "The Bear", year: 2022, kind: "tv" },
+  { title: "Bluey", year: 2018, kind: "tv" },
+  { title: "It's Always Sunny in Philadelphia", year: 2005, kind: "tv" },
+  { title: "Narcos: Mexico", year: 2018, kind: "tv" },
 ];
 
 function canonicalTitlesToFallback(entries: CanonicalTitle[]): MovieBoxItem[] {
@@ -233,15 +394,20 @@ export default function RatingsPage() {
     setFallbackMovies([]); setFallbackTv([]); setFallbackAnime([]);
     let canonicalMovies: MovieBoxItem[] = canonicalTitlesToFallback(CANONICAL_TOP_MOVIES);
     let canonicalTv: MovieBoxItem[] = canonicalTitlesToFallback(CANONICAL_TOP_TV);
-    // Movies — 3 pages (~60 items)
-    setMovieSourceLabel("Canonical IMDb");
+    // Movies
+    setMovieSourceLabel("IMDb Top 100");
     setFallbackMovies(canonicalMovies);
     try {
       const enrichedMovies = await fetchCanonicalTopList(CANONICAL_TOP_MOVIES);
       if (enrichedMovies.length > 0) {
-        canonicalMovies = enrichedMovies;
+        // Patch poster/rating data into full canonical list (preserves order & all 100 items)
+        const posterMap = new Map(enrichedMovies.map(m => [m.title?.toLowerCase().trim(), m]));
+        canonicalMovies = canonicalMovies.map(m => {
+          const enriched = posterMap.get(m.title?.toLowerCase().trim());
+          return enriched ? { ...m, poster: enriched.poster, poster_proxy: enriched.poster_proxy, imdb_rating: enriched.imdb_rating, imdb_rating_count: enriched.imdb_rating_count } : m;
+        });
         setMovieSourceLabel("IMDb");
-        setFallbackMovies(enrichedMovies);
+        setFallbackMovies([...canonicalMovies]);
       }
     } catch { /* silent */ }
     try {
@@ -262,15 +428,20 @@ export default function RatingsPage() {
         setFallbackMovies(canonicalMovies);
       }
     } catch { /* silent */ }
-    // TV — 3 pages (~60 items)
-    setTvSourceLabel("Canonical IMDb");
+    // TV
+    setTvSourceLabel("IMDb Top 100");
     setFallbackTv(canonicalTv);
     try {
       const enrichedTv = await fetchCanonicalTopList(CANONICAL_TOP_TV);
       if (enrichedTv.length > 0) {
-        canonicalTv = enrichedTv;
+        // Patch poster/rating data into full canonical list (preserves order & all 100 items)
+        const posterMap = new Map(enrichedTv.map(m => [m.title?.toLowerCase().trim(), m]));
+        canonicalTv = canonicalTv.map(m => {
+          const enriched = posterMap.get(m.title?.toLowerCase().trim());
+          return enriched ? { ...m, poster: enriched.poster, poster_proxy: enriched.poster_proxy, imdb_rating: enriched.imdb_rating, imdb_rating_count: enriched.imdb_rating_count } : m;
+        });
         setTvSourceLabel("IMDb");
-        setFallbackTv(enrichedTv);
+        setFallbackTv([...canonicalTv]);
       }
     } catch { /* silent */ }
     try {
@@ -442,15 +613,15 @@ export default function RatingsPage() {
   const isEmptyState = !detail && !loading && browseResults.length === 0 && !browsing;
   const visibleMovies: RatedMovieItem[] = (() => {
     const posterBackedTmdb = topMovies.filter((item) => hasPoster(item));
-    const posterBackedFallback = fallbackMovies.filter((item) => hasPoster(item));
     if (posterBackedTmdb.length >= MIN_TOP_ITEMS) return posterBackedTmdb;
-    return mergePosterBackedItems<RatedMovieItem>(posterBackedTmdb, posterBackedFallback);
+    // Show ALL fallback items (emoji placeholder shown for those without poster)
+    return mergePosterBackedItems<RatedMovieItem>(posterBackedTmdb, fallbackMovies);
   })();
   const visibleTv: RatedTvItem[] = (() => {
     const posterBackedTmdb = topTv.filter((item) => hasPoster(item));
-    const posterBackedFallback = fallbackTv.filter((item) => hasPoster(item));
     if (posterBackedTmdb.length >= MIN_TOP_ITEMS) return posterBackedTmdb;
-    return mergePosterBackedItems<RatedTvItem>(posterBackedTmdb, posterBackedFallback);
+    // Show ALL fallback items (emoji placeholder shown for those without poster)
+    return mergePosterBackedItems<RatedTvItem>(posterBackedTmdb, fallbackTv);
   })();
   const visibleAnime = topAnime.length > 0 ? topAnime : fallbackAnime;
   const [movieVisibleCount, setMovieVisibleCount] = useState(INITIAL_VISIBLE_COUNT);

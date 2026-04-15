@@ -65,14 +65,23 @@ const CANONICAL_TOP_TV: CanonicalTitle[] = [
 async function fetchImdbChart(path: string): Promise<ImdbChartItem[]> {
   try {
     const chart = path.split("/").pop() || "";
-    const data = await getCachedJson<{ items?: ImdbChartItem[] }>({
+    const data = await getCachedJson<Record<string, unknown>>({
       key: `metadata:imdb:chart:${chart}`,
       url: `${BACKEND_API}/metadata/imdb/chart?chart=${encodeURIComponent(chart)}`,
       ttlMs: 300_000,
       scope: "session",
       mapError: async () => "IMDb metadata unavailable",
     });
-    return (data.items ?? []) as ImdbChartItem[];
+    // imdbapi.dev may return items under different keys depending on version
+    const items =
+      (data.items as ImdbChartItem[] | undefined) ??
+      (data.movies as ImdbChartItem[] | undefined) ??
+      (data.shows as ImdbChartItem[] | undefined) ??
+      (data.chart as ImdbChartItem[] | undefined) ??
+      (data.results as ImdbChartItem[] | undefined) ??
+      (data.data as ImdbChartItem[] | undefined) ??
+      (Array.isArray(data) ? (data as ImdbChartItem[]) : []);
+    return items;
   } catch {
     return [];
   }
