@@ -11,6 +11,7 @@ import { filterAdultContent } from "../lib/contentFilter";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
 import { TMDB_BACKDROP_BASE as IMG_LG, TMDB_IMAGE_BASE as IMG_BASE, discoverTmdbMedia, fetchTmdbDetails, fetchTmdbTvSeason, searchTmdbMedia } from "../lib/tmdb";
 import { fetchMovieBoxDiscover, fetchMovieBoxSources, getTvSources, resolveTvPlaybackSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
+import { fetchSharedTopRatedTv } from "../lib/topRatedMedia";
 
 interface Show {
   id: number;
@@ -128,6 +129,36 @@ export default function TVSeriesPage() {
     setLoading(true);
     setPageError("");
     if (nextPage === 1) setShows([]);
+    if (nextTab === "toprated") {
+      try {
+        const { items } = await fetchSharedTopRatedTv();
+        const mappedItems = items.map((item) => {
+          if ("moviebox_media_type" in item) {
+            return mapMovieBoxSeriesToShow(item);
+          }
+          return {
+            id: item.id,
+            name: item.name,
+            overview: "",
+            poster_path: item.poster_path ?? "",
+            backdrop_path: "",
+            vote_average: item.vote_average ?? 0,
+            first_air_date: item.first_air_date ?? "",
+            genres: [],
+          } as Show;
+        });
+        const pageSize = 24;
+        const slice = mappedItems.slice(0, nextPage * pageSize);
+        setShows(slice.length > 0 ? slice : STATIC_TOP_TV.map(mapStaticShowToShow));
+        return;
+      } catch {
+        setShows(STATIC_TOP_TV.map(mapStaticShowToShow));
+        return;
+      } finally {
+        setLoading(false);
+      }
+    }
+
     const categories: Record<Tab, "trending" | "popular" | "top_rated"> = {
       trending: "trending",
       popular: "popular",
@@ -146,30 +177,20 @@ export default function TVSeriesPage() {
       const discover = await fetchMovieBoxDiscover();
       const sections = discover.sections ?? [];
       const selectedItems = (
-        nextTab === "toprated"
-          ? sections.filter((section) => section.id === "top-rated")
-          : nextTab === "popular"
-            ? sections.filter((section) => section.id === "series" || section.id === "most-popular")
-            : sections.filter((section) => section.id === "recent")
+        nextTab === "popular"
+          ? sections.filter((section) => section.id === "series" || section.id === "most-popular")
+          : sections.filter((section) => section.id === "recent")
       ).flatMap((section) => section.items ?? []);
       const nextShows = selectedItems
         .filter(isTvSeriesItem)
         .map(mapMovieBoxSeriesToShow);
       setShows((prev) => (nextPage === 1 ? nextShows : [...prev, ...nextShows]));
-      if (nextShows.length === 0 && nextTab === "toprated") {
-        setShows(STATIC_TOP_TV.map(mapStaticShowToShow));
-        return;
-      }
       if (nextShows.length === 0) {
         setPageError("TV series could not be loaded right now.");
       }
     } catch {
-      if (nextTab === "toprated") {
-        setShows(STATIC_TOP_TV.map(mapStaticShowToShow));
-      } else {
-        setShows([]);
-        setPageError("TV series could not be loaded right now.");
-      }
+      setShows([]);
+      setPageError("TV series could not be loaded right now.");
     } finally {
       setLoading(false);
     }

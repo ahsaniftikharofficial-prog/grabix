@@ -309,7 +309,7 @@ export default function SettingsPage() {
   const [selfTest, setSelfTest] = useState<Record<string, unknown> | null>(null);
   const [selfTestRunning, setSelfTestRunning] = useState(false);
   const [startupDiagnostics, setStartupDiagnostics] = useState<StartupDiagnosticsPayload | null>(null);
-  const [diagnosticsLogs, setDiagnosticsLogs] = useState<DiagnosticsLogsPayload | null>(null);
+  const [, setDiagnosticsLogs] = useState<DiagnosticsLogsPayload | null>(null);
 
   // ─── Load settings ──────────────────────────────────────────────────────────
 
@@ -520,12 +520,6 @@ export default function SettingsPage() {
   } | undefined) || undefined;
 
   // ─── Select styles helper ────────────────────────────────────────────────────
-
-  const selectStyle: React.CSSProperties = {
-    background: "var(--bg-surface2)", color: "var(--text-primary)",
-    border: "1px solid var(--border)", borderRadius: "var(--radius-sm)",
-    padding: "6px 10px", fontSize: 13, fontFamily: "var(--font)", outline: "none",
-  };
 
   // ─── Section content ─────────────────────────────────────────────────────────
 
