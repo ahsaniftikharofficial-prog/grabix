@@ -423,16 +423,19 @@ async function fetchServerPayload(episodeId, requestedServer, category) {
   return typeof sourceResponse.data === "string" ? JSON.parse(sourceResponse.data) : sourceResponse.data;
 }
 
-async function fetchWatch(episodeId, server, category) {
-  const requestedServer = mapServer(server);
-  const requestedCategory = mapCategory(category);
+// Try to extract a real HLS source from one server (aniwatch lib → AJAX → MegaCloud).
+// Returns { headers, sources, subtitles, download } with real HLS sources,
+// or null if nothing playable was found.
+async function tryServerExtraction(episodeId, serverName, requestedCategory) {
+  const requestedServer = mapServer(serverName);
 
   // PRIMARY: aniwatch library's own extraction — most reliable, try first
   try {
     const direct = await scraper.getEpisodeSources(episodeId, requestedServer.request, requestedCategory);
     const directSources = Array.isArray(direct?.sources) ? direct.sources : [];
     const directTracks = Array.isArray(direct?.subtitles) ? direct.subtitles : Array.isArray(direct?.tracks) ? direct.tracks : [];
-    if (directSources.length > 0) {
+    // Only accept if we actually got HLS/MP4 sources (not embed)
+    if (directSources.length > 0 && directSources.some((s) => s.isM3U8 || (s.url && !s.isEmbed))) {
       return {
         headers: direct?.headers || {},
         sources: directSources,
@@ -451,12 +454,10 @@ async function fetchWatch(episodeId, server, category) {
     tracks = Array.isArray(fallback?.tracks) ? fallback.tracks : [];
   } catch {}
 
-  if (!link) {
-    throw new Error("Hianime did not return a playable link.");
-  }
+  if (!link) return null;
 
   try {
-    if (link.includes("megacloud.blog")) {
+    if (link.includes("megacloud.blog") || link.includes("megacloud")) {
       const extracted = await extractMegaCloud(link);
       if (Array.isArray(extracted.sources) && extracted.sources.length > 0) {
         if ((!extracted.subtitles || extracted.subtitles.length === 0) && tracks.length > 0) {
@@ -466,6 +467,41 @@ async function fetchWatch(episodeId, server, category) {
       }
     }
   } catch {}
+
+  // Could not extract HLS — return null so caller can try the next server
+  return null;
+}
+
+async function fetchWatch(episodeId, server, category) {
+  const requestedCategory = mapCategory(category);
+
+  // Build a priority list of servers to try.
+  // Always put the requested server first, then add the alt server as fallback.
+  const primaryName = String(server || "hd-1").toLowerCase().trim();
+  const altName = (primaryName === "hd-1" || primaryName === "vidstreaming") ? "hd-2" : "hd-1";
+  const serversToTry = [primaryName, altName];
+
+  for (const serverName of serversToTry) {
+    try {
+      const result = await tryServerExtraction(episodeId, serverName, requestedCategory);
+      if (result) return result;
+    } catch {}
+  }
+
+  // All servers failed — last resort: return embed URL from the primary server
+  // so the player can at least attempt an iframe fallback.
+  const requestedServer = mapServer(primaryName);
+  let link = "";
+  let tracks = [];
+  try {
+    const fallback = await fetchServerPayload(episodeId, requestedServer, requestedCategory);
+    link = String(fallback?.link || "").trim();
+    tracks = Array.isArray(fallback?.tracks) ? fallback.tracks : [];
+  } catch {}
+
+  if (!link) {
+    throw new Error("Hianime did not return a playable link from any server.");
+  }
 
   return {
     headers: {},

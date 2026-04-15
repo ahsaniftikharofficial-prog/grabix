@@ -1414,34 +1414,44 @@ function AnimeDetail({
               headers?: Record<string, string>;
             };
             if (watchData.sources && watchData.sources.length > 0) {
-              // HiAnime CDN (MegaCloud/BunnyCDN) rejects segment requests that
-              // lack a Referer header. The consumet server returns the required
-              // headers in watchData.headers — we must forward them as
-              // requestHeaders so shouldKeepHlsProxied() returns true and the
-              // player routes all HLS traffic through the backend proxy.
-              const requestHeaders: Record<string, string> =
-                watchData.headers && Object.keys(watchData.headers).length > 0
-                  ? watchData.headers
-                  : { Referer: "https://megacloud.blog/" };
-              const subs = (watchData.subtitles ?? []).map((s, si) => ({
-                id: s.lang ?? `sub-${si}`,
-                label: s.lang ?? "Subtitle",
-                language: s.lang,
-                url: s.url ?? "",
-              }));
-              const sources: StreamSource[] = watchData.sources.map((src, i) => ({
-                id: `hianime-sidecar-${epId}-${cat}-${i}`,
-                label: `HiAnime ${cat === "dub" ? "DUB" : "SUB"}`,
-                provider: "hianime",
-                kind: src.isM3U8 ? "hls" : "direct",
-                url: src.url,
-                quality: src.quality,
-                requestHeaders,
-                subtitles: subs,
-              }));
-              // Cache so instant-play works on subsequent clicks
-              resolvedPlayableSourcesCacheRef.current[`play:${normalizedAudio}:${server}:${targetEpisode}`] = sources;
-              return sources;
+              // Filter out raw embed URLs — they need an iframe, not a video element,
+              // and cannot be proxied through the HLS chain. If the sidecar only returned
+              // embed-only sources it means MegaCloud extraction failed; fall through to
+              // the backend resolution path which will try again independently.
+              const playableSources = watchData.sources.filter(
+                (src) => src.isM3U8 || (!src.isEmbed && src.url && !src.url.includes("megacloud.blog"))
+              );
+              if (playableSources.length > 0) {
+                // HiAnime CDN (MegaCloud/BunnyCDN) rejects segment requests that
+                // lack a Referer header. The consumet server returns the required
+                // headers in watchData.headers — we must forward them as
+                // requestHeaders so shouldKeepHlsProxied() returns true and the
+                // player routes all HLS traffic through the backend proxy.
+                const requestHeaders: Record<string, string> =
+                  watchData.headers && Object.keys(watchData.headers).length > 0
+                    ? watchData.headers
+                    : { Referer: "https://megacloud.blog/" };
+                const subs = (watchData.subtitles ?? []).map((s, si) => ({
+                  id: s.lang ?? `sub-${si}`,
+                  label: s.lang ?? "Subtitle",
+                  language: s.lang,
+                  url: s.url ?? "",
+                }));
+                const sources: StreamSource[] = playableSources.map((src, i) => ({
+                  id: `hianime-sidecar-${epId}-${cat}-${i}`,
+                  label: `HiAnime ${cat === "dub" ? "DUB" : "SUB"}`,
+                  provider: "hianime",
+                  kind: src.isM3U8 ? "hls" : "direct",
+                  url: src.url,
+                  quality: src.quality,
+                  requestHeaders,
+                  subtitles: subs,
+                }));
+                // Cache so instant-play works on subsequent clicks
+                resolvedPlayableSourcesCacheRef.current[`play:${normalizedAudio}:${server}:${targetEpisode}`] = sources;
+                return sources;
+              }
+              // All sources were embed-only — fall through to backend path
             }
           }
         } catch {
