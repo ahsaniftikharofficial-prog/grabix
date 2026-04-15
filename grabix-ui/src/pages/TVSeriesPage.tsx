@@ -148,7 +148,8 @@ export default function TVSeriesPage() {
           } as Show;
         });
         const pageSize = 24;
-        const slice = mappedItems.slice(0, nextPage * pageSize);
+        const withPoster = mappedItems.filter((s) => getShowPoster(s) !== "");
+        const slice = withPoster.length > 0 ? withPoster.slice(0, 100) : mappedItems.slice(0, nextPage * pageSize);
         setShows(slice.length > 0 ? slice : STATIC_TOP_TV.map(mapStaticShowToShow));
         return;
       } catch {

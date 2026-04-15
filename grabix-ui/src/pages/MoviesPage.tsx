@@ -131,7 +131,8 @@ export default function MoviesPage() {
           } as Movie;
         });
         const pageSize = 24;
-        const slice = mappedItems.slice(0, p * pageSize);
+        const withPoster = mappedItems.filter((m) => getMoviePoster(m) !== "");
+        const slice = withPoster.length > 0 ? withPoster.slice(0, 100) : mappedItems.slice(0, p * pageSize);
         setMovies(slice.length > 0 ? slice : STATIC_TOP_MOVIES.map(mapStaticMovieToMovie));
         return;
       } catch {

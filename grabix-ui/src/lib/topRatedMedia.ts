@@ -229,8 +229,10 @@ export async function fetchSharedTopRatedMovies(): Promise<TopRatedListResult<Tm
     if (tmdbMovies.length >= MIN_TOP_ITEMS) {
       return { items: tmdbMovies, sourceLabel };
     }
+    // Only merge fallback items that actually have a poster — prevents "No Poster" cards
+    const posterBackedFallback = fallbackMovies.filter((item) => hasPoster(item));
     return {
-      items: mergePosterBackedItems<Array<TmdbMovieListItem | MovieBoxItem>[number]>(tmdbMovies, fallbackMovies),
+      items: mergePosterBackedItems<Array<TmdbMovieListItem | MovieBoxItem>[number]>(tmdbMovies, posterBackedFallback),
       sourceLabel,
     };
   } catch {
@@ -289,8 +291,10 @@ export async function fetchSharedTopRatedTv(): Promise<TopRatedListResult<TmdbTv
     if (tmdbTv.length >= MIN_TOP_ITEMS) {
       return { items: tmdbTv, sourceLabel };
     }
+    // Only merge fallback items that actually have a poster — prevents "No Poster" cards
+    const posterBackedFallback = fallbackTv.filter((item) => hasPoster(item));
     return {
-      items: mergePosterBackedItems<Array<TmdbTvListItem | MovieBoxItem>[number]>(tmdbTv, fallbackTv),
+      items: mergePosterBackedItems<Array<TmdbTvListItem | MovieBoxItem>[number]>(tmdbTv, posterBackedFallback),
       sourceLabel,
     };
   } catch {
