@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconAudio,
   IconCheck,
+  IconEdit,
   IconFilter,
   IconFolder,
   IconGrid,
@@ -17,8 +18,6 @@ import {
 import { PageEmptyState, PageErrorState } from "../components/PageStates";
 import { BACKEND_API, backendFetch, backendJson } from "../lib/api";
 import { deleteOfflineMangaRecord, listOfflineMangaRecords, type OfflineMangaRecord } from "../lib/mangaOffline";
-
-const API = BACKEND_API;
 
 interface LibItem {
   id: string;
@@ -98,7 +97,7 @@ function toLibItem(row: Record<string, unknown>): LibItem {
     ? row.dl_type
     : "video") as LibItem["type"];
   const createdAt = String(row.created_at || "");
-  return {
+  const base = {
     id: String(row.id || ""),
     url: String(row.url || ""),
     title: String(row.title || "Unknown"),
@@ -122,14 +121,10 @@ function toLibItem(row: Record<string, unknown>): LibItem {
     offline_key: String(row.offline_key || ""),
     chapter_count: Number(row.chapter_count || 0),
     storage_label: String(row.storage_label || ""),
-    display_layout: (["poster", "landscape", "square"].includes(String(row.display_layout || ""))
-      ? row.display_layout
-      : (String(row.dl_type || "") === "audio" || String(row.dl_type || "") === "thumbnail" || String(row.dl_type || "") === "subtitle"
-          ? "square"
-          : (String(row.category || "").toLowerCase().includes("youtube") || String(row.category || "").toLowerCase().includes("tv")
-              ? "landscape"
-              : "poster"))) as LibItem["display_layout"],
+    // Placeholder — resolved below via inferDisplayLayout so logic lives in one place.
+    display_layout: "poster" as LibItem["display_layout"],
   };
+  return { ...base, display_layout: inferDisplayLayout(base as LibItem, String(row.display_layout || "")) };
 }
 
 function toOfflineMangaLibItem(row: OfflineMangaRecord): LibItem {
@@ -159,11 +154,13 @@ function toOfflineMangaLibItem(row: OfflineMangaRecord): LibItem {
   };
 }
 
-function inferDisplayLayout(item: LibItem): LibItem["display_layout"] {
-  if (item.display_layout) return item.display_layout;
-  const inferredCategory = inferCategory(item);
-  if (inferredCategory === "movies" || inferredCategory === "anime" || inferredCategory === "manga") return "poster";
-  if (inferredCategory === "youtube" || inferredCategory === "tv") return "landscape";
+function inferDisplayLayout(item: LibItem, serverValue = item.display_layout): LibItem["display_layout"] {
+  if (serverValue && (["poster", "landscape", "square"] as string[]).includes(serverValue)) {
+    return serverValue as LibItem["display_layout"];
+  }
+  const category = inferCategory(item);
+  if (category === "movies" || category === "anime" || category === "manga") return "poster";
+  if (category === "youtube" || category === "tv") return "landscape";
   if (item.type === "audio" || item.type === "thumbnail" || item.type === "subtitle") return "square";
   return "landscape";
 }
@@ -247,28 +244,41 @@ export default function LibraryPage() {
   const [organizing, setOrganizing] = useState(false);
   const [reconciling, setReconciling] = useState(false);
 
-  const showToast = (message: string) => {
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = useCallback((message: string) => {
+    if (toastTimerRef.current !== null) clearTimeout(toastTimerRef.current);
     setToast(message);
-    window.setTimeout(() => setToast(""), 2600);
-  };
+    toastTimerRef.current = setTimeout(() => {
+      setToast("");
+      toastTimerRef.current = null;
+    }, 2600);
+  }, []);
 
   const load = useCallback(() => {
     setLoading(true);
     setPageError("");
-    Promise.all([
-      backendJson<Array<Record<string, unknown>>>(`${API}/library/index`),
-      listOfflineMangaRecords().catch(() => []),
-    ])
-      .then(([rows, offlineManga]) => {
-        const backendItems = (rows || []).map(toLibItem);
-        const offlineItems = (offlineManga || []).map(toOfflineMangaLibItem);
-        setItems([...offlineItems, ...backendItems]);
-      })
-      .catch(() => {
-        setItems([]);
+    Promise.allSettled([
+      backendJson<Array<Record<string, unknown>>>(`${BACKEND_API}/library/index`),
+      listOfflineMangaRecords().catch(() => [] as OfflineMangaRecord[]),
+    ]).then(([backendResult, offlineResult]) => {
+      const backendItems =
+        backendResult.status === "fulfilled"
+          ? (backendResult.value || []).map(toLibItem)
+          : [];
+      const offlineItems =
+        offlineResult.status === "fulfilled"
+          ? (offlineResult.value || []).map(toOfflineMangaLibItem)
+          : [];
+
+      if (backendResult.status === "rejected") {
         setPageError("Library items could not be loaded right now.");
-      })
-      .finally(() => setLoading(false));
+      } else {
+        setPageError("");
+      }
+
+      setItems([...offlineItems, ...backendItems]);
+    }).finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
@@ -319,25 +329,28 @@ export default function LibraryPage() {
       .filter((entry) => entry.items.length > 0);
   }, [filteredItems]);
 
-  const totalSize = enhancedItems.reduce((sum, item) => sum + item.file_size, 0);
-  const brokenCount = enhancedItems.filter((item) => item.broken).length;
-  const offlineMangaCount = enhancedItems.filter((item) => item.source_type === "offline-manga").length;
-  const totalSizeLabel = totalSize > 1024 ** 3
-    ? `${(totalSize / 1024 ** 3).toFixed(1)} GB`
-    : totalSize > 1024 ** 2
-      ? `${(totalSize / 1024 ** 2).toFixed(1)} MB`
-      : `${Math.round(totalSize / 1024)} KB`;
+  const { totalSizeLabel, brokenCount, offlineMangaCount } = useMemo(() => {
+    const totalSize = enhancedItems.reduce((sum, item) => sum + item.file_size, 0);
+    const broken = enhancedItems.filter((item) => item.broken).length;
+    const offlineManga = enhancedItems.filter((item) => item.source_type === "offline-manga").length;
+    const sizeLabel = totalSize > 1024 ** 3
+      ? `${(totalSize / 1024 ** 3).toFixed(1)} GB`
+      : totalSize > 1024 ** 2
+        ? `${(totalSize / 1024 ** 2).toFixed(1)} MB`
+        : `${Math.round(totalSize / 1024)} KB`;
+    return { totalSizeLabel: sizeLabel, brokenCount: broken, offlineMangaCount: offlineManga };
+  }, [enhancedItems]);
 
-  const toggleSelected = (id: string) => {
+  const toggleSelected = useCallback((id: string) => {
     setSelectedIds((current) => {
       const next = new Set(current);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
-  };
+  }, []);
 
-  const openFolder = async (item: LibItem) => {
+  const openFolder = useCallback(async (item: LibItem) => {
     if (item.source_type === "offline-manga") {
       window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "manga" } }));
       showToast("Opened Manga page. This title is available offline there.");
@@ -348,16 +361,16 @@ export default function LibraryPage() {
       return;
     }
     try {
-      const response = await backendFetch(`${API}/open-download-folder?path=${encodeURIComponent(item.file_path)}`, { method: "POST" }, { sensitive: true });
+      const response = await backendFetch(`${BACKEND_API}/open-download-folder?path=${encodeURIComponent(item.file_path)}`, { method: "POST" }, { sensitive: true });
       if (!response.ok) {
         throw new Error(`Reveal failed with ${response.status}`);
       }
     } catch {
-      // Ignore browser-only failures.
+      showToast("Could not open the folder.");
     }
-  };
+  }, [showToast]);
 
-  const playItem = async (item: LibItem) => {
+  const playItem = useCallback(async (item: LibItem) => {
     if (item.source_type === "offline-manga") {
       window.dispatchEvent(new CustomEvent("grabix:navigate", { detail: { page: "manga" } }));
       showToast("Opened Manga page for offline reading.");
@@ -368,26 +381,26 @@ export default function LibraryPage() {
       return;
     }
     try {
-      const response = await backendFetch(`${API}/open-local-file?path=${encodeURIComponent(item.file_path)}`, { method: "POST" }, { sensitive: true });
+      const response = await backendFetch(`${BACKEND_API}/open-local-file?path=${encodeURIComponent(item.file_path)}`, { method: "POST" }, { sensitive: true });
       if (!response.ok) {
         throw new Error(`Open failed with ${response.status}`);
       }
     } catch {
       showToast("Could not open the local file.");
     }
-  };
+  }, [showToast]);
 
   const executeDeleteItem = async (item: LibItem) => {
     if (item.source_type === "offline-manga") {
       await deleteOfflineMangaRecord(item.offline_key);
     } else if (item.source_type === "untracked") {
-      const response = await backendFetch(`${API}/library/file?path=${encodeURIComponent(item.file_path)}`, { method: "DELETE" }, { sensitive: true });
+      const response = await backendFetch(`${BACKEND_API}/library/file?path=${encodeURIComponent(item.file_path)}`, { method: "DELETE" }, { sensitive: true });
       if (!response.ok) throw new Error(`Delete failed with ${response.status}`);
     } else if (item.source_type === "history" && item.broken) {
-      const response = await backendFetch(`${API}/library/stale/${encodeURIComponent(item.id)}`, { method: "DELETE" }, { sensitive: true });
+      const response = await backendFetch(`${BACKEND_API}/library/stale/${encodeURIComponent(item.id)}`, { method: "DELETE" }, { sensitive: true });
       if (!response.ok) throw new Error(`Delete failed with ${response.status}`);
     } else {
-      const response = await backendFetch(`${API}/history/${item.id}?delete_file=true`, { method: "DELETE" }, { sensitive: true });
+      const response = await backendFetch(`${BACKEND_API}/history/${item.id}?delete_file=true`, { method: "DELETE" }, { sensitive: true });
       if (!response.ok) throw new Error(`Delete failed with ${response.status}`);
     }
     setItems((current) => current.filter((entry) => entry.id !== item.id));
@@ -399,7 +412,7 @@ export default function LibraryPage() {
     showToast("Removed from library.");
   };
 
-  const deleteItem = async (item: LibItem) => {
+  const deleteItem = useCallback(async (item: LibItem) => {
     const confirmMessage = item.source_type === "offline-manga"
       ? "Delete this offline manga from the app?"
       : item.source_type === "history" && item.broken
@@ -413,31 +426,48 @@ export default function LibraryPage() {
         await executeDeleteItem(item);
       },
     });
-  };
+  }, [showToast]);
 
   const executeDeleteSelected = async () => {
     const selectedItems = items.filter((item) => selectedIds.has(item.id));
-    await Promise.all(selectedItems.map(async (item) => {
-      if (item.source_type === "offline-manga") {
-        await deleteOfflineMangaRecord(item.offline_key);
-        return;
+    const deletedIds: string[] = [];
+    const errors: string[] = [];
+
+    for (const item of selectedItems) {
+      try {
+        if (item.source_type === "offline-manga") {
+          await deleteOfflineMangaRecord(item.offline_key);
+        } else if (item.source_type === "untracked") {
+          const response = await backendFetch(`${BACKEND_API}/library/file?path=${encodeURIComponent(item.file_path)}`, { method: "DELETE" }, { sensitive: true });
+          if (!response.ok) throw new Error(`Delete failed with ${response.status}`);
+        } else if (item.source_type === "history" && item.broken) {
+          const response = await backendFetch(`${BACKEND_API}/library/stale/${encodeURIComponent(item.id)}`, { method: "DELETE" }, { sensitive: true });
+          if (!response.ok) throw new Error(`Delete failed with ${response.status}`);
+        } else {
+          const response = await backendFetch(`${BACKEND_API}/history/${item.id}?delete_file=true`, { method: "DELETE" }, { sensitive: true });
+          if (!response.ok) throw new Error(`Delete failed with ${response.status}`);
+        }
+        deletedIds.push(item.id);
+      } catch {
+        errors.push(item.title);
       }
-      if (item.source_type === "untracked") {
-        const response = await backendFetch(`${API}/library/file?path=${encodeURIComponent(item.file_path)}`, { method: "DELETE" }, { sensitive: true });
-        if (!response.ok) throw new Error(`Delete failed with ${response.status}`);
-        return;
-      }
-      if (item.source_type === "history" && item.broken) {
-        const response = await backendFetch(`${API}/library/stale/${encodeURIComponent(item.id)}`, { method: "DELETE" }, { sensitive: true });
-        if (!response.ok) throw new Error(`Delete failed with ${response.status}`);
-        return;
-      }
-      const response = await backendFetch(`${API}/history/${item.id}?delete_file=true`, { method: "DELETE" }, { sensitive: true });
-      if (!response.ok) throw new Error(`Delete failed with ${response.status}`);
-    }));
-    setItems((current) => current.filter((item) => !selectedIds.has(item.id)));
-    setSelectedIds(new Set());
-    showToast("Selected items deleted.");
+    }
+
+    if (deletedIds.length > 0) {
+      const deletedSet = new Set(deletedIds);
+      setItems((current) => current.filter((item) => !deletedSet.has(item.id)));
+      setSelectedIds((current) => {
+        const next = new Set(current);
+        deletedIds.forEach((id) => next.delete(id));
+        return next;
+      });
+    }
+
+    if (errors.length > 0) {
+      showToast(`${deletedIds.length} deleted, ${errors.length} failed.`);
+    } else {
+      showToast("Selected items deleted.");
+    }
   };
 
   const deleteSelected = async () => {
@@ -455,7 +485,7 @@ export default function LibraryPage() {
   const organizeLibrary = async () => {
     setOrganizing(true);
     try {
-      const response = await backendFetch(`${API}/library/organize`, { method: "POST" }, { sensitive: true });
+      const response = await backendFetch(`${BACKEND_API}/library/organize`, { method: "POST" }, { sensitive: true });
       if (!response.ok) {
         throw new Error(`Library organize failed with ${response.status}`);
       }
@@ -472,7 +502,7 @@ export default function LibraryPage() {
   const reconcileLibrary = async () => {
     setReconciling(true);
     try {
-      const response = await backendFetch(`${API}/library/reconcile`, { method: "POST" }, { sensitive: true });
+      const response = await backendFetch(`${BACKEND_API}/library/reconcile`, { method: "POST" }, { sensitive: true });
       if (!response.ok) {
         throw new Error(`Library reconcile failed with ${response.status}`);
       }
@@ -495,8 +525,12 @@ export default function LibraryPage() {
   const saveMetadata = async (tags: string, category: string) => {
     if (!editItem || editItem.source_type !== "history") return;
     const response = await backendFetch(
-      `${API}/history/${editItem.id}?tags=${encodeURIComponent(tags)}&category=${encodeURIComponent(category)}`,
-      { method: "PATCH" },
+      `${BACKEND_API}/history/${editItem.id}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags, category }),
+      },
       { sensitive: true }
     );
     if (!response.ok) {
@@ -509,7 +543,7 @@ export default function LibraryPage() {
     showToast("Library item updated.");
   };
 
-  const renderItems = (entries: typeof filteredItems) => {
+  const renderItems = useCallback((entries: typeof filteredItems) => {
     if (viewMode === "list") {
       return (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -545,7 +579,7 @@ export default function LibraryPage() {
         ))}
       </div>
     );
-  };
+  }, [viewMode, selectedIds, toggleSelected, playItem, openFolder, deleteItem, setEditItem]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
@@ -778,6 +812,11 @@ function LibraryCard({
   return (
     <div
       className="card"
+      role="checkbox"
+      aria-checked={selected}
+      aria-label={`Select ${item.title}`}
+      tabIndex={0}
+      onKeyDown={(event) => { if (event.key === " " || event.key === "Enter") onSelect(); }}
       style={{
         overflow: "hidden",
         cursor: "pointer",
@@ -826,7 +865,7 @@ function LibraryCard({
             <IconFolder size={14} />
           </button>
           <button className="btn-icon" disabled={!canEdit} onClick={(event) => { event.stopPropagation(); if (canEdit) onEdit(); }} title={canEdit ? "Edit library info" : "Only tracked downloads can be edited"} style={{ opacity: canEdit ? 1 : 0.4 }}>
-            <IconFilter size={14} />
+            <IconEdit size={14} />
           </button>
           <button className="btn-icon" onClick={(event) => { event.stopPropagation(); onDelete(); }} title="Delete" style={{ color: "var(--text-danger)" }}>
             <IconTrash size={14} />
@@ -872,6 +911,11 @@ function LibraryRow({
   return (
     <div className="card" style={{ display: "flex", gap: 14, padding: 12, alignItems: "center", outline: selected ? "2px solid var(--accent)" : "none" }} onClick={onSelect}>
       <div
+        role="checkbox"
+        aria-checked={selected}
+        aria-label={`Select ${item.title}`}
+        tabIndex={0}
+        onKeyDown={(event) => { if (event.key === " " || event.key === "Enter") onSelect(); }}
         style={{
           width: 18,
           height: 18,
@@ -882,6 +926,7 @@ function LibraryRow({
           alignItems: "center",
           justifyContent: "center",
           flexShrink: 0,
+          cursor: "pointer",
         }}
       >
         {selected ? <IconCheck size={10} color="white" /> : null}
@@ -919,7 +964,7 @@ function LibraryRow({
           <IconFolder size={14} />
         </button>
         <button className="btn-icon" disabled={!canEdit} onClick={canEdit ? onEdit : undefined} title={canEdit ? "Edit" : "Only tracked downloads can be edited"} style={{ opacity: canEdit ? 1 : 0.4 }}>
-          <IconFilter size={14} />
+          <IconEdit size={14} />
         </button>
         <button className="btn-icon" onClick={onDelete} title="Delete" style={{ color: "var(--text-danger)" }}>
           <IconTrash size={14} />
@@ -1027,7 +1072,7 @@ function ConfirmActionModal({
               }
             }}
           >
-            {submitting ? "Deleting..." : confirmLabel}
+            {submitting ? `${confirmLabel}…` : confirmLabel}
           </button>
         </div>
       </div>
