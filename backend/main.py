@@ -4654,11 +4654,23 @@ def _download_hls_media(
         })
         _persist_download_record(dl_id, force=True)
 
+        # ── Detect encrypted HLS — parallel concat cannot mux AES-128 segments ──
+        # If the playlist contains EXT-X-KEY the downloaded bytes are encrypted
+        # raw cipher-text.  FFmpeg's concat demuxer will hit AVERROR_INVALIDDATA
+        # immediately.  Raise here so the exception handler falls through to the
+        # single-connection FFmpeg fallback, which handles decryption natively.
+        if "#EXT-X-KEY" in playlist_text:
+            raise ValueError(
+                "Stream uses AES-128 encryption — parallel concat cannot mux "
+                "encrypted segments. Falling back to single-connection FFmpeg."
+            )
+
         concat_list = seg_dir / "concat.txt"
         with open(concat_list, "w", encoding="utf-8") as _f:
             for _idx in sorted(seg_paths):
-                # Use forward slashes and escape single quotes for FFmpeg
-                _safe = str(seg_paths[_idx]).replace("'", "'\\''")
+                # Forward slashes required — FFmpeg concat demuxer misreads
+                # Windows backslash paths in file lists even with -safe 0.
+                _safe = str(seg_paths[_idx]).replace("\\", "/").replace("'", "\\'")
                 _f.write(f"file '{_safe}'\n")
 
         output_part = f"{final_path}.part.mkv"
@@ -4666,9 +4678,18 @@ def _download_hls_media(
         _merge_proc = subprocess.run(
             [
                 FFMPEG_PATH, "-y",
+                # +genpts  — recompute presentation timestamps so FFmpeg does not
+                #            choke on timestamp gaps or drift between segments.
+                # +discardcorrupt — skip bad packets instead of aborting the mux;
+                #            handles minor codec-config mismatches and HLS
+                #            discontinuities that are common on anime CDNs.
+                "-fflags", "+genpts+discardcorrupt",
                 "-f", "concat", "-safe", "0",
                 "-i", str(concat_list),
                 "-c", "copy",
+                # Disable interleave-buffer limit so audio/video timestamp
+                # divergence across segments does not stall or error the muxer.
+                "-max_interleave_delta", "0",
                 "-f", "matroska",
                 output_part,
             ],
