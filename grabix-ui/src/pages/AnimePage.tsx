@@ -1144,7 +1144,7 @@ function AnimeDetail({
             headers: source?.requestHeaders,
           }));
         setDownloadSubtitleTracks(subtitles);
-        setDownloadIncludeSubtitle(requestedLanguage === "sub" && subtitles.length > 0);
+        setDownloadIncludeSubtitle(subtitles.length > 0); // Always include if available
         setDownloadQuality(options[0]?.id || "");
       } catch (error) {
         setDownloadQualityOptions([]);
@@ -1660,10 +1660,10 @@ function AnimeDetail({
         category: "Anime",
         tags: [languageLabel, isMovie ? "Movie" : selectionLabel],
       });
-      if (downloadIncludeSubtitle && downloadSubtitleTracks[0]?.url) {
+      if (downloadSubtitleTracks[0]?.url) { // Always download subtitles
         const subtitleTitle = isMovie
-          ? `${title} Subtitle`
-          : `${title} EP ${episode} Subtitle`;
+          ? `${title} [${languageLabel}] Subtitles`
+          : `${title} - Episode ${String(episode).padStart(2, "0")} [${languageLabel}] Subtitles`;
         await queueSubtitleDownload({
           url: downloadSubtitleTracks[0].url,
           title: subtitleTitle,
@@ -1682,12 +1682,12 @@ function AnimeDetail({
 
     const handleDownload = async () => {
       if (downloading) return;
-      setDownloadLanguage(hasHindiFallback ? "dub" : "sub");
+      setDownloadLanguage(hasDub ? "dub" : "sub");
       setDownloadServer("auto");
       setDownloadQuality("");
       setDownloadQualityOptions([]);
       setDownloadSubtitleTracks([]);
-      setDownloadIncludeSubtitle(!hasHindiFallback);
+      setDownloadIncludeSubtitle(true);
       setDownloadDialogError("");
       setDownloadDialogOpen(true);
     };
@@ -1873,16 +1873,12 @@ function AnimeDetail({
         poster={anime.image}
         languageOptions={[
           { id: "sub", label: "Sub" },
-          { id: "dub", label: "Dub" },
+          ...(hasDub ? [{ id: "dub", label: "Dub" }] : []),
           ...(hasHindiFallback ? [{ id: "hindi", label: "Hindi" }] : []),
         ]}
         selectedLanguage={downloadLanguage}
         onSelectLanguage={(value) => setDownloadLanguage(value as "sub" | "dub" | "hindi")}
-        serverOptions={downloadLanguage === "hindi" ? [] : [
-          { id: "auto", label: "Auto" },
-          { id: "hd-1", label: "HD-1" },
-          { id: "hd-2", label: "HD-2" },
-        ]}
+        serverOptions={[]}
         selectedServer={downloadServer}
         onSelectServer={(value) => setDownloadServer(value as AnimeServerOption)}
         qualityOptions={downloadQualityOptions.map((option) => ({ id: option.id, label: option.label }))}
@@ -1892,25 +1888,10 @@ function AnimeDetail({
         error={downloadDialogError}
         extraContent={
           <div style={{ display: "grid", gap: 10 }}>
-            {(downloadLanguage === "sub" || downloadSubtitleTracks.length > 0) && (
-              <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: "var(--text-primary)" }}>
-                <input
-                  type="checkbox"
-                  checked={downloadIncludeSubtitle}
-                  disabled={downloadLanguage === "sub" || downloadSubtitleTracks.length === 0}
-                  onChange={(event) => setDownloadIncludeSubtitle(event.target.checked)}
-                />
-                <span>
-                  {downloadLanguage === "sub"
-                    ? "Download subtitle too (required for Sub)"
-                    : "Download subtitle too"}
-                </span>
-              </label>
-            )}
             {downloadSubtitleTracks.length > 0 && (
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 12px", borderRadius: 12, border: "1px solid var(--border)", background: "var(--bg-surface2)" }}>
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>Subtitle file</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>Subtitles included automatically</div>
                   <div style={{ fontSize: 12, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {downloadSubtitleTracks[0].label || "Episode subtitle"}
                   </div>

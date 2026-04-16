@@ -4687,6 +4687,7 @@ def _download_hls_media(
                 "-f", "concat", "-safe", "0",
                 "-i", str(concat_list),
                 "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
                 # Disable interleave-buffer limit so audio/video timestamp
                 # divergence across segments does not stall or error the muxer.
                 "-max_interleave_delta", "0",
@@ -4766,6 +4767,7 @@ def _download_hls_media(
         "-stats_period", "1",
         "-i", url,
         "-c", "copy",
+        "-avoid_negative_ts", "make_zero",
         "-f", "matroska",
         output_path,
     ])
