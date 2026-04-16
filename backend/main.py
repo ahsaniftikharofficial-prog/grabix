@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 import os, uuid, sqlite3, shutil, threading, subprocess, time, json, re, hashlib, socket, ipaddress, tempfile, zipfile, importlib, queue as _queue
 import concurrent.futures
 import ctypes
@@ -535,12 +535,36 @@ def _infer_download_category(url: str, title: str, dl_type: str, category: str =
         return "Audio"
     lowered_url = (url or "").lower()
     lowered_title = (title or "").lower()
+
+    # YouTube
     if "youtube.com" in lowered_url or "youtu.be" in lowered_url:
         return "YouTube"
-    if "anime" in lowered_title or "episode" in lowered_title:
+
+    # Anime streaming sites
+    _ANIME_SITES = ("hianime", "aniwatch", "gogoanime", "9anime", "animepahe",
+                    "zoro.to", "animixplay", "animekisa", "crunchyroll", "funimation")
+    if any(site in lowered_url for site in _ANIME_SITES):
+        return "Anime"
+
+    # Movie / TV streaming sites
+    _MOVIE_SITES = ("moviebox", "moviesbox", "netflixmirror", "123movies",
+                    "fmovies", "putlocker", "primewire", "yifymovie", "yts.mx",
+                    "hdmovie", "5movies", "flixtor", "soap2day")
+    if any(site in lowered_url for site in _MOVIE_SITES):
+        return "Movies"
+
+    # Manga sites
+    _MANGA_SITES = ("mangadex", "mangakakalot", "manganato", "comick", "webtoon")
+    if any(site in lowered_url for site in _MANGA_SITES):
+        return "Manga"
+
+    # Title-based fallbacks
+    if "anime" in lowered_title or ("episode" in lowered_title and "manga" not in lowered_title):
         return "Anime"
     if "manga" in lowered_title:
         return "Manga"
+
+    # Unknown — return empty so the frontend can handle it
     return ""
 
 
@@ -6066,7 +6090,25 @@ def get_library_index():
         return []
 
 
-@app.post("/library/reconcile")
+@app.get("/library/thumbnail")
+def serve_library_thumbnail(path: str):
+    """Proxy a local thumbnail file to the frontend (avoids browser same-origin restrictions on local paths)."""
+    try:
+        target = Path(path.strip())
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="Thumbnail not found")
+        suffix = target.suffix.lower()
+        media_type_map = {
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".png": "image/png", ".webp": "image/webp",
+            ".gif": "image/gif", ".avif": "image/avif",
+        }
+        media_type = media_type_map.get(suffix, "image/jpeg")
+        return FileResponse(str(target), media_type=media_type)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 def reconcile_library():
     try:
         return _reconcile_library_state()
@@ -6235,14 +6277,18 @@ def delete_history_item(item_id: str, delete_file: bool = True):
 
 
 # ── Phase 3: Update tags and category for a history item ─────────────────────
+class UpdateHistoryItemBody(BaseModel):
+    tags: str = ""
+    category: str = ""
+
 @app.patch("/history/{item_id}")
-def update_history_item(item_id: str, tags: str = "", category: str = ""):
+def update_history_item(item_id: str, body: UpdateHistoryItemBody):
     """Update the tags and category of a history entry."""
     try:
         con = get_db_connection()
         con.execute(
             "UPDATE history SET tags=?, category=? WHERE id=?",
-            (tags, category, item_id)
+            (body.tags, body.category, item_id)
         )
         con.commit()
         row = con.execute("SELECT * FROM history WHERE id=?", (item_id,)).fetchone()

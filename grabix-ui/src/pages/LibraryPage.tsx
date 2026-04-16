@@ -117,7 +117,9 @@ function toLibItem(row: Record<string, unknown>): LibItem {
     local_available: Boolean(row.local_available ?? true),
     source_type: (["history", "untracked", "offline-manga"].includes(String(row.source_type || ""))
       ? row.source_type
-      : "history") as LibItem["source_type"],
+      : String(row.source_type || "") === "disk"
+        ? "untracked"
+        : "history") as LibItem["source_type"],
     offline_key: String(row.offline_key || ""),
     chapter_count: Number(row.chapter_count || 0),
     storage_label: String(row.storage_label || ""),
@@ -179,16 +181,30 @@ function inferCategory(item: LibItem): CategoryId {
   if (explicit === "subtitles" || explicit === "subtitle") return "subtitles";
 
   const text = `${item.title} ${item.url} ${item.tags} ${item.channel}`.toLowerCase();
+
+  // Type-based shortcuts
   if (item.type === "audio") return "audio";
   if (item.type === "subtitle") return "subtitles";
+
+  // URL-based detection (most reliable)
   if (text.includes("youtube.com") || text.includes("youtu.be")) return "youtube";
+  const animeSites = ["hianime", "aniwatch", "gogoanime", "9anime", "animepahe", "zoro.to", "animixplay", "crunchyroll", "funimation"];
+  if (animeSites.some((site) => text.includes(site))) return "anime";
+  const mangaSites = ["mangadex", "mangakakalot", "manganato", "comick", "webtoon"];
+  if (mangaSites.some((site) => text.includes(site))) return "manga";
+  const movieSites = ["moviebox", "moviesbox", "netflixmirror", "123movies", "fmovies", "putlocker", "primewire", "yts.mx", "hdmovie", "soap2day"];
+  if (movieSites.some((site) => text.includes(site))) return "movies";
+
+  // Title/text keyword fallbacks
   if (text.includes("manga")) return "manga";
   if (text.includes("anime") || text.includes("hianime") || text.includes("aniwatch")) return "anime";
   if (text.includes("tv series") || text.includes("season ") || text.match(/\bs\d{1,2}e\d{1,2}\b/i)) return "tv";
   if (text.includes("book")) return "books";
   if (text.includes("comic")) return "comics";
   if (text.includes("light novel")) return "light-novels";
-  return item.type === "video" ? "movies" : "other";
+
+  // Unknown content — don't assume "movies", let user categorise manually
+  return "other";
 }
 
 function categoryLabel(id: CategoryId): string {
@@ -243,6 +259,7 @@ export default function LibraryPage() {
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [organizing, setOrganizing] = useState(false);
   const [reconciling, setReconciling] = useState(false);
+  const [clearing, setClearing] = useState(false);
 
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -283,6 +300,10 @@ export default function LibraryPage() {
 
   useEffect(() => {
     load();
+    // Reconcile silently on first visit so broken/missing flags reflect current disk state
+    backendFetch(`${BACKEND_API}/library/reconcile`, { method: "POST" }, { sensitive: true })
+      .then(() => load())
+      .catch(() => null); // Non-fatal — library still displays without it
   }, [load]);
 
   const enhancedItems = useMemo(
@@ -522,6 +543,33 @@ export default function LibraryPage() {
     }
   };
 
+  const clearLibrary = () => {
+    setConfirmState({
+      title: "Clear Entire Library",
+      message: "This will remove all download history from the library. Your actual files on disk will NOT be deleted. Are you sure?",
+      confirmLabel: "Clear Library",
+      action: async () => {
+        setClearing(true);
+        try {
+          const response = await backendFetch(`${BACKEND_API}/history?delete_files=false`, { method: "DELETE" }, { sensitive: true });
+          if (!response.ok) throw new Error(`Clear failed with ${response.status}`);
+          // Also clear offline manga from IndexedDB
+          const offlineRecords = await listOfflineMangaRecords().catch(() => []);
+          for (const record of offlineRecords) {
+            await deleteOfflineMangaRecord(record.key).catch(() => null);
+          }
+          setItems([]);
+          setSelectedIds(new Set());
+          showToast("Library cleared.");
+        } catch {
+          showToast("Failed to clear library.");
+        } finally {
+          setClearing(false);
+        }
+      },
+    });
+  };
+
   const saveMetadata = async (tags: string, category: string) => {
     if (!editItem || editItem.source_type !== "history") return;
     const response = await backendFetch(
@@ -632,6 +680,9 @@ export default function LibraryPage() {
           </button>
           <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => void reconcileLibrary()} disabled={reconciling}>
             <IconCheck size={13} /> {reconciling ? "Reconciling..." : "Reconcile"}
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 12, color: "var(--text-danger)" }} onClick={clearLibrary} disabled={clearing}>
+            <IconTrash size={13} /> {clearing ? "Clearing..." : "Clear Library"}
           </button>
           <button className="btn-icon" title="Refresh" onClick={load}>
             <IconRefresh size={15} />
@@ -748,10 +799,22 @@ export default function LibraryPage() {
 
 function Thumbnail({ item }: { item: LibItem & { inferredCategory?: CategoryId } }) {
   const accent = categoryAccent(item.inferredCategory || inferCategory(item));
-  if (item.thumbnail) {
+
+  // If the thumbnail is a local file path (not a URL), proxy it through the backend
+  const rawThumb = item.thumbnail;
+  const isLocalPath = rawThumb
+    ? !rawThumb.startsWith("http://") && !rawThumb.startsWith("https://") && !rawThumb.startsWith("data:")
+    : false;
+  const thumbSrc = rawThumb
+    ? isLocalPath
+      ? `${BACKEND_API}/library/thumbnail?path=${encodeURIComponent(rawThumb)}`
+      : rawThumb
+    : "";
+
+  if (thumbSrc) {
     return (
       <img
-        src={item.thumbnail}
+        src={thumbSrc}
         alt={item.title}
         style={{ width: "100%", height: "100%", objectFit: "cover" }}
         onError={(event) => {
