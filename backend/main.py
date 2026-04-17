@@ -4508,16 +4508,47 @@ def _download_hls_media(
         if "#EXTM3U" not in playlist_text:
             raise ValueError("Response is not a valid m3u8 playlist")
 
-        # Resolve master playlist → best variant
+        # Resolve master playlist -> best (highest-bandwidth) variant
         media_url = url
         if "EXT-X-STREAM-INF" in playlist_text:
-            # Pick the first (best-quality) variant URI
+            # Parse all EXT-X-STREAM-INF entries, pick the one with the highest
+            # BANDWIDTH value so we always download the best quality available.
+            _best_bw  = -1
+            _best_uri = ""
+            _pending_bw = 0
             for _line in playlist_text.splitlines():
                 _line = _line.strip()
-                if _line and not _line.startswith("#"):
-                    media_url = _resolve(url, _line)
-                    break
+                if _line.startswith("#EXT-X-STREAM-INF:"):
+                    _bm = re.search(r"(?:AVERAGE-)?BANDWIDTH=(\d+)", _line, re.IGNORECASE)
+                    _pending_bw = int(_bm.group(1)) if _bm else 0
+                elif _line and not _line.startswith("#"):
+                    if _pending_bw >= _best_bw:
+                        _best_bw  = _pending_bw
+                        _best_uri = _line
+                    _pending_bw = 0
+            if _best_uri:
+                media_url = _resolve(url, _best_uri)
             playlist_text = _fetch_bytes(media_url).decode("utf-8", errors="replace")
+
+        # Pre-flight: reject stream types the parallel concat cannot handle.
+        # EXT-X-KEY  -> AES-128 encrypted; concat demuxer gets raw cipher-text.
+        # EXT-X-MAP  -> fMP4/CMAF; init segment carries codec params (SPS/PPS).
+        #               Without it FFmpeg muxes fragments with no codec header:
+        #               black video, wrong duration, tiny file (~7 MB / 300 MB).
+        # Both are raised BEFORE downloading any segments so we don't waste
+        # bandwidth; the except handler falls through to single-connection FFmpeg
+        # which handles both stream types natively.
+        if "#EXT-X-KEY" in playlist_text:
+            raise ValueError(
+                "Stream uses AES-128 encryption -- parallel concat cannot mux "
+                "encrypted segments. Falling back to single-connection FFmpeg."
+            )
+        if "#EXT-X-MAP" in playlist_text:
+            raise ValueError(
+                "Stream uses fMP4/CMAF segments (EXT-X-MAP) -- parallel concat "
+                "requires an init segment that cannot be inlined. "
+                "Falling back to single-connection FFmpeg."
+            )
 
         # Collect segment URLs in order
         segment_urls: list[str] = []
@@ -4531,9 +4562,9 @@ def _download_hls_media(
 
         total_segs = len(segment_urls)
 
-        # ═══════════════════════════════════════════════════════════════════
-        # PHASE 2 — parallel segment download
-        # ═══════════════════════════════════════════════════════════════════
+        # ===================================================================
+        # PHASE 2 -- parallel segment download
+        # ===================================================================
         seg_dir = Path(output_dir or DOWNLOAD_DIR) / f"_hls_{dl_id}"
         seg_dir.mkdir(parents=True, exist_ok=True)
 
@@ -4654,17 +4685,6 @@ def _download_hls_media(
         })
         _persist_download_record(dl_id, force=True)
 
-        # ── Detect encrypted HLS — parallel concat cannot mux AES-128 segments ──
-        # If the playlist contains EXT-X-KEY the downloaded bytes are encrypted
-        # raw cipher-text.  FFmpeg's concat demuxer will hit AVERROR_INVALIDDATA
-        # immediately.  Raise here so the exception handler falls through to the
-        # single-connection FFmpeg fallback, which handles decryption natively.
-        if "#EXT-X-KEY" in playlist_text:
-            raise ValueError(
-                "Stream uses AES-128 encryption — parallel concat cannot mux "
-                "encrypted segments. Falling back to single-connection FFmpeg."
-            )
-
         concat_list = seg_dir / "concat.txt"
         with open(concat_list, "w", encoding="utf-8") as _f:
             for _idx in sorted(seg_paths):
@@ -4744,7 +4764,7 @@ def _download_hls_media(
     # Used when the parallel approach cannot parse/fetch the playlist.
     # ════════════════════════════════════════════════════════════════════════
     downloads[dl_id].update({
-        "stage_label": "Downloading (sequential fallback)...",
+        "stage_label": "Downloading via FFmpeg (fMP4/encrypted stream)...",
         "progress_mode": "activity",
         "downloaded": "", "total": "", "size": "", "speed": "", "eta": "",
     })
