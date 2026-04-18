@@ -3562,20 +3562,18 @@ def _start_external_downloader_progress_monitor(
                     trustworthy_total = expected_total_bytes > 0 and total_downloaded <= int(expected_total_bytes * 1.02)
                     pct = round((total_downloaded / expected_total_bytes) * 100, 1) if trustworthy_total else previous_percent
                     downloads[dl_id].update({
-                        "percent": max(previous_percent, min(pct, 100.0)) if trustworthy_total else 0,
+                        "percent": max(previous_percent, min(pct, 100.0)),
                         "downloaded": _format_bytes(total_downloaded),
-                        "total": _format_bytes(expected_total_bytes) if trustworthy_total else "",
+                        "total": _format_bytes(expected_total_bytes) if trustworthy_total else downloads[dl_id].get("total", ""),
                         "size": _format_bytes(expected_total_bytes if trustworthy_total else total_downloaded),
                         "bytes_downloaded": total_downloaded,
-                        "bytes_total": expected_total_bytes if trustworthy_total else 0,
-                        "progress_mode": "determinate" if trustworthy_total else "activity",
+                        "bytes_total": expected_total_bytes if trustworthy_total else int(downloads[dl_id].get("bytes_total", 0) or 0),
+                        "progress_mode": "determinate" if trustworthy_total or previous_percent > 0 else "activity",
                         "stage_label": "Downloading",
                         "speed": speed_label,
                         "eta": eta_label,
                         "partial_file_path": primary_partial or downloads[dl_id].get("partial_file_path", ""),
                     })
-                    if not trustworthy_total:
-                        downloads[dl_id]["eta"] = ""
                     _persist_download_record(dl_id)
             except Exception:
                 pass
@@ -4420,6 +4418,36 @@ class _ForceFallback(Exception):
     """
 
 
+def _estimate_hls_remaining_seconds(
+    completed_segments: int,
+    total_segments: int,
+    downloaded_bytes: int,
+    bytes_per_second: float,
+) -> float:
+    """
+    Estimate remaining wall-clock time for parallel HLS downloads.
+
+    Segment counts are a poor ETA proxy because HLS segment sizes can vary a lot.
+    Use the average completed segment size to estimate total bytes, then divide
+    the remaining estimated bytes by the observed byte throughput.
+    """
+    if completed_segments <= 0 or total_segments <= 0 or downloaded_bytes <= 0 or bytes_per_second <= 0:
+        return 0.0
+    average_segment_bytes = downloaded_bytes / max(completed_segments, 1)
+    estimated_total_bytes = average_segment_bytes * total_segments
+    remaining_bytes = max(estimated_total_bytes - downloaded_bytes, 0.0)
+    return remaining_bytes / bytes_per_second if remaining_bytes > 0 else 0.0
+
+
+def _retry_progress_mode(item: dict | None) -> str:
+    payload = item or {}
+    if float(payload.get("percent") or 0) > 0:
+        return "determinate"
+    if int(payload.get("bytes_total") or 0) > 0:
+        return "determinate"
+    return str(payload.get("progress_mode") or "activity")
+
+
 def _download_hls_media(
     dl_id: str,
     url: str,
@@ -4499,6 +4527,20 @@ def _download_hls_media(
             _p = urlparse(url)
             request_headers["Referer"] = f"{_p.scheme}://{_hls_host}/"
     # ─────────────────────────────────────────────────────────────────────────
+
+    # Start on the parallel segment path for throughput. Complex playlists
+    # still fall back to FFmpeg's native HLS demuxer below to preserve sync.
+    downloads[dl_id].update({
+        "file_path": final_path,
+        "stage_label": "Fetching playlist...",
+        "progress_mode": "activity",
+        "downloaded": "",
+        "total": "",
+        "size": "",
+        "speed": "",
+        "eta": "",
+    })
+    _persist_download_record(dl_id, force=True)
 
     def _fetch_bytes(fetch_url: str) -> bytes:
         req = URLRequest(fetch_url, headers=request_headers)
@@ -4700,13 +4742,19 @@ def _download_hls_media(
                         _speed_history[-1][0] - _speed_history[0][0], 0.001
                     )
                     _done = _completed[0]
-                    _elapsed = _now - _speed_history[0][0]
-                    _rate = _done / max(_elapsed, 0.001)
-                    _remaining_segs = total_segs - _done
-                    _eta = int(_remaining_segs / _rate) if _rate > 0 and _remaining_segs > 0 else 0
+                    _estimated_total_bytes = int((_cur / _done) * total_segs) if _done > 0 and _cur > 0 else 0
+                    _eta_seconds = _estimate_hls_remaining_seconds(
+                        completed_segments=_done,
+                        total_segments=total_segs,
+                        downloaded_bytes=_cur,
+                        bytes_per_second=max(_bps, 0.0),
+                    )
                     downloads[dl_id].update({
                         "speed": f"{_format_bytes(max(_bps, 0))}/s",
-                        "eta":   _format_eta(_eta) if _eta > 0 else "",
+                        "eta": _format_eta(_eta_seconds) if _eta_seconds > 0 else "",
+                        "total": _format_bytes(_estimated_total_bytes) if _estimated_total_bytes > 0 else downloads[dl_id].get("total", ""),
+                        "size": _format_bytes(_estimated_total_bytes) if _estimated_total_bytes > 0 else downloads[dl_id].get("size", ""),
+                        "bytes_total": _estimated_total_bytes or downloads[dl_id].get("bytes_total", 0),
                     })
                     _persist_download_record(dl_id)
 
@@ -4909,10 +4957,10 @@ def _download_hls_media(
         last_size_sample = 0
         last_sample_ts = time.monotonic()
 
-        _WD_TIMEOUT_S = 180
+        _WD_TIMEOUT_S = 420
         _wd_stop = threading.Event()
         _wd_last_size: list[int] = [0]
-        _wd_last_ts: list[float] = [time.monotonic()]
+        _wd_last_progress_ts: list[float] = [time.monotonic()]
 
         def _wd_run() -> None:
             while not _wd_stop.wait(15):
@@ -4924,8 +4972,8 @@ def _download_hls_media(
                     sz = 0
                 if sz > _wd_last_size[0]:
                     _wd_last_size[0] = sz
-                    _wd_last_ts[0] = time.monotonic()
-                elif time.monotonic() - _wd_last_ts[0] > _WD_TIMEOUT_S:
+                    _wd_last_progress_ts[0] = time.monotonic()
+                elif time.monotonic() - _wd_last_progress_ts[0] > _WD_TIMEOUT_S:
                     if process.poll() is None:
                         process.terminate()
                     break
@@ -4962,7 +5010,10 @@ def _download_hls_media(
                 match = re.search(r"time=(\d+:\d+:\d+\.\d+)", line)
                 if match:
                     current_label = match.group(1)
-                    current_seconds = _parse_timecode_to_seconds(current_label)
+                    parsed_seconds = _parse_timecode_to_seconds(current_label)
+                    if parsed_seconds > current_seconds:
+                        _wd_last_progress_ts[0] = time.monotonic()
+                    current_seconds = parsed_seconds
                     downloads[dl_id]["downloaded"] = current_label
                     if total_duration_seconds > 0:
                         downloads[dl_id]["percent"] = round(
@@ -4990,6 +5041,7 @@ def _download_hls_media(
                     elapsed = max(now - last_sample_ts, 0.001)
                     delta = max(0, current_size - last_size_sample)
                     if delta > 0 and elapsed >= 0.5:
+                        _wd_last_progress_ts[0] = now
                         downloads[dl_id]["speed"] = f"{_format_bytes(delta / elapsed)}/s"
                         last_size_sample = current_size
                         last_sample_ts = now
@@ -6965,13 +7017,18 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         if not is_unretryable and _task_attempt < _MAX_TASK_RETRIES:
             _task_attempt += 1
             _wait = _task_attempt * 7
+            current_item = downloads.get(dl_id) or {}
             downloads[dl_id].update({
                 "status": "downloading",
                 "stage_label": f"Retrying ({_task_attempt}/{_MAX_TASK_RETRIES})…",
                 "error": "",
-                "progress_mode": "activity",
+                "recoverable": True,
+                "retry_count": _task_attempt,
+                "progress_mode": _retry_progress_mode(current_item),
+                "speed": "",
+                "eta": "",
             })
-            _persist_download_record(dl_id)
+            _persist_download_record(dl_id, force=True)
             time.sleep(_wait)
             continue  # retry the while loop
         # --- fallback engine: aria2 exhausted -> switch to standard once ---
@@ -6982,13 +7039,17 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
             effective_engine = "standard"
             _task_attempt = 0
             _task_last_exc = None
+            current_item = downloads.get(dl_id) or {}
             downloads[dl_id].update({
                 "status": "downloading",
                 "stage_label": "Switching to standard downloader...",
                 "error": "",
-                "progress_mode": "activity",
+                "recoverable": True,
+                "progress_mode": _retry_progress_mode(current_item),
+                "speed": "",
+                "eta": "",
             })
-            _persist_download_record(dl_id)
+            _persist_download_record(dl_id, force=True)
             continue
         break  # give up
 
