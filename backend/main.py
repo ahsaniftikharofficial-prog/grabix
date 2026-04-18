@@ -10,7 +10,7 @@ import os, uuid, sqlite3, shutil, threading, subprocess, time, json, re, hashlib
 import concurrent.futures
 import ctypes
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse, urlencode
 from urllib.request import Request as URLRequest, urlopen
@@ -756,7 +756,7 @@ def _save_provider_status_to_db(provider: str, available: bool, error: str = "")
                 last_error=excluded.last_error,
                 consecutive_failures=CASE WHEN excluded.available=1 THEN 0 ELSE consecutive_failures+1 END
             """,
-            (provider, 1 if available else 0, datetime.utcnow().isoformat(), error),
+            (provider, 1 if available else 0, datetime.now(timezone.utc).isoformat(), error),
         )
         con.commit()
         con.close()
@@ -3303,6 +3303,11 @@ def _start_aria2_rpc_monitor(
 
         while not stop_event.is_set():
             try:
+                current_item = downloads.get(dl_id)
+                if not current_item:
+                    return
+                if current_item.get("status") in {"done", "failed", "canceled", "error"}:
+                    return
                 rpc = _aria2_poll_rpc(rpc_port)
                 if rpc is not None:
                     # aria2 is active — use RPC data; reset done-timer since a new stream is running
@@ -3509,6 +3514,11 @@ def _start_external_downloader_progress_monitor(
         smoothed_speed = 0.0
         while not stop_event.is_set():
             try:
+                current_item = downloads.get(dl_id)
+                if not current_item:
+                    return
+                if current_item.get("status") in {"done", "failed", "canceled", "error"}:
+                    return
                 partial_candidates = [
                     path for path in workspace.rglob("*")
                     if path.is_file() and ".aria2" not in path.name.lower() and (
@@ -4517,6 +4527,11 @@ def _download_hls_media(
         if "#EXTM3U" not in playlist_text:
             raise ValueError("Response is not a valid m3u8 playlist")
 
+        _master_has_external_audio = bool(
+            re.search(r"#EXT-X-MEDIA:.*TYPE=AUDIO", playlist_text, re.IGNORECASE)
+            or re.search(r"#EXT-X-STREAM-INF:.*AUDIO=", playlist_text, re.IGNORECASE)
+        )
+
         # Resolve master playlist -> best (highest-bandwidth) variant
         media_url = url
         if "EXT-X-STREAM-INF" in playlist_text:
@@ -4538,6 +4553,23 @@ def _download_hls_media(
             if _best_uri:
                 media_url = _resolve(url, _best_uri)
             playlist_text = _fetch_bytes(media_url).decode("utf-8", errors="replace")
+
+        # Complex HLS playlists are where the parallel segment path is most
+        # likely to produce timestamp drift or A/V sync issues after remuxing.
+        # Let FFmpeg handle these end-to-end instead of concat-muxing segments.
+        _complex_hls_reasons: list[str] = []
+        if "#EXT-X-DISCONTINUITY" in playlist_text:
+            _complex_hls_reasons.append("timeline discontinuities")
+        if "#EXT-X-BYTERANGE" in playlist_text:
+            _complex_hls_reasons.append("byte-range segments")
+        if _master_has_external_audio or re.search(r"#EXT-X-MEDIA:.*TYPE=AUDIO", playlist_text, re.IGNORECASE):
+            _complex_hls_reasons.append("separate audio groups")
+        if _complex_hls_reasons:
+            raise ValueError(
+                "Stream uses "
+                + ", ".join(_complex_hls_reasons)
+                + " -- falling back to FFmpeg's native HLS pipeline for sync-safe muxing."
+            )
 
         # Pre-flight: reject stream types the parallel concat cannot handle.
         # EXT-X-KEY  -> AES-128 encrypted; concat demuxer gets raw cipher-text.
@@ -4842,6 +4874,7 @@ def _download_hls_media(
         "-http_persistent", "1",
         "-multiple_requests", "1",
         "-stats_period", "1",
+        "-fflags", "+genpts",
         "-i", url,
         "-c", "copy",
         "-avoid_negative_ts", "make_zero",
@@ -5595,15 +5628,12 @@ def open_download_folder(path: str = ""):
 
     try:
         if os.name == "nt":
-            creation_flags = 0
-            for flag_name in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
-                creation_flags |= getattr(subprocess, flag_name, 0)
             if target.is_file():
                 # Highlight the specific file in Explorer
-                subprocess.Popen(["explorer", "/select,", str(target)], creationflags=creation_flags)
+                subprocess.Popen(["explorer.exe", f"/select,{target}"])
             else:
                 # Open the folder
-                subprocess.Popen(["explorer", str(target)], creationflags=creation_flags)
+                os.startfile(str(target))
         else:
             raise HTTPException(status_code=501, detail="Open folder is currently implemented for Windows only")
     except OSError as exc:
@@ -6168,6 +6198,14 @@ def _finalize_download_output(
     db_update_status(dl_id, "done", final_path)
     _persist_download_record(dl_id, force=True)
     return final_path
+
+
+def _download_has_finalized_file(dl_id: str) -> bool:
+    item = downloads.get(dl_id) or {}
+    final_path = str(item.get("file_path") or "").strip()
+    if final_path and Path(final_path).is_file():
+        return True
+    return bool(item.get("status") == "done")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6918,6 +6956,9 @@ def _download_task(dl_id, url, dl_type, quality, audio_format, audio_quality,
         break  # success
 
       except Exception as e:
+        if _download_has_finalized_file(dl_id):
+            _task_last_exc = None
+            break
         _task_last_exc = e
         is_cancel = controls["cancel"].is_set()
         is_unretryable = is_cancel or (isinstance(e, OSError) and getattr(e, "errno", None) == 22)

@@ -11,6 +11,7 @@ import TrimSlider from "../components/TrimSlider";
 import { BACKEND_API, backendFetch, backendJson } from "../lib/api";
 import { invoke } from "@tauri-apps/api/core";
 const API = BACKEND_API;
+const DOWNLOADER_QUEUE_STORAGE_KEY = "grabix:downloader-queue";
 
 type FileType = "video" | "audio" | "thumbnail" | "subtitle";
 type Status = "idle" | "loading" | "ok" | "error";
@@ -173,6 +174,25 @@ function variantLabelForRequest(
   return thumbnailFormat;
 }
 
+function loadStoredQueue(): QueueItem[] {
+  try {
+    const raw = window.localStorage.getItem(DOWNLOADER_QUEUE_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function storeQueueSnapshot(queue: QueueItem[]) {
+  try {
+    window.localStorage.setItem(DOWNLOADER_QUEUE_STORAGE_KEY, JSON.stringify(queue.slice(0, 200)));
+  } catch {
+    // Ignore local storage failures.
+  }
+}
+
 export default function DownloaderPage({ onDownloadStarting }: { onDownloadStarting?: () => void }) {
   const [url, setUrl] = useState("");
   const [batchMode, setBatchMode] = useState(false);
@@ -192,7 +212,7 @@ export default function DownloaderPage({ onDownloadStarting }: { onDownloadStart
   const [trimEnd, setTrimEnd] = useState(0);
   const [trimOpen, setTrimOpen] = useState(false);
   const [useCpu, setUseCpu] = useState(false);
-  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [queue, setQueue] = useState<QueueItem[]>(() => loadStoredQueue());
   const pollingRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
   const visibleDependencies = Object.values(dependencies).filter(
     (dependency) => !dependency.available || dependency.job?.status === "installing" || dependency.job?.status === "failed"
@@ -261,6 +281,10 @@ export default function DownloaderPage({ onDownloadStarting }: { onDownloadStart
       pollingRef.current.clear();
     };
   }, []);
+
+  useEffect(() => {
+    storeQueueSnapshot(queue);
+  }, [queue]);
 
   const fetchInfo = useCallback(async (inputUrl: string) => {
     if (!inputUrl.trim()) return;

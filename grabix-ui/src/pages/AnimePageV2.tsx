@@ -12,10 +12,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import VidSrcPlayer from "../components/VidSrcPlayer";
-import { IconSearch, IconX, IconPlay } from "../components/Icons";
+import DownloadOptionsModal from "../components/DownloadOptionsModal";
+import { IconSearch, IconX, IconPlay, IconDownload } from "../components/Icons";
 import { type StreamSource } from "../lib/streamProviders";
-import { fetchBackendPing } from "../lib/api";
-import { queueVideoDownload } from "../lib/downloads";
+import { BACKEND_API, backendJson, fetchBackendPing } from "../lib/api";
+import { queueSubtitleDownload, queueVideoDownload, resolveSourceDownloadOptions } from "../lib/downloads";
 
 // ─── Consumet URL — persisted so it survives page refreshes ──────────────────
 const LS_KEY = "animev2:consumet_url";
@@ -54,6 +55,39 @@ interface HiAnimeWatch { sources?: Array<{ url: string; quality?: string; isM3U8
 type Screen = "home" | "info" | "player";
 type Category = "sub" | "dub";
 type Server = "vidcloud" | "vidstreaming";
+type DownloadEngine = "standard" | "aria2";
+
+function buildAnimeV2SubtitleTracks(data: HiAnimeWatch) {
+  return (data.subtitles ?? [])
+    .filter((subtitle) => subtitle.url && subtitle.lang && !subtitle.lang.toLowerCase().includes("thumbnail"))
+    .map((subtitle, index) => ({
+      id: `sub-${index}`,
+      label: subtitle.lang!,
+      language: subtitle.lang!.slice(0, 2).toLowerCase(),
+      url: subtitle.url!,
+    }));
+}
+
+function buildAnimeV2Sources(data: HiAnimeWatch): StreamSource[] {
+  const subtitles = buildAnimeV2SubtitleTracks(data);
+  return (data.sources ?? []).map((source, index) => ({
+    id: `h-${index}`,
+    label: source.quality ?? "Auto",
+    provider: "HiAnime",
+    kind: source.isM3U8 ? "hls" : "direct",
+    url: source.url,
+    quality: source.quality,
+    subtitles,
+  }));
+}
+
+function formatAnimeV2EpisodeBaseTitle(animeTitle: string, episode: HiAnimeEpisode): string {
+  const cleanAnimeTitle = animeTitle.trim() || "Anime";
+  const cleanEpisodeTitle = (episode.title ?? "").trim();
+  return cleanEpisodeTitle
+    ? `${cleanAnimeTitle} - Episode ${episode.number} - ${cleanEpisodeTitle}`
+    : `${cleanAnimeTitle} - Episode ${episode.number}`;
+}
 
 // ─── API factory (same endpoints as anime.py) ─────────────────────────────────
 function makeApi(base: string) {
@@ -252,6 +286,12 @@ export default function AnimePageV2() {
   const [watchLoading, setWatchLoading] = useState(false);
   const [watchErr, setWatchErr] = useState<string | null>(null);
   const [watchData, setWatchData] = useState<HiAnimeWatch | null>(null);
+  const [downloadBusy, setDownloadBusy] = useState(false);
+  const [downloadErr, setDownloadErr] = useState<string | null>(null);
+  const [downloadDialogOpen, setDownloadDialogOpen] = useState(false);
+  const [downloadEngine, setDownloadEngine] = useState<DownloadEngine>("standard");
+  const [downloadQuality, setDownloadQuality] = useState("");
+  const [downloadOptions, setDownloadOptions] = useState<Array<{ id: string; label: string; url: string; headers?: Record<string, string>; forceHls: boolean }>>([]);
 
   const [player, setPlayer] = useState<{
     title: string; subtitle?: string; poster?: string; sources: StreamSource[];
@@ -280,6 +320,21 @@ export default function AnimePageV2() {
     api().ping().then(setConsumetOk);
   }, [api]);
 
+  useEffect(() => {
+    let active = true;
+    backendJson<Record<string, unknown>>(`${BACKEND_API}/settings`)
+      .then((data) => {
+        if (!active) return;
+        if (data.default_download_engine === "aria2" || data.default_download_engine === "standard") {
+          setDownloadEngine(data.default_download_engine);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const doSearch = useCallback(async (q: string) => {
     const t = q.trim(); if (!t) return;
     setSearching(true); setSearchErr(null); setHasSearched(true);
@@ -305,7 +360,7 @@ export default function AnimePageV2() {
   }, [api]);
 
   const selectEpisode = useCallback(async (ep: HiAnimeEpisode, cat = category, srv = server) => {
-    setSelectedEp(ep); setWatchData(null); setWatchErr(null); setWatchLoading(true);
+    setSelectedEp(ep); setWatchData(null); setWatchErr(null); setDownloadErr(null); setDownloadDialogOpen(false); setWatchLoading(true);
     try { setWatchData(await api().watch(ep.id, srv, cat)); }
     catch (e) { setWatchErr(e instanceof Error ? e.message : "Failed to get stream."); }
     finally { setWatchLoading(false); }
@@ -319,32 +374,8 @@ export default function AnimePageV2() {
     const poster = animeInfo?.anime?.info?.poster ?? selectedAnime?.image;
     const episodes = animeInfo?.episodes ?? [];
 
-    // Build subtitle tracks from a given episode's data.
-    // Filters out thumbnail sprite tracks and any tracks without a URL or language.
-    const buildSubs = (d: HiAnimeWatch) =>
-      (d.subtitles ?? [])
-        .filter(s => s.url && s.lang && !s.lang.toLowerCase().includes("thumbnail"))
-        .map((s, i) => ({
-          id: `sub-${i}`,
-          label: s.lang!,
-          language: s.lang!.slice(0, 2).toLowerCase(),
-          url: s.url!,
-        }));
-
-    // Build StreamSource array using THIS episode's subtitle data (not a closure).
-    const buildSources = (d: HiAnimeWatch): StreamSource[] =>
-      (d.sources ?? []).map((s, i) => ({
-        id: `h-${i}`,
-        label: s.quality ?? "Auto",
-        provider: "HiAnime",
-        kind: s.isM3U8 ? "hls" : "direct",
-        url: s.url,
-        quality: s.quality,
-        subtitles: buildSubs(d),
-      }));
-
     setPlayer({
-      title, poster, sources: buildSources(data),
+      title, poster, sources: buildAnimeV2Sources(data),
       subtitle: `${category === "sub" ? "SUB" : "DUB"} · Ep ${ep.number}${ep.title ? ` · ${ep.title}` : ""}`,
       currentEpisode: ep.number,
       episodeOptions: episodes.map(e => e.number),
@@ -352,12 +383,75 @@ export default function AnimePageV2() {
         const target = episodes.find(e => e.number === n);
         if (!target) throw new Error("Episode not found");
         const nd = await api().watch(target.id, server, category);
-        // Use nd's own subtitles — buildSources(nd) reads nd.subtitles directly
-        return { sources: buildSources(nd), subtitle: `${category === "sub" ? "SUB" : "DUB"} · Ep ${n}` };
+        return { sources: buildAnimeV2Sources(nd), subtitle: `${category === "sub" ? "SUB" : "DUB"} · Ep ${n}` };
       },
     });
     setScreen("player");
   }, [animeInfo, selectedAnime, category, server, api]);
+
+  const downloadEpisodeBundle = useCallback(async (episode: HiAnimeEpisode, data: HiAnimeWatch) => {
+    const animeTitle = animeInfo?.anime?.info?.name ?? selectedAnime?.title ?? "Anime";
+    const poster = animeInfo?.anime?.info?.poster ?? selectedAnime?.image ?? "";
+    const baseTitle = formatAnimeV2EpisodeBaseTitle(animeTitle, episode);
+    const subtitleTrack = buildAnimeV2SubtitleTracks(data)[0];
+    if (!subtitleTrack?.url) {
+      throw new Error("No subtitle track is available for this episode.");
+    }
+
+    const sources = buildAnimeV2Sources(data);
+    if (sources.length === 0) {
+      throw new Error("No stream source is available for this episode.");
+    }
+
+    const selectedOption = downloadOptions.find((option) => option.id === downloadQuality);
+    const sourceUrl = selectedOption?.url || "";
+    const sourceHeaders = selectedOption?.headers;
+    const forceHls = Boolean(selectedOption?.forceHls);
+    if (!sourceUrl) {
+      throw new Error("Choose a quality before downloading.");
+    }
+
+    const audioLabel = category === "dub" ? "Dub" : "Sub";
+    await queueVideoDownload({
+      url: sourceUrl,
+      title: `${baseTitle} [${audioLabel}]`,
+      thumbnail: poster,
+      headers: sourceHeaders,
+      forceHls,
+      category: "Anime",
+      tags: ["Anime", audioLabel, `Episode ${episode.number}`],
+      downloadEngine,
+    });
+    await queueSubtitleDownload({
+      url: subtitleTrack.url,
+      title: `${baseTitle} [Subtitles]`,
+      category: "Anime",
+      tags: ["Anime", "Subtitle", `Episode ${episode.number}`],
+    });
+  }, [animeInfo, selectedAnime, category, downloadEngine, downloadOptions, downloadQuality]);
+
+  const openDownloadDialog = useCallback(async (_episode: HiAnimeEpisode, data: HiAnimeWatch) => {
+    setDownloadErr(null);
+    const sources = buildAnimeV2Sources(data);
+    if (sources.length === 0) {
+      setDownloadErr("No stream source is available for this episode.");
+      return;
+    }
+    const options = await resolveSourceDownloadOptions(sources);
+    if (options.length === 0) {
+      setDownloadErr("No downloadable quality is available for this episode.");
+      return;
+    }
+    setDownloadOptions(options.map((option) => ({
+      id: option.id,
+      label: option.label,
+      url: option.url,
+      headers: option.headers,
+      forceHls: option.forceHls,
+    })));
+    setDownloadQuality(options[0]?.id || "");
+    setDownloadDialogOpen(true);
+  }, []);
 
   const applySettings = (url: string) => {
     saveUrl(url); setConsumetUrl(url.trim().replace(/\/$/, "") || "http://127.0.0.1:3000");
@@ -490,12 +584,28 @@ export default function AnimePageV2() {
                 </div>
 
                 {(watchData.sources?.length ?? 0) > 0 && (
-                  <button onClick={() => openPlayer(watchData, selectedEp)} style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--accent)", color: "white", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer", marginBottom: 20, transition: "background 0.15s" }}
-                    onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = "var(--accent-hover)"; }}
-                    onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = "var(--accent)"; }}>
-                    <IconPlay size={16} /> Play in GRABIX Player
-                  </button>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const, marginBottom: 20 }}>
+                    <button onClick={() => openPlayer(watchData, selectedEp)} style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--accent)", color: "white", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer", transition: "background 0.15s" }}
+                      onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = "var(--accent-hover)"; }}
+                      onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = "var(--accent)"; }}>
+                      <IconPlay size={16} /> Play in GRABIX Player
+                    </button>
+                    <button
+                      onClick={async () => {
+                        try {
+                          await openDownloadDialog(selectedEp, watchData);
+                        } catch (error) {
+                          setDownloadErr(error instanceof Error ? error.message : "Download could not be queued.");
+                        }
+                      }}
+                      style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--bg-surface2)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}
+                    >
+                      <IconDownload size={16} /> Download Episode + Subs
+                    </button>
+                  </div>
                 )}
+
+                {downloadErr && <ErrBox msg={downloadErr} onX={() => setDownloadErr(null)} />}
 
                 {(watchData.sources?.length ?? 0) > 0 ? (<>
                   <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 10, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>Stream Links ({watchData.sources!.length})</div>
@@ -512,6 +622,65 @@ export default function AnimePageV2() {
             </div>
           </div>
         </div>
+        <DownloadOptionsModal
+          visible={downloadDialogOpen}
+          title={selectedEp ? formatAnimeV2EpisodeBaseTitle(info?.name ?? selectedAnime.title, selectedEp) : (info?.name ?? selectedAnime.title)}
+          poster={info?.poster || selectedAnime.image}
+          languageOptions={[
+            { id: category, label: category === "dub" ? "Dub" : "Sub", help: "Uses the episode audio selected above." },
+          ]}
+          selectedLanguage={category}
+          onSelectLanguage={() => undefined}
+          qualityOptions={downloadOptions.map((option) => ({ id: option.id, label: option.label }))}
+          selectedQuality={downloadQuality}
+          onSelectQuality={setDownloadQuality}
+          loading={downloadBusy}
+          error={downloadErr || ""}
+          extraContent={
+            <div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>Download engine</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {([
+                  { id: "standard", label: "Standard", help: "Best compatibility" },
+                  { id: "aria2", label: "aria2", help: "Faster when supported" },
+                ] as const).map((option) => (
+                  <button
+                    key={option.id}
+                    className={`quality-chip${downloadEngine === option.id ? " active" : ""}`}
+                    onClick={() => setDownloadEngine(option.id)}
+                    type="button"
+                    title={option.help}
+                  >
+                    <span>{option.label}</span>
+                    <span style={{ display: "block", fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>{option.help}</span>
+                  </button>
+                ))}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 10 }}>
+                Subtitle download is automatic for Anime V2 episodes.
+              </div>
+            </div>
+          }
+          onClose={() => {
+            if (!downloadBusy) setDownloadDialogOpen(false);
+          }}
+          onConfirm={() => {
+            if (!selectedEp || !watchData) return;
+            setDownloadBusy(true);
+            setDownloadErr(null);
+            void downloadEpisodeBundle(selectedEp, watchData)
+              .then(() => {
+                setDownloadDialogOpen(false);
+              })
+              .catch((error) => {
+                setDownloadErr(error instanceof Error ? error.message : "Download could not be queued.");
+              })
+              .finally(() => {
+                setDownloadBusy(false);
+              });
+          }}
+          confirmLabel="Queue Download + Subs"
+        />
       </>
     );
   }

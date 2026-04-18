@@ -52,6 +52,7 @@ DEFAULT_APPROVED_MEDIA_HOSTS = (
     "net22lab",
     "rabbitstream",
     "dokicloud",
+    "mgstatics.xyz",      # Anime subtitles / auxiliary stream assets
     # Anime image CDNs — required for posters to load
     "flawlessfiles",       # HiAnime primary poster CDN
     "noitatnemucod",       # HiAnime secondary CDN
