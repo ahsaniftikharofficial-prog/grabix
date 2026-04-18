@@ -4449,12 +4449,11 @@ def _retry_progress_mode(item: dict | None) -> str:
 
 
 def _should_force_sync_safe_hls(params: dict | None) -> bool:
-    payload = params or {}
-    category = str(payload.get("category") or "").strip().lower()
-    tags_csv = str(payload.get("tags_csv") or "").strip().lower()
-    if category == "anime":
-        return True
-    return "anime" in {token.strip() for token in tags_csv.split(",") if token.strip()}
+    # Anime no longer needs forced fallback — both download paths now use
+    # proper timestamp preservation (+igndts instead of +genpts) plus a
+    # dedicated audio-resync pass (aresample=async=1).  Forcing anime through
+    # the single-connection fallback was unnecessary and slower.
+    return False
 
 
 def _download_hls_media(
@@ -4809,25 +4808,29 @@ def _download_hls_media(
                 _f.write(f"file '{_safe}'\n")
 
         output_part = f"{final_path}.part.mkv"
+        _pass1_part = f"{final_path}.pass1.mkv"
         _cf = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
+        # ── PASS 1: Concat segments, preserve original timestamps ─────────────
+        # CRITICAL: do NOT use +genpts here.  +genpts regenerates PTS/DTS for
+        # audio and video independently, which is the root cause of A/V desync
+        # on anime HLS streams.  +igndts ignores bad decode timestamps without
+        # touching presentation timestamps, so the original per-segment sync is
+        # kept intact.  -copyts passes those timestamps through unchanged.
+        # -max_interleave_delta 0 prevents the muxer from stalling when audio/
+        # video timestamps diverge slightly across segment boundaries.
         _merge_proc = subprocess.run(
             [
                 FFMPEG_PATH, "-y",
-                # +genpts  — recompute presentation timestamps so FFmpeg does not
-                #            choke on timestamp gaps or drift between segments.
-                # +discardcorrupt — skip bad packets instead of aborting the mux;
-                #            handles minor codec-config mismatches and HLS
-                #            discontinuities that are common on anime CDNs.
-                "-fflags", "+genpts+discardcorrupt",
+                "-fflags", "+igndts",
                 "-f", "concat", "-safe", "0",
                 "-i", str(concat_list),
                 "-c", "copy",
+                "-copyts",
                 "-avoid_negative_ts", "make_zero",
-                # Disable interleave-buffer limit so audio/video timestamp
-                # divergence across segments does not stall or error the muxer.
                 "-max_interleave_delta", "0",
                 "-f", "matroska",
-                output_part,
+                _pass1_part,
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -4835,7 +4838,35 @@ def _download_hls_media(
         )
         if _merge_proc.returncode != 0:
             _err = (_merge_proc.stderr or b"").decode("utf-8", errors="replace")[-600:]
-            raise RuntimeError(f"FFmpeg concat failed: {_err}")
+            Path(_pass1_part).unlink(missing_ok=True)
+            raise RuntimeError(f"FFmpeg concat (pass 1) failed: {_err}")
+
+        # ── PASS 2: Audio resync to video timeline ────────────────────────────
+        # aresample=async=1 mathematically stretches/compresses audio samples
+        # to stay locked to the video timeline for the entire episode.
+        # -c:v copy means video is never re-encoded — zero quality loss, fast.
+        # Audio is re-encoded to AAC @ 192k (the source is already lossy AAC,
+        # so this is transparent).  first_pts=0 anchors audio at t=0.
+        _sync_proc = subprocess.run(
+            [
+                FFMPEG_PATH, "-y",
+                "-i", _pass1_part,
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-af", "aresample=async=1:min_hard_comp=0.100000:first_pts=0",
+                "-avoid_negative_ts", "make_zero",
+                "-f", "matroska",
+                output_part,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            creationflags=_cf,
+        )
+        Path(_pass1_part).unlink(missing_ok=True)
+        if _sync_proc.returncode != 0:
+            _err = (_sync_proc.stderr or b"").decode("utf-8", errors="replace")[-600:]
+            raise RuntimeError(f"FFmpeg audio resync (pass 2) failed: {_err}")
 
         # ── Post-merge size sanity check ──────────────────────────────────────
         # FFmpeg concat can silently produce a tiny corrupt file (e.g. 6-7 MB
@@ -4884,9 +4915,10 @@ def _download_hls_media(
 
     except Exception as _parallel_exc:
         if controls["cancel"].is_set():
-            # User cancelled — clean up and stop
+            # User cancelled — clean up segments and any pass1 temp file
             if seg_dir is not None:
                 shutil.rmtree(seg_dir, ignore_errors=True)
+            Path(f"{final_path}.pass1.mkv").unlink(missing_ok=True)
             raise
         # _ForceFallback means the parallel path fully ran but produced a
         # corrupt output (fMP4 segments disguised as .ts).  Skip the resume
@@ -4938,9 +4970,16 @@ def _download_hls_media(
         "-http_persistent", "1",
         "-multiple_requests", "1",
         "-stats_period", "1",
-        "-fflags", "+genpts",
+        # +igndts — ignore bad decode timestamps without regenerating PTS.
+        # +genpts was the old flag here and is the root cause of A/V desync:
+        # it regenerated audio and video timestamps independently, drifting them
+        # apart.  aresample=async=1 locks audio to the video timeline inline.
+        "-fflags", "+igndts",
         "-i", url,
-        "-c", "copy",
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-af", "aresample=async=1:min_hard_comp=0.100000:first_pts=0",
         "-avoid_negative_ts", "make_zero",
         "-f", "matroska",
         output_path,
