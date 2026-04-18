@@ -3,6 +3,13 @@ from pathlib import Path
 
 
 class HlsSyncRegressionTests(unittest.TestCase):
+    def test_anime_downloads_force_sync_safe_hls_pipeline(self):
+        backend_main = Path(__file__).resolve().parents[1] / "main.py"
+        source = backend_main.read_text(encoding="utf-8")
+        self.assertIn("def _should_force_sync_safe_hls(", source)
+        self.assertIn('if category == "anime":', source)
+        self.assertIn('raise _ForceFallback("Anime downloads use the sync-safe HLS pipeline to keep audio and video aligned.")', source)
+
     def test_hls_eta_estimation_uses_bytes_not_segment_count(self):
         backend_main = Path(__file__).resolve().parents[1] / "main.py"
         source = backend_main.read_text(encoding="utf-8")

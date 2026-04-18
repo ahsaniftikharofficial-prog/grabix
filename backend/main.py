@@ -4448,6 +4448,15 @@ def _retry_progress_mode(item: dict | None) -> str:
     return str(payload.get("progress_mode") or "activity")
 
 
+def _should_force_sync_safe_hls(params: dict | None) -> bool:
+    payload = params or {}
+    category = str(payload.get("category") or "").strip().lower()
+    tags_csv = str(payload.get("tags_csv") or "").strip().lower()
+    if category == "anime":
+        return True
+    return "anime" in {token.strip() for token in tags_csv.split(",") if token.strip()}
+
+
 def _download_hls_media(
     dl_id: str,
     url: str,
@@ -4557,6 +4566,8 @@ def _download_hls_media(
     # ════════════════════════════════════════════════════════════════════════
     seg_dir: Path | None = None
     try:
+        if _should_force_sync_safe_hls(downloads[dl_id].get("params")):
+            raise _ForceFallback("Anime downloads use the sync-safe HLS pipeline to keep audio and video aligned.")
         downloads[dl_id].update({
             "file_path": final_path,
             "stage_label": "Fetching playlist...",
@@ -4900,8 +4911,13 @@ def _download_hls_media(
     # FALLBACK — original single-connection FFmpeg HLS download
     # Used when the parallel approach cannot parse/fetch the playlist.
     # ════════════════════════════════════════════════════════════════════════
+    fallback_stage_label = (
+        "Downloading via FFmpeg (sync-safe anime stream)..."
+        if "sync-safe HLS pipeline" in str(_parallel_err)
+        else "Downloading via FFmpeg (fMP4/encrypted stream)..."
+    )
     downloads[dl_id].update({
-        "stage_label": "Downloading via FFmpeg (fMP4/encrypted stream)...",
+        "stage_label": fallback_stage_label,
         "progress_mode": "activity",
         "downloaded": "", "total": "", "size": "", "speed": "", "eta": "",
     })

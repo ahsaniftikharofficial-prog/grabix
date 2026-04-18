@@ -1,6 +1,22 @@
 import { useEffect, useState, type CSSProperties, type ImgHTMLAttributes, type ReactEventHandler } from "react";
 import { cacheMediaFromUrl, getCachedMediaObjectUrl } from "../lib/mediaCache";
 
+const warmedImageSources = new Set<string>();
+const WARMED_IMAGE_SOURCES_MAX = 4000;
+
+function markImageSourceWarmed(src: string) {
+  if (!src) return;
+  if (warmedImageSources.has(src)) {
+    warmedImageSources.delete(src);
+  }
+  warmedImageSources.add(src);
+  while (warmedImageSources.size > WARMED_IMAGE_SOURCES_MAX) {
+    const oldest = warmedImageSources.keys().next().value as string | undefined;
+    if (!oldest) break;
+    warmedImageSources.delete(oldest);
+  }
+}
+
 interface CachedImageProps {
   src: string;
   alt: string;
@@ -46,13 +62,6 @@ export default function CachedImage({
           setResolvedSrc(cachedUrl);
           return;
         }
-        const storedUrl = await cacheMediaFromUrl(src);
-        if (cancelled) {
-          if (storedUrl.startsWith("blob:")) URL.revokeObjectURL(storedUrl);
-          return;
-        }
-        objectUrlToRevoke = storedUrl.startsWith("blob:") ? storedUrl : "";
-        setResolvedSrc(storedUrl);
       } catch {
         if (!cancelled) {
           setResolvedSrc(src);
@@ -79,7 +88,15 @@ export default function CachedImage({
       loading={loading}
       decoding={decoding}
       referrerPolicy={referrerPolicy}
-      onLoad={onLoad}
+      onLoad={(event) => {
+        if (src && resolvedSrc === src && !warmedImageSources.has(src)) {
+          markImageSourceWarmed(src);
+          void cacheMediaFromUrl(src).catch(() => {
+            warmedImageSources.delete(src);
+          });
+        }
+        onLoad?.(event);
+      }}
       onError={(event) => {
         if (fallbackSrc && (event.target as HTMLImageElement).src !== fallbackSrc) {
           (event.target as HTMLImageElement).src = fallbackSrc;
