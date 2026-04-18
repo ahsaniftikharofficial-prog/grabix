@@ -156,7 +156,7 @@ function toOfflineMangaLibItem(row: OfflineMangaRecord): LibItem {
   };
 }
 
-function inferDisplayLayout(item: LibItem, serverValue = item.display_layout): LibItem["display_layout"] {
+function inferDisplayLayout(item: LibItem, serverValue: string = item.display_layout): LibItem["display_layout"] {
   if (serverValue && (["poster", "landscape", "square"] as string[]).includes(serverValue)) {
     return serverValue as LibItem["display_layout"];
   }

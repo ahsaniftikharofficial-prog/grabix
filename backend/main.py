@@ -4401,6 +4401,15 @@ def _trim_downloaded_media(
             process.stderr.close()
 
 
+class _ForceFallback(Exception):
+    """
+    Raised inside _download_hls_media's parallel path when we want to skip
+    directly to the single-connection FFmpeg fallback regardless of how many
+    segments were already downloaded.  Used by the post-merge size sanity check
+    so a corrupt (fMP4-misidentified) merge doesn't get retried as a resume.
+    """
+
+
 def _download_hls_media(
     dl_id: str,
     url: str,
@@ -4559,6 +4568,21 @@ def _download_hls_media(
 
         if not segment_urls:
             raise ValueError("No segments found in playlist")
+
+        # Additional fMP4/CMAF detection: some CDNs omit #EXT-X-MAP from the
+        # playlist but still serve fMP4 segments (.m4s / .mp4 / .fmp4).
+        # The concat demuxer cannot mux these without the init segment —
+        # result is a black-screen file that is a tiny fraction of the real
+        # size (e.g. 6-7 MB for a 300-400 MB episode).
+        # Detect by inspecting the first segment URL's extension (strip query
+        # string first so ?token=... doesn't confuse the check).
+        _first_seg_ext = segment_urls[0].split("?")[0].lower().rsplit(".", 1)[-1]
+        if _first_seg_ext in ("m4s", "fmp4", "mp4", "cmaf"):
+            raise ValueError(
+                f"Stream segments use fMP4/CMAF format (.{_first_seg_ext}) without "
+                f"#EXT-X-MAP tag — parallel concat cannot mux these without the init "
+                f"segment. Falling back to single-connection FFmpeg."
+            )
 
         total_segs = len(segment_urls)
 
@@ -4722,6 +4746,34 @@ def _download_hls_media(
             _err = (_merge_proc.stderr or b"").decode("utf-8", errors="replace")[-600:]
             raise RuntimeError(f"FFmpeg concat failed: {_err}")
 
+        # ── Post-merge size sanity check ──────────────────────────────────────
+        # FFmpeg concat can silently produce a tiny corrupt file (e.g. 6-7 MB
+        # for a 300-400 MB episode) when it receives fMP4/CMAF segments that
+        # weren't detected by the #EXT-X-MAP or extension checks above (e.g.
+        # segments with .ts extension but fMP4 content inside).
+        # If the output is less than 40% of the raw segment bytes we downloaded,
+        # something went very wrong — delete the corrupt output and raise
+        # _ForceFallback so the exception handler skips the resume path and
+        # goes straight to single-connection FFmpeg instead.
+        _output_part_path = Path(output_part)
+        _merge_output_size = _output_part_path.stat().st_size if _output_part_path.exists() else 0
+        _raw_seg_bytes = _total_bytes[0]
+        if _raw_seg_bytes > 5_000_000 and _merge_output_size < _raw_seg_bytes * 0.4:
+            _output_part_path.unlink(missing_ok=True)
+            # Clean up the segment directory now — single-connection FFmpeg
+            # will re-download the stream from scratch (no resume possible).
+            if seg_dir is not None:
+                shutil.rmtree(seg_dir, ignore_errors=True)
+                seg_dir = None
+            raise _ForceFallback(
+                f"FFmpeg concat output is suspiciously small "
+                f"({_format_bytes(_merge_output_size)} vs "
+                f"{_format_bytes(_raw_seg_bytes)} of segments downloaded) — "
+                f"stream likely uses fMP4/CMAF segments disguised as .ts. "
+                f"Falling back to single-connection FFmpeg."
+            )
+        # ─────────────────────────────────────────────────────────────────────
+
         if Path(final_path).exists():
             Path(final_path).unlink()
         Path(output_part).replace(final_path)
@@ -4745,18 +4797,23 @@ def _download_hls_media(
             if seg_dir is not None:
                 shutil.rmtree(seg_dir, ignore_errors=True)
             raise
-        # If segments were already partially downloaded, re-raise so the outer
-        # _download_task retry loop calls us again — the resume logic will skip
-        # already-downloaded segments and pick up where it left off.
-        # Only fall through to single-connection FFmpeg when nothing was
-        # downloaded yet (playlist parse failed, CDN unreachable, etc.).
-        try:
-            _has_partial = _completed[0] > 0
-        except NameError:
-            _has_partial = False
-        if _has_partial:
-            raise
-        # No progress at all — fall back to single-connection FFmpeg approach.
+        # _ForceFallback means the parallel path fully ran but produced a
+        # corrupt output (fMP4 segments disguised as .ts).  Skip the resume
+        # check entirely — the corrupt output and segment dir were already
+        # cleaned up inside the post-merge sanity-check block above.
+        if not isinstance(_parallel_exc, _ForceFallback):
+            # If segments were already partially downloaded, re-raise so the
+            # outer _download_task retry loop calls us again — the resume logic
+            # will skip already-downloaded segments and pick up where it left off.
+            # Only fall through to single-connection FFmpeg when nothing was
+            # downloaded yet (playlist parse failed, CDN unreachable, etc.).
+            try:
+                _has_partial = _completed[0] > 0
+            except NameError:
+                _has_partial = False
+            if _has_partial:
+                raise
+        # No progress at all (or forced fallback) — fall back to single-connection FFmpeg.
         _parallel_err = str(_parallel_exc)
 
     # ════════════════════════════════════════════════════════════════════════
