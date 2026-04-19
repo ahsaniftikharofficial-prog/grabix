@@ -31,6 +31,7 @@ const DownloaderPage = lazy(() => import("./pages/DownloaderPage"));
 const ConverterPage = lazy(() => import("./pages/ConverterPage"));
 const LibraryPage = lazy(() => import("./pages/LibraryPage"));
 const AnimePage = lazy(() => import("./pages/AnimePage"));
+const AnimePageV2 = lazy(() => import("./pages/AnimePageV2"));
 
 const MangaPage = lazy(() => import("./pages/MangaPage"));
 const ExplorePage = lazy(() => import("./pages/ExplorePage"));
@@ -220,6 +221,7 @@ function Inner() {
     converter:  <ErrorBoundary section="Converter"><ConverterPage /></ErrorBoundary>,
     library:    <ErrorBoundary section="Library"><LibraryPage /></ErrorBoundary>,
     anime:      <ErrorBoundary section="Anime"><AnimePage /></ErrorBoundary>,
+    animev2:    <ErrorBoundary section="Anime V2"><AnimePageV2 /></ErrorBoundary>,
 
     manga:      <ErrorBoundary section="Manga"><MangaPage /></ErrorBoundary>,
     explore:    <ErrorBoundary section="Explore"><ExplorePage /></ErrorBoundary>,
@@ -269,9 +271,21 @@ function Inner() {
       >
         <RuntimeHealthProvider value={{ health: runtimeHealth, runtimeState, refreshHealth: refreshRuntimeHealth }}>
           <Suspense fallback={<PageLoadingState page={page} />}>
-            <div key={`${page}:${pageRevision}`} style={{ display: "flex", flexDirection: "column", flex: 1, width: "100%", minWidth: 0, minHeight: 0 }}>
-              {pages[page]}
-            </div>
+            {(Object.keys(pages) as Page[]).map((p) => (
+              <div
+                key={p}
+                style={{
+                  display: page === p ? "flex" : "none",
+                  flexDirection: "column",
+                  flex: 1,
+                  width: "100%",
+                  minWidth: 0,
+                  minHeight: 0,
+                }}
+              >
+                {pages[p]}
+              </div>
+            ))}
           </Suspense>
         </RuntimeHealthProvider>
       </main>
