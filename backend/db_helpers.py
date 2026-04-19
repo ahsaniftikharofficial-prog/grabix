@@ -384,3 +384,107 @@ def has_ffmpeg() -> bool:
 
 def has_aria2() -> bool:
     return shutil.which("aria2c") is not None or _managed_binary_exists("aria2", ["aria2c.exe", "aria2c"])
+
+
+# ── Database initialisation ───────────────────────────────────────────────────
+
+def init_db() -> None:
+    """Create all required tables if they don't exist."""
+    try:
+        con = get_db_connection()
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS schema_version (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS history (
+                id TEXT PRIMARY KEY,
+                url TEXT,
+                title TEXT,
+                thumbnail TEXT,
+                channel TEXT,
+                duration INTEGER,
+                dl_type TEXT,
+                file_path TEXT,
+                status TEXT,
+                created_at TEXT
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS download_jobs (
+                id TEXT PRIMARY KEY,
+                url TEXT,
+                title TEXT,
+                thumbnail TEXT,
+                dl_type TEXT,
+                status TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                file_path TEXT,
+                partial_file_path TEXT,
+                error TEXT,
+                percent REAL DEFAULT 0,
+                speed TEXT DEFAULT '',
+                eta TEXT DEFAULT '',
+                downloaded TEXT DEFAULT '',
+                total TEXT DEFAULT '',
+                size TEXT DEFAULT '',
+                can_pause INTEGER DEFAULT 0,
+                retry_count INTEGER DEFAULT 0,
+                failure_code TEXT DEFAULT '',
+                recoverable INTEGER DEFAULT 0,
+                download_strategy TEXT DEFAULT '',
+                params_json TEXT DEFAULT '{}'
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS provider_status (
+                provider TEXT PRIMARY KEY,
+                available INTEGER DEFAULT 0,
+                last_checked_at TEXT,
+                last_error TEXT DEFAULT '',
+                consecutive_failures INTEGER DEFAULT 0
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS content_cache (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                content_type TEXT DEFAULT 'generic',
+                expires_at REAL NOT NULL,
+                created_at REAL NOT NULL,
+                last_accessed REAL NOT NULL
+            )
+        """)
+        con.execute("CREATE INDEX IF NOT EXISTS idx_content_cache_expires ON content_cache(expires_at)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_content_cache_accessed ON content_cache(last_accessed)")
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS health_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                service TEXT NOT NULL,
+                status TEXT NOT NULL,
+                latency_ms REAL DEFAULT NULL,
+                error TEXT DEFAULT '',
+                recorded_at REAL NOT NULL
+            )
+        """)
+        con.execute("CREATE INDEX IF NOT EXISTS idx_health_log_service ON health_log(service)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_health_log_recorded ON health_log(recorded_at)")
+        con.execute(
+            """
+            INSERT INTO schema_version (id, version, updated_at)
+            VALUES (1, 1, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                version = CASE WHEN schema_version.version < excluded.version THEN excluded.version ELSE schema_version.version END,
+                updated_at = CASE WHEN schema_version.version < excluded.version THEN excluded.updated_at ELSE schema_version.updated_at END
+            """,
+            (datetime.now().isoformat(),),
+        )
+        con.commit()
+        con.close()
+        log_event(backend_logger, logging.INFO, event="db_init", message="Database initialized successfully.")
+    except Exception as e:
+        log_event(backend_logger, logging.ERROR, event="db_init_failed", message="Database initialization failed.", details={"error": str(e)})

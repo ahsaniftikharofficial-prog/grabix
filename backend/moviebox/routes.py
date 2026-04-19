@@ -31,6 +31,42 @@ from fastapi.responses import StreamingResponse
 from app.services.logging_utils import get_logger, log_event
 from db_helpers import get_db_connection
 
+# ── Constants and lazy shims for things that live in main.py ─────────────────
+# SELF_BASE_URL: imported directly from runtime_config (no circular risk)
+from app.services.runtime_config import public_base_url as _public_base_url
+SELF_BASE_URL = _public_base_url()
+
+# _CACHE_TTL: mirrored here so moviebox doesn't import main at module level
+_CACHE_TTL: dict = {
+    "discover":       6 * 3600,
+    "details":        6 * 3600,
+    "manga_chapters": 12 * 3600,
+    "search":         30 * 60,
+    "generic":        15 * 60,
+    "moviebox":       60 * 15,
+}
+
+# ── Lazy shims for functions that live in main.py ─────────────────────────────
+# We cannot import main at module level (circular: main imports moviebox).
+# These thin wrappers do a deferred import at first call instead.
+
+def _sqlite_cache_get(key: str):
+    import main as _m
+    return _m._sqlite_cache_get(key)
+
+def _sqlite_cache_set(key: str, value, content_type: str = "generic"):
+    import main as _m
+    return _m._sqlite_cache_set(key, value, content_type)
+
+def _cache_trigger_bg_refresh(key: str, refresh_coro_factory):
+    import main as _m
+    return _m._cache_trigger_bg_refresh(key, refresh_coro_factory)
+
+def _validate_outbound_url(url: str, **kwargs):
+    import main as _m
+    return _m._validate_outbound_url(url, **kwargs)
+
+
 router = APIRouter()
 backend_logger = get_logger("backend")
 

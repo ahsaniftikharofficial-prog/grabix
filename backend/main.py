@@ -27,7 +27,20 @@ from app.routes.subtitles import router as subtitles_router
 from moviebox import router as moviebox_router, start_bg_retry as _moviebox_start_bg_retry, restore_from_last_session as _moviebox_restore_from_last_session
 from anime import router as anime_router
 from downloads import router as downloads_engine_router, register_handlers as _register_download_handlers
-from downloads.engine import ensure_runtime_bootstrap, recover_download_jobs
+from downloads.engine import (
+    ensure_runtime_bootstrap,
+    recover_download_jobs,
+    _service_payload,
+    _downloads_health,
+    _database_health,
+    _is_direct_media_url,
+    _is_direct_subtitle_url,
+    _persist_download_record,
+    _start_download_thread,
+    ffmpeg_status,
+    list_downloads,
+    storage_stats,
+)
 from app.services.consumet import (
     get_health_status as get_consumet_health_status,
     is_consumet_configured as is_consumet_sidecar_configured,
@@ -553,106 +566,8 @@ def _normalize_tags_csv(tags_csv: str = "", category: str = "", dl_type: str = "
 
 # ── DB Setup ──────────────────────────────────────────────────────────────────
 
-def init_db():
-    """Create all required tables if they don't exist."""
-    try:
-        con = get_db_connection()
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS schema_version (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                version INTEGER NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        """)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS history (
-                id TEXT PRIMARY KEY,
-                url TEXT,
-                title TEXT,
-                thumbnail TEXT,
-                channel TEXT,
-                duration INTEGER,
-                dl_type TEXT,
-                file_path TEXT,
-                status TEXT,
-                created_at TEXT
-            )
-        """)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS download_jobs (
-                id TEXT PRIMARY KEY,
-                url TEXT,
-                title TEXT,
-                thumbnail TEXT,
-                dl_type TEXT,
-                status TEXT,
-                created_at TEXT,
-                updated_at TEXT,
-                file_path TEXT,
-                partial_file_path TEXT,
-                error TEXT,
-                percent REAL DEFAULT 0,
-                speed TEXT DEFAULT '',
-                eta TEXT DEFAULT '',
-                downloaded TEXT DEFAULT '',
-                total TEXT DEFAULT '',
-                size TEXT DEFAULT '',
-                can_pause INTEGER DEFAULT 0,
-                retry_count INTEGER DEFAULT 0,
-                failure_code TEXT DEFAULT '',
-                recoverable INTEGER DEFAULT 0,
-                download_strategy TEXT DEFAULT '',
-                params_json TEXT DEFAULT '{}'
-            )
-        """)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS provider_status (
-                provider TEXT PRIMARY KEY,
-                available INTEGER DEFAULT 0,
-                last_checked_at TEXT,
-                last_error TEXT DEFAULT '',
-                consecutive_failures INTEGER DEFAULT 0
-            )
-        """)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS content_cache (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                content_type TEXT DEFAULT 'generic',
-                expires_at REAL NOT NULL,
-                created_at REAL NOT NULL,
-                last_accessed REAL NOT NULL
-            )
-        """)
-        con.execute("CREATE INDEX IF NOT EXISTS idx_content_cache_expires ON content_cache(expires_at)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_content_cache_accessed ON content_cache(last_accessed)")
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS health_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                service TEXT NOT NULL,
-                status TEXT NOT NULL,
-                latency_ms REAL DEFAULT NULL,
-                error TEXT DEFAULT '',
-                recorded_at REAL NOT NULL
-            )
-        """)
-        con.execute("CREATE INDEX IF NOT EXISTS idx_health_log_service ON health_log(service)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_health_log_recorded ON health_log(recorded_at)")
-        con.execute(
-            """
-            INSERT INTO schema_version (id, version, updated_at)
-            VALUES (1, 1, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                version = CASE WHEN schema_version.version < excluded.version THEN excluded.version ELSE schema_version.version END,
-                updated_at = CASE WHEN schema_version.version < excluded.version THEN excluded.updated_at ELSE schema_version.updated_at END
-            """,
-            (datetime.now().isoformat(),),
-        )
-        con.commit()
-        con.close()
-        log_event(backend_logger, logging.INFO, event="db_init", message="Database initialized successfully.")
-    except Exception as e:
-        log_event(backend_logger, logging.ERROR, event="db_init_failed", message="Database initialization failed.", details={"error": str(e)})
+# init_db moved to db_helpers.py to avoid circular import with downloads.engine
+from db_helpers import init_db  # noqa: E402  (import after constants)
 
 # Runtime bootstrap happens after module import so packaged startup cannot call
 # helpers before they are defined.
