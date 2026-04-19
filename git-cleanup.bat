@@ -1,18 +1,31 @@
 @echo off
 REM ============================================================
 REM  GRABIX — git-cleanup.bat
-REM  Run this ONCE from your project root to untrack files that
-REM  are already committed but should be ignored.
+REM  Updated for Phase 1 + Phase 2 refactor.
 REM
 REM  Steps:
-REM  1. Replace your .gitignore with the new one first
-REM  2. Then run this script
-REM  3. Then do: git commit -m "chore: remove tracked junk files"
-REM  4. Then push — GitHub will drop the bloat
+REM  1. Run this script from the project root
+REM  2. git add -A
+REM  3. git commit -m "refactor: Phase 1+2 complete"
+REM  4. git push
 REM ============================================================
 
-echo [GRABIX Cleanup] Removing tracked files that should be ignored...
+echo [GRABIX Cleanup] Removing tracked files...
 echo.
+
+REM ─── Phase 1: dead frontend files ────────────────────────
+REM AnimePageV2.tsx — 742-line debug bypass page, removed from routing in App.tsx
+git rm --cached grabix-ui/src/pages/AnimePageV2.tsx 2>nul && echo Removed: AnimePageV2.tsx
+
+REM supabase.ts — cloud auth stub that never ran in this local desktop app
+git rm --cached grabix-ui/src/lib/supabase.ts 2>nul && echo Removed: supabase.ts
+
+REM ─── Phase 2: route_registry.py — DELETED ────────────────
+REM The circular import it worked around is gone:
+REM   downloads.py used to call main.py functions via the registry.
+REM   downloads/engine.py is now a standalone module; downloads.py
+REM   imports from it directly. route_registry.py is no longer needed.
+git rm --cached backend/app/services/route_registry.py 2>nul && echo Removed: route_registry.py
 
 REM ─── Databases ───────────────────────────────────────────
 git rm --cached memory.db 2>nul && echo Removed: memory.db
@@ -44,10 +57,38 @@ git rm -r --cached __pycache__/ 2>nul && echo Removed: __pycache__/
 git rm -r --cached backend/__pycache__/ 2>nul && echo Removed: backend/__pycache__/
 
 echo.
-echo [DONE] Now run these two commands:
-echo   git add .gitignore
-echo   git commit -m "chore: remove tracked junk files and fix gitignore"
-echo   git push
+echo ════════════════════════════════════════════════════════
+echo  PHASE 1 + 2 CHANGES SUMMARY
+echo ════════════════════════════════════════════════════════
 echo.
-echo After pushing, your repo will be clean. Future pushes will stay small.
+echo  DELETED FILES:
+echo    grabix-ui/src/pages/AnimePageV2.tsx          (742-line debug page)
+echo    grabix-ui/src/lib/supabase.ts                (cloud auth in local app)
+echo    backend/app/services/route_registry.py       (circular import hack)
+echo.
+echo  MODIFIED FILES:
+echo    grabix-ui/src/App.tsx                        (2 dead imports removed)
+echo    grabix-ui/src/pages/DownloaderPage.tsx       (1s polling replaced with SSE)
+echo    backend/main.py                              (7935 -> 1804 lines)
+echo    backend/app/routes/downloads.py              (registry -> direct import + SSE)
+echo    backend/app/routes/streaming.py              (registry -> direct import)
+echo.
+echo  NEW FILES:
+echo    backend/core/__init__.py
+echo    backend/core/cache.py                        (unified SQLite cache)
+echo    backend/core/state.py                        (typed DownloadJob dataclass)
+echo    backend/core/utils.py                        (shared format helpers)
+echo    backend/core/circuit_breaker.py              (single CB implementation)
+echo    backend/moviebox/__init__.py
+echo    backend/moviebox/routes.py                   (1287 lines from main.py)
+echo    backend/anime/__init__.py
+echo    backend/anime/resolver.py                    (536 lines from main.py)
+echo    backend/downloads/__init__.py
+echo    backend/downloads/engine.py                  (4609 lines from main.py)
+echo.
+echo  To commit:
+echo    git add -A
+echo    git commit -m "refactor: Phase 1+2 complete — main.py 7935->1804 lines"
+echo    git push
+echo.
 pause

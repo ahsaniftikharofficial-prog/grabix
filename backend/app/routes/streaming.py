@@ -1,31 +1,38 @@
+"""
+app/routes/streaming.py — FastAPI router for streaming endpoints.
+
+Previously used route_registry as a bridge to streaming_helpers.py.
+Now imports directly — no registry needed.
+"""
 from fastapi import APIRouter, Request
 
-from app.services.route_registry import get_route_handler
+from streaming_helpers import resolve_embed, stream_proxy, stream_variants, extract_stream
+import downloads.engine as _dl_engine  # ffmpeg_status lives here after extraction
 
 router = APIRouter()
 
 
 @router.get("/resolve-embed")
-def resolve_embed(url: str):
-    return get_route_handler("streaming", "resolve_embed")(url)
+def resolve_embed_route(url: str):
+    return resolve_embed(url)
 
 
 @router.get("/stream/proxy")
 @router.get("/stream/proxy/{path_hint:path}")
-def stream_proxy(url: str, request: Request, headers_json: str = "", path_hint: str = ""):
-    return get_route_handler("streaming", "stream_proxy")(url, request, headers_json)
+def stream_proxy_route(url: str, request: Request, headers_json: str = "", path_hint: str = ""):
+    return stream_proxy(url, request, headers_json)
 
 
 @router.get("/stream/variants")
-def stream_variants(url: str, headers_json: str = ""):
-    return get_route_handler("streaming", "stream_variants")(url, headers_json)
+def stream_variants_route(url: str, headers_json: str = ""):
+    return stream_variants(url, headers_json)
 
 
 @router.get("/ffmpeg-status")
 def ffmpeg_status():
-    return get_route_handler("streaming", "ffmpeg_status")()
+    return _dl_engine.ffmpeg_status()
 
 
 @router.get("/extract-stream")
-async def extract_stream(url: str):
-    return await get_route_handler("streaming", "extract_stream")(url)
+async def extract_stream_route(url: str):
+    return await extract_stream(url)

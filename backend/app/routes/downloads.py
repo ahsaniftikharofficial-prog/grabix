@@ -1,10 +1,26 @@
+"""
+app/routes/downloads.py — FastAPI router for download endpoints.
+
+Previously used route_registry as an indirection layer to break a circular
+import: main.py -> downloads.py -> main.py.
+
+That circular import is now gone. downloads/engine.py is a standalone module
+that main.py imports (not the other way around). All route handlers are
+imported directly from downloads.engine — no registry needed.
+
+The _safe wrapper is kept because it provides CORS-safe error responses:
+unhandled exceptions that escape before Starlette's CORSMiddleware attaches
+headers cause Chrome to report CORS errors instead of the real 500.
+"""
+import asyncio
+import json
 import logging
 
-from fastapi import APIRouter
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from app.services.route_registry import get_route_handler
+import downloads.engine as _engine
 
 router = APIRouter()
 logger = logging.getLogger("downloads.routes")
@@ -31,25 +47,18 @@ class DownloadRequest(BaseModel):
     download_engine: str = ""
 
 
-def _safe_handler(namespace: str, name: str, fallback=None, *args, **kwargs):
-    """Call a registered route handler, returning a safe fallback on any error.
-
-    Unhandled exceptions from route handlers can escape before Starlette's
-    CORSMiddleware attaches the Access-Control-Allow-Origin header, causing
-    Chrome to report a CORS error instead of the real 500.  Wrapping every
-    handler call here ensures a JSON response is always returned so CORS
-    middleware can annotate it correctly.
-    """
+def _safe(name: str, fallback, *args, **kwargs):
+    """Call a downloads.engine function, returning a safe fallback on error."""
     try:
-        handler = get_route_handler(namespace, name)
-        return handler(*args, **kwargs)
+        fn = getattr(_engine, name)
+        return fn(*args, **kwargs)
     except Exception as exc:
-        logger.error("Route handler %s.%s failed: %s", namespace, name, exc, exc_info=True)
+        logger.error("downloads.engine.%s failed: %s", name, exc, exc_info=True)
         if fallback is not None:
             return fallback
         return JSONResponse(
             status_code=500,
-            content={"error": str(exc), "handler": f"{namespace}.{name}"},
+            content={"error": str(exc), "handler": f"downloads.{name}"},
         )
 
 
@@ -74,103 +83,109 @@ def start_download(
     tags_csv: str = "",
     download_engine: str = "",
 ):
-    return _safe_handler(
-        "downloads", "start_download",
-        None,
-        url=url,
-        title=title,
-        thumbnail=thumbnail,
-        dl_type=dl_type,
-        quality=quality,
-        audio_format=audio_format,
-        audio_quality=audio_quality,
-        subtitle_lang=subtitle_lang,
-        thumbnail_format=thumbnail_format,
-        trim_start=trim_start,
-        trim_end=trim_end,
-        trim_enabled=trim_enabled,
-        use_cpu=use_cpu,
-        headers_json=headers_json,
-        force_hls=force_hls,
-        category=category,
-        tags_csv=tags_csv,
-        download_engine=download_engine,
+    return _safe(
+        "start_download", None,
+        url=url, title=title, thumbnail=thumbnail, dl_type=dl_type,
+        quality=quality, audio_format=audio_format, audio_quality=audio_quality,
+        subtitle_lang=subtitle_lang, thumbnail_format=thumbnail_format,
+        trim_start=trim_start, trim_end=trim_end, trim_enabled=trim_enabled,
+        use_cpu=use_cpu, headers_json=headers_json, force_hls=force_hls,
+        category=category, tags_csv=tags_csv, download_engine=download_engine,
     )
 
 
 @router.post("/download")
 def start_download_post(payload: DownloadRequest):
-    return _safe_handler(
-        "downloads", "start_download",
-        None,
-        url=payload.url,
-        title=payload.title,
-        thumbnail=payload.thumbnail,
-        dl_type=payload.dl_type,
-        quality=payload.quality,
-        audio_format=payload.audio_format,
-        audio_quality=payload.audio_quality,
-        subtitle_lang=payload.subtitle_lang,
-        thumbnail_format=payload.thumbnail_format,
-        trim_start=payload.trim_start,
-        trim_end=payload.trim_end,
-        trim_enabled=payload.trim_enabled,
-        use_cpu=payload.use_cpu,
-        headers_json=payload.headers_json,
-        force_hls=payload.force_hls,
-        category=payload.category,
-        tags_csv=payload.tags_csv,
+    return _safe(
+        "start_download", None,
+        url=payload.url, title=payload.title, thumbnail=payload.thumbnail,
+        dl_type=payload.dl_type, quality=payload.quality,
+        audio_format=payload.audio_format, audio_quality=payload.audio_quality,
+        subtitle_lang=payload.subtitle_lang, thumbnail_format=payload.thumbnail_format,
+        trim_start=payload.trim_start, trim_end=payload.trim_end,
+        trim_enabled=payload.trim_enabled, use_cpu=payload.use_cpu,
+        headers_json=payload.headers_json, force_hls=payload.force_hls,
+        category=payload.category, tags_csv=payload.tags_csv,
         download_engine=payload.download_engine,
     )
 
 
 @router.get("/download-status/{dl_id}")
 def download_status(dl_id: str):
-    return _safe_handler("downloads", "download_status", None, dl_id)
+    return _safe("download_status", None, dl_id)
 
 
 @router.get("/progress/{dl_id}")
 def progress_alias(dl_id: str):
-    return _safe_handler("downloads", "progress_alias", None, dl_id)
+    return _safe("progress_alias", None, dl_id)
 
 
 @router.get("/downloads")
 def list_downloads():
-    # Returns [] on error instead of crashing — prevents CORS-breaking 500 on
-    # startup or if the downloads runtime state hasn't been initialised yet.
-    return _safe_handler("downloads", "list_downloads", [])
+    return _safe("list_downloads", [])
+
+
+@router.get("/downloads/stream")
+async def download_progress_stream(request: Request):
+    """Server-Sent Events — pushes download state changes to the frontend.
+    Replaces the 1-second polling loop in DownloaderPage.tsx.
+    """
+    async def event_generator():
+        last_snapshot: str | None = None
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                items = _engine.list_downloads()
+                snapshot_str = json.dumps(items, default=str, sort_keys=True)
+                if snapshot_str != last_snapshot:
+                    last_snapshot = snapshot_str
+                    yield f"data: {snapshot_str}\n\n"
+            except Exception as exc:
+                logger.debug("SSE generator error: %s", exc)
+            await asyncio.sleep(0.25)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.post("/open-download-folder")
 def open_download_folder(path: str = ""):
-    return _safe_handler("downloads", "open_download_folder", None, path)
+    return _safe("open_download_folder", None, path)
 
 
 @router.post("/open-local-file")
 def open_local_file(path: str):
-    return _safe_handler("downloads", "open_local_file", None, path)
+    return _safe("open_local_file", None, path)
 
 
 @router.post("/downloads/{dl_id}/action")
 def download_action(dl_id: str, action: str):
-    return _safe_handler("downloads", "download_action", None, dl_id, action)
+    return _safe("download_action", None, dl_id, action)
 
 
 @router.delete("/downloads/{dl_id}")
 def delete_download(dl_id: str):
-    return _safe_handler("downloads", "delete_download", None, dl_id)
+    return _safe("delete_download", None, dl_id)
 
 
 @router.post("/downloads/stop-all")
 def stop_all_downloads():
-    return _safe_handler("downloads", "stop_all_downloads", None)
+    return _safe("stop_all_downloads", None)
 
 
 @router.get("/runtime/dependencies")
 def get_runtime_dependencies():
-    return _safe_handler("downloads", "get_runtime_dependencies", {"dependencies": []})
+    return _safe("get_runtime_dependencies", {"dependencies": []})
 
 
 @router.post("/runtime/dependencies/install")
 def install_runtime_dependency(dep_id: str):
-    return _safe_handler("downloads", "install_runtime_dependency", None, dep_id)
+    return _safe("install_runtime_dependency", None, dep_id)

@@ -220,32 +220,53 @@ export default function DownloaderPage({ onDownloadStarting }: { onDownloadStart
 
   useEffect(() => {
     let active = true;
+    let es: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const syncBackendQueue = async () => {
-      try {
-        const response = await fetch(`${API}/downloads`);
-        if (!response.ok) return;
-        const data = (await response.json()) as any[];
-        if (!active) return;
-
-        setQueue((prev) => {
-          const previousById = new Map(prev.map((item) => [item.serverId || item.id, item]));
-          const synced = data.map((serverItem) => toQueueItem(serverItem, previousById.get(serverItem.id)));
-          const pendingLocal = prev.filter((item) => {
-            if (item.serverId) return false;
-            return !synced.some((serverItem) =>
-              serverItem.url === item.url &&
-              serverItem.fileType === item.fileType &&
-              serverItem.variantLabel === item.variantLabel
-            );
-          });
-          return [...pendingLocal, ...synced];
+    // Merge server state into the local queue — preserves pending-local items
+    // that haven't been acknowledged by the server yet.
+    const applyServerData = (data: any[]) => {
+      if (!active) return;
+      setQueue((prev) => {
+        const previousById = new Map(prev.map((item) => [item.serverId || item.id, item]));
+        const synced = data.map((serverItem) => toQueueItem(serverItem, previousById.get(serverItem.id)));
+        const pendingLocal = prev.filter((item) => {
+          if (item.serverId) return false;
+          return !synced.some((serverItem) =>
+            serverItem.url === item.url &&
+            serverItem.fileType === item.fileType &&
+            serverItem.variantLabel === item.variantLabel
+          );
         });
-      } catch {
-        // Ignore sync failures while backend is offline.
-      }
+        return [...pendingLocal, ...synced];
+      });
     };
 
+    // SSE connection — backend pushes state only when it changes (every 250 ms check).
+    // EventSource reconnects automatically on network drop.
+    const connectSSE = () => {
+      if (!active) return;
+      es = new EventSource(`${API}/downloads/stream`);
+      es.onmessage = (e) => {
+        try {
+          applyServerData(JSON.parse(e.data) as any[]);
+        } catch {
+          // Ignore malformed frames.
+        }
+      };
+      es.onerror = () => {
+        // EventSource will retry on its own, but we also do a fallback HTTP
+        // poll after 3 s in case the server doesn't support SSE yet.
+        reconnectTimer = setTimeout(() => {
+          fetch(`${API}/downloads`)
+            .then((r) => r.ok ? r.json() : null)
+            .then((data) => { if (data) applyServerData(data as any[]); })
+            .catch(() => undefined);
+        }, 3000);
+      };
+    };
+
+    // Dependencies poll — much less frequent; SSE doesn't cover this endpoint.
     const syncDependencies = async () => {
       try {
         const response = await backendFetch(`${API}/runtime/dependencies`);
@@ -268,14 +289,15 @@ export default function DownloaderPage({ onDownloadStarting }: { onDownloadStart
       })
       .catch(() => undefined);
 
-    void syncBackendQueue();
+    connectSSE();
     void syncDependencies();
-    const interval = setInterval(syncBackendQueue, 1000);
-    const depInterval = setInterval(syncDependencies, 2500);
+    // Poll dependencies every 10 s (was 2.5 s) — they change rarely.
+    const depInterval = setInterval(syncDependencies, 10000);
 
     return () => {
       active = false;
-      clearInterval(interval);
+      es?.close();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       clearInterval(depInterval);
       pollingRef.current.forEach((timer) => clearInterval(timer));
       pollingRef.current.clear();
