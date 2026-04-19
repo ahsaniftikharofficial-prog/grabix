@@ -435,6 +435,28 @@ Fonts:         --font: 'Outfit', 'Google Sans', sans-serif
 | DB `SELECT 1` on every connection | `db_helpers.py` — lazy epoch-based check |
 | Consumet error bodies silently lost | `app/routes/consumet.py` — `_safe_error_body()` + `_attempt_errors` |
 
----
+## Working Instructions
 
-*Last updated: initial merged generation. Claude must update this HANDOFF section after every session.*
+When I send you a full source project in a ZIP file, first read the `claude.md` file carefully to understand the project structure, purpose, and current status.
+
+Then do the following:
+
+1. Understand the problem I am working on.
+2. Find the relevant files related to that issue.
+3. Inspect the code to identify the real root cause.
+4. Fix the problem permanently with the smallest possible code change.
+5. Do not break any other existing code.
+6. Return only the files that were changed.
+7. For each changed file, clearly tell me:
+   - the file path
+   - where to replace it
+   - the full updated content, ready to copy and paste
+   - and explain in simple short what is happpening what was the problem how did you fix it explain in simple short as possbile 
+
+When you make any code change, also update this `claude.md` file so it always reflects the latest:
+- project structure
+- progress
+- fixes already made
+- important notes for future work
+
+The goal is to keep this file current so the next AI session can continue from the latest state without confusion.
