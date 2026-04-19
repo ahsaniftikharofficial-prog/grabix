@@ -1668,8 +1668,6 @@ async def diagnostics_logs(limit: int = 20):
 # Also called when running directly: `python main.py`
 # uvicorn blocks here forever — this is intentional.
 # Download handler registration moved to downloads/engine.py::register_handlers()
-_register_download_handlers()
-
 # Streaming handlers imported directly in app/routes/streaming.py — no registry needed
 
 
@@ -1686,6 +1684,7 @@ def run_server() -> None:
     import asyncio
     import uvicorn
 
+    _register_download_handlers()
     ensure_runtime_bootstrap()
 
     # On Windows, SelectorEventLoop is required when running on a non-main thread

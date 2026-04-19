@@ -26,7 +26,7 @@ from urllib.parse import quote, unquote, urljoin, urlparse
 from urllib.request import Request as URLRequest, urlopen
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from app.services.logging_utils import get_logger, log_event
 from db_helpers import get_db_connection

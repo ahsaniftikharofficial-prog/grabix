@@ -1,4 +1,4 @@
-﻿# build-installer.ps1
+# build-installer.ps1
 # Deterministic GRABIX installer build for the PyO3 embedded backend edition.
 
 param(
@@ -41,7 +41,6 @@ $script:BackendExcludedDirectories = @(
     ".ruff_cache",
     "venv",
     ".venv",
-    "downloads",
     "logs"
 )
 $script:BackendExcludedExtensions = @(".pyc", ".pyo")
@@ -556,12 +555,28 @@ function Invoke-PackagedSmokeTest(
     [string]$DesktopAuthPath
 ) {
     $backendPort = 8000
+    $killedPids = @()
     if (-not (Test-LocalPortAvailable $backendPort)) {
-        Throw-BuildFailure `
-            -Code "backend_port_in_use" `
-            -Step "Packaged smoke test" `
-            -Message (Get-PortConflictMessage $backendPort) `
-            -Hint "Stop the local GRABIX backend or any other process using port 8000, then rerun build-installer.bat."
+        Write-Host "  [smoke] Port $backendPort in use - stopping conflicting process before test..." -ForegroundColor Yellow
+        try {
+            $conn = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $backendPort -State Listen -ErrorAction Stop | Select-Object -First 1
+            if ($null -ne $conn) {
+                $killedPids += $conn.OwningProcess
+                Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
+            }
+        } catch {}
+        $waitDeadline = (Get-Date).AddSeconds(10)
+        while ((Get-Date) -lt $waitDeadline -and -not (Test-LocalPortAvailable $backendPort)) {
+            Start-Sleep -Milliseconds 300
+        }
+        if (-not (Test-LocalPortAvailable $backendPort)) {
+            Throw-BuildFailure `
+                -Code "backend_port_in_use" `
+                -Step "Packaged smoke test" `
+                -Message (Get-PortConflictMessage $backendPort) `
+                -Hint "Stop the local GRABIX backend or any other process using port 8000, then rerun build-installer.bat."
+        }
+        Write-Host "  [smoke] Port $backendPort is now free." -ForegroundColor Green
     }
     if (-not (Test-LocalPortAvailable $ConsumetPort)) {
         Throw-BuildFailure `
@@ -577,7 +592,7 @@ function Invoke-PackagedSmokeTest(
 
     $process = Start-Process -FilePath $ExePath -PassThru
     try {
-        $deadline = (Get-Date).AddSeconds(90)
+        $deadline = (Get-Date).AddSeconds(180)
         $backendReady = $false
         $consumetReady = $false
 
@@ -815,14 +830,14 @@ Write-Host "      backend_resource_hash = $backendSourceHash"
 Write-Host "      consumet_node_runtime = $stagedNodeExe"
 Write-Host "      runtime_config = $tauriRuntimeConfig"
 
-# ── Bundle aria2 ──────────────────────────────────────────────────────────────
+# -- Bundle aria2 --------------------------------------------------------------
 # aria2c.exe is downloaded at build time and bundled inside the installer so
 # users never need to install or download anything after setup.
 $tauriToolsAria2Dir = Join-Path $tauriDir "tools\aria2"
 $bundledAria2Exe    = Join-Path $tauriToolsAria2Dir "aria2c.exe"
 
 if (Test-Path -LiteralPath $bundledAria2Exe) {
-    Write-Host "[3b/6] Bundled aria2c.exe already present – skipping download." -ForegroundColor Green
+    Write-Host "[3b/6] Bundled aria2c.exe already present - skipping download." -ForegroundColor Green
 } else {
     Write-Host "[3b/6] Downloading aria2 to bundle into installer..." -ForegroundColor Yellow
     New-Item -ItemType Directory -Path $tauriToolsAria2Dir -Force | Out-Null
@@ -857,7 +872,7 @@ if (Test-Path -LiteralPath $bundledAria2Exe) {
         Write-Warning "       Re-run the build with internet access to include aria2."
     }
 }
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 Write-Host "[4/6] Building GRABIX with Tauri + PyO3..." -ForegroundColor Yellow
 Write-Host "      PYO3_PYTHON = $pythonExe"

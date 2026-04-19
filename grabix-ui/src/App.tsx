@@ -46,7 +46,7 @@ function Inner() {
   const offlineState = useOfflineDetection(BACKEND_API);
   const watchdog = useWatchdog();
   const [page, setPage] = useState<Page>("downloader");
-  const [pageRevision, setPageRevision] = useState(0);
+  const [_pageRevision, setPageRevision] = useState(0);
   const [runtimeState, setRuntimeState] = useState<RuntimeState>("starting");
   const [bootstrapping, setBootstrapping] = useState(true);
   const [backendCoreReady, setBackendCoreReady] = useState(false);
