@@ -1336,10 +1336,15 @@ async def health_capabilities() -> dict:
         "can_play_anime_fallback": True,
         "can_read_manga": services["manga"]["status"] in {"online", "slow"},
     }
+    # Only core services with no fallback count as degraded.
+    # consumet, aniwatch, moviebox, and anime all have built-in fallbacks —
+    # they should never alarm the user during normal operation.
+    CORE_SERVICES = {"database", "downloads", "ffmpeg"}
     degraded_services = [
         name
         for name, item in services.items()
-        if item["status"] in {"slow", "degraded", "offline"} and name != "backend"
+        if item["status"] in {"degraded", "offline"}
+        and name in CORE_SERVICES
     ]
     payload["capabilities"] = capabilities
     payload["summary"].update(

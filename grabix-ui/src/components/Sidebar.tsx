@@ -82,18 +82,11 @@ const GROUPS = [
 
 export default function Sidebar({ page, setPage, activeDownloads, runtimeState, runtimeHealth }: Props) {
   const { theme, toggle } = useTheme();
-  const degradedCount = runtimeHealth?.summary.degraded_services.length ?? 0;
-  const backendOk = runtimeState !== "offline" && runtimeState !== "starting";
+  const backendOk = runtimeState !== "offline";
   const statusText =
-    runtimeState === "starting"
-      ? "Starting local services"
-      : runtimeState === "recovering"
-        ? "Recovering local services"
-        : runtimeState === "degraded"
-          ? `${degradedCount} service${degradedCount === 1 ? "" : "s"} degraded`
-          : runtimeState === "ready"
-            ? "All core services ready"
-            : "Backend offline";
+    runtimeState === "offline"
+      ? "Backend offline"
+      : "GRABIX";
 
   return (
     <aside style={{ width: "var(--sidebar-w)", background: "var(--bg-sidebar)", borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", flexShrink: 0, height: "100vh" }}>
@@ -130,10 +123,18 @@ export default function Sidebar({ page, setPage, activeDownloads, runtimeState, 
 
       <div style={{ padding: "10px 8px", borderTop: "1px solid var(--border)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", marginBottom: 4 }}>
-          <span className={`status-dot ${backendOk ? "online" : "offline"}`} />
-          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
-            {statusText}
-          </span>
+          <span
+            className={`status-dot ${
+              runtimeState === "ready" ? "online" :
+              runtimeState === "offline" ? "offline" :
+              "starting"
+            }`}
+          />
+          {!backendOk && (
+            <span style={{ fontSize: 12, color: "var(--text-danger)" }}>
+              {statusText}
+            </span>
+          )}
         </div>
         <div className="nav-item" onClick={toggle} style={{ gap: 10 }}>
           {theme === "dark" ? <IconSun size={16} /> : <IconMoon size={16} />}
