@@ -108,6 +108,7 @@ echo.
 
 :: ── Set build env vars ─────────────────────────────────────────────────────
 set "PYO3_PYTHON=%PYTHON_EXE%"
+set "PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1"
 set "GRABIX_BUILD_ID=fast-build"
 set "GRABIX_BACKEND_RESOURCE_HASH=fast-build"
 set "GRABIX_BACKEND_RESOURCE_SUBDIR=backend-staging/backend"

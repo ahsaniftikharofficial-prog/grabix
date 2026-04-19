@@ -452,6 +452,7 @@ Then do the following:
    - where to replace it
    - the full updated content, ready to copy and paste
    - and explain in simple short what is happpening what was the problem how did you fix it explain in simple short as possbile 
+   - On every reponse you give me you need to also give me the updated claude.md like if you fix some bug change anything needded to add in claude.md the add it otherwise it is not important for this file then don't do that 
 
 When you make any code change, also update this `claude.md` file so it always reflects the latest:
 - project structure

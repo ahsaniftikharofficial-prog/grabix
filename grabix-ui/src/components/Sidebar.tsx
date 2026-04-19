@@ -80,7 +80,8 @@ const GROUPS = [
   },
 ];
 
-export default function Sidebar({ page, setPage, activeDownloads, runtimeState, runtimeHealth }: Props) {
+// FIX: removed unused `runtimeHealth` from destructuring (TS6133 build error)
+export default function Sidebar({ page, setPage, activeDownloads, runtimeState }: Props) {
   const { theme, toggle } = useTheme();
   const backendOk = runtimeState !== "offline";
   const statusText =
