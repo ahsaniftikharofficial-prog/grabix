@@ -485,9 +485,73 @@ fn sync_packaged_runtime_config(app: &AppHandle) -> Result<Option<PathBuf>, Stri
         create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    let payload = std::fs::read(&source).map_err(|e| e.to_string())?;
-    std::fs::write(&target, payload).map_err(|e| e.to_string())?;
+    // FIX: Merge bundled config into existing user config instead of overwriting.
+    // Previously this always clobbered the user file, wiping any settings (e.g.
+    // the TMDB token) that the user had saved via the Settings page.
+    //
+    // Strategy: read both files as JSON objects and write a merged result where
+    // the USER values win for any key that is already set to a non-empty string,
+    // and the BUNDLED values fill in any key that is missing or empty.
+    let bundled_raw = std::fs::read_to_string(&source).map_err(|e| e.to_string())?;
+
+    // If target does not exist yet, just write the bundled config directly.
+    if !target.exists() {
+        std::fs::write(&target, &bundled_raw).map_err(|e| e.to_string())?;
+        return Ok(Some(target));
+    }
+
+    // Both files exist — merge: user values win, bundled fills in blanks.
+    let existing_raw = std::fs::read_to_string(&target).unwrap_or_default();
+    let merged = merge_runtime_configs(&bundled_raw, &existing_raw);
+    std::fs::write(&target, merged).map_err(|e| e.to_string())?;
     Ok(Some(target))
+}
+
+/// Merge two JSON config objects.  `user_raw` values win over `bundled_raw`
+/// for any key where the user value is a non-empty string.  Unknown keys from
+/// either side are preserved.  Falls back to `bundled_raw` on any parse error.
+fn merge_runtime_configs(bundled_raw: &str, user_raw: &str) -> String {
+    // Tiny hand-rolled merge — avoids pulling in serde_json for this one call.
+    // Parses a flat {"key":"value",...} JSON object into a Vec of (key, value).
+    fn parse_flat(raw: &str) -> Vec<(String, String)> {
+        let trimmed = raw.trim().trim_start_matches('{').trim_end_matches('}');
+        let mut pairs = Vec::new();
+        for part in trimmed.split(',') {
+            let kv: Vec<&str> = part.splitn(2, ':').collect();
+            if kv.len() != 2 { continue; }
+            let k = kv[0].trim().trim_matches('"').to_string();
+            let v = kv[1].trim().trim_matches('"').to_string();
+            if !k.is_empty() {
+                pairs.push((k, v));
+            }
+        }
+        pairs
+    }
+
+    let bundled = parse_flat(bundled_raw);
+    let user = parse_flat(user_raw);
+
+    // Build merged map: start with bundled, let user overwrite non-empty values.
+    let mut merged: Vec<(String, String)> = bundled.clone();
+    for (uk, uv) in &user {
+        if let Some(existing) = merged.iter_mut().find(|(k, _)| k == uk) {
+            if !uv.is_empty() {
+                existing.1 = uv.clone();
+            }
+        } else {
+            // Key exists in user config but not in bundled — keep it.
+            merged.push((uk.clone(), uv.clone()));
+        }
+    }
+
+    let fields: Vec<String> = merged
+        .iter()
+        .map(|(k, v)| format!("  \"{}\":\"{}\"", k, v))
+        .collect();
+    format!("{{
+{}
+}}", fields.join(",
+"))
 }
 
 // ── Windows DLL loader fix ────────────────────────────────────────────────────

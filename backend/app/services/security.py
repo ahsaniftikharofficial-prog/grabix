@@ -166,3 +166,34 @@ def redact_for_diagnostics(value: Any) -> Any:
     if isinstance(value, list):
         return [redact_for_diagnostics(item) for item in value]
     return value
+
+
+# ── Standalone download-target normalizer ─────────────────────────────────────
+# This is a self-contained version of main.py's _normalize_download_target.
+# downloads/engine.py imports THIS instead of importing from main.py (which
+# causes a circular import).  No runtime state is captured at import time —
+# everything is read lazily from runtime_config on each call.
+
+def _normalize_download_target(url: str, headers_json: str = "") -> tuple[str, str]:
+    """
+    Validate and normalise a download URL.
+
+    Reads runtime config values (base URL, MovieBox headers, allowed hosts)
+    lazily on every call so this function is safe to import before the rest
+    of the app has finished initialising.
+    """
+    from app.services.runtime_config import public_base_url
+
+    try:
+        from moviebox.routes import MOVIEBOX_DOWNLOAD_REQUEST_HEADERS as _MBH
+        moviebox_headers: dict = dict(_MBH or {})
+    except Exception:
+        moviebox_headers = {}
+
+    return normalize_download_target(
+        url,
+        self_base_url=public_base_url(),
+        headers_json=headers_json,
+        moviebox_headers=moviebox_headers,
+        allowed_hosts=DEFAULT_APPROVED_MEDIA_HOSTS,
+    )

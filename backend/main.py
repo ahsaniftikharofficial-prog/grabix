@@ -143,6 +143,7 @@ async def _grabix_lifespan(app: FastAPI):
     global _app_event_loop
     _app_event_loop = asyncio.get_running_loop()
     ensure_runtime_bootstrap()
+    recover_download_jobs()  # FIX: restore interrupted downloads after restart
     # Start the MegaCloud key health worker — keeps the client key fresh in the background
     asyncio.create_task(run_key_health_worker(interval_seconds=1200.0))
     yield
@@ -1323,7 +1324,10 @@ async def health_capabilities() -> dict:
     payload = await health_services()
     services = payload["services"]
     capabilities = {
-        "startup_ready": services["database"]["status"] == "online" and services["downloads"]["status"] == "online",
+        # FIX: Only require database to be online for startup_ready.
+        # Downloads folder being slow/offline should not keep the whole app stuck
+        # in "starting" forever — it degrades gracefully via can_download_media.
+        "startup_ready": services["database"]["status"] == "online",
         "can_show_shell": True,
         "can_open_library": True,
         "can_download_media": services["downloads"]["status"] in {"online", "slow"},
@@ -1691,6 +1695,7 @@ def run_server() -> None:
 
     _register_download_handlers()
     ensure_runtime_bootstrap()
+    recover_download_jobs()  # FIX: restore interrupted downloads after restart
 
     # On Windows, SelectorEventLoop is required when running on a non-main thread
     # (e.g. when embedded via PyO3). We create it directly instead of using

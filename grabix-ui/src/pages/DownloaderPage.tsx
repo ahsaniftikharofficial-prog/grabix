@@ -8,7 +8,8 @@ import {
 } from "../components/Icons";
 import { PageEmptyState } from "../components/PageStates";
 import TrimSlider from "../components/TrimSlider";
-import { BACKEND_API, backendFetch, backendJson } from "../lib/api";
+import { BACKEND_API, backendFetch, backendJson, waitForBackendCoreReady } from "../lib/api";
+import { useRuntimeHealth } from "../context/RuntimeHealthContext";
 import { invoke } from "@tauri-apps/api/core";
 const API = BACKEND_API;
 const DOWNLOADER_QUEUE_STORAGE_KEY = "grabix:downloader-queue";
@@ -194,6 +195,7 @@ function storeQueueSnapshot(queue: QueueItem[]) {
 }
 
 export default function DownloaderPage({ onDownloadStarting }: { onDownloadStarting?: () => void }) {
+  const { runtimeState } = useRuntimeHealth();
   const [url, setUrl] = useState("");
   const [batchMode, setBatchMode] = useState(false);
   const [batchUrls, setBatchUrls] = useState("");
@@ -313,8 +315,21 @@ export default function DownloaderPage({ onDownloadStarting }: { onDownloadStart
     setStatus("loading");
     setInfo(null);
     setErrMsg("");
+
+    // FIX: Wait for backend to be ready before attempting the call.
+    // Previously used raw fetch() which failed silently when backend was still
+    // initialising (PyO3 startup takes 3-10s on first launch).
+    const isReady = await waitForBackendCoreReady(30000, 500);
+    if (!isReady) {
+      setErrMsg("Backend is still starting up. Please wait a moment and try again.");
+      setStatus("error");
+      return;
+    }
+
     try {
-      const res = await fetch(`${API}/check-link?url=${encodeURIComponent(inputUrl)}`);
+      // FIX: Use backendFetch (not raw fetch) so the desktop-auth header is
+      // included and error responses are handled consistently.
+      const res = await backendFetch(`${API}/check-link?url=${encodeURIComponent(inputUrl)}`);
       const data = await res.json();
       if (data.valid) {
         const parsed: VideoInfo = {
