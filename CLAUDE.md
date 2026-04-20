@@ -400,7 +400,27 @@ Fonts:         --font: 'Outfit', 'Google Sans', sans-serif
 
 ## HANDOFF — CURRENT WORK
 
-### 🔴 ACTIVE BUG — HLS Segment Fetching Fails
+### ✅ JUST FIXED — Port 10048 error + Build app offline
+
+**Symptom 1:** Running `1__Backend.bat` crashes with `[Errno 10048] error while attempting to bind on address ('127.0.0.1', 8000)` plus a confusing `Task was destroyed but it is pending! coro=<run_key_health_worker()>` warning.
+
+**Symptom 2:** Compiled app (from `build-fast.bat`) shows every page as "Backend offline" / unavailable — downloader, anime, movies, manga, TV, MovieBox all broken.
+
+**Root cause (both symptoms, same problem):** Port 8000 was already occupied by a previous backend session. When `1__Backend.bat` restarts without cleaning up the old process, uvicorn crashes mid-startup. In the compiled app, `lib.rs` calls `is_port_available(8000)` and if port is taken, Python never starts at all → everything shows offline.
+
+The "Task destroyed" warning was a secondary symptom: uvicorn ran the FastAPI lifespan (which creates the `run_key_health_worker` async task) BEFORE attempting to bind, so when the bind failed the task was left dangling.
+
+**Files changed:**
+
+1. **`backend/main.py`** — `run_server()` now does a socket probe on port 8000 BEFORE creating uvicorn config. If the port is busy it prints a clear error and calls `sys.exit(1)`. This prevents the lifespan from ever running in the failure case, eliminating the "Task destroyed" warning entirely.
+
+2. **`1__Backend.bat`** — Added a `netstat` + `taskkill` block at startup that finds and kills any process already holding port 8000, then waits 2 seconds before launching Python. Restarting the backend now always works without manual intervention.
+
+3. **`build-fast.bat`** — Added step [2/5]: runs `pip install -r requirements.txt python-multipart` against the bundled python-runtime before staging. This ensures the compiled app always has up-to-date packages. Also added auto-kill of any running backend on port 8000 at build start, and a reminder note at the end to close `1__Backend.bat` before launching the compiled app.
+
+---
+
+### 🔴 STILL OPEN — HLS Segment Fetching Fails (pre-existing)
 
 **Symptom:** Anime player shows episode duration (HLS source resolved ✓) but video never plays. Browser console shows `"AniWatch · Failed"` on segment requests.
 
@@ -434,6 +454,9 @@ Fonts:         --font: 'Outfit', 'Google Sans', sans-serif
 | MegaCloud API broken (April 2026) | `app/services/megacloud.py` — Python reimplementation |
 | DB `SELECT 1` on every connection | `db_helpers.py` — lazy epoch-based check |
 | Consumet error bodies silently lost | `app/routes/consumet.py` — `_safe_error_body()` + `_attempt_errors` |
+| Port 10048 crash + Task destroyed warning | `backend/main.py` `run_server()` — pre-flight port probe before uvicorn |
+| Build app shows backend offline | `build-fast.bat` — pip refresh step + auto-kill of running backend |
+| 1__Backend.bat doesn't recover from stale port | `1__Backend.bat` — netstat+taskkill block at startup |
 
 ## Working Instructions
 

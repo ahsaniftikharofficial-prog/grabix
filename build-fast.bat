@@ -24,7 +24,7 @@ set "STAGE_NODE=%TAURI%\consumet-staging\node-runtime"
 set "STAGE_GENERATED=%TAURI%\generated"
 
 :: ── Pre-flight checks ──────────────────────────────────────────────────────
-echo [1/4] Checking prerequisites...
+echo [1/5] Checking prerequisites...
 
 if not exist "%PYTHON_EXE%" (
     echo.
@@ -60,11 +60,38 @@ if not exist "%CONSUMET%\node_modules" (
     pause & exit /b 1
 )
 
+:: ── IMPORTANT: stop any running backend before building ────────────────────
+:: If the dev backend (1__Backend.bat) is still open, port 8000 will be taken
+:: when the compiled app launches — making it look like the backend is offline.
+echo  Checking for any running backend on port 8000...
+for /f "tokens=5" %%P in ('netstat -ano 2^>nul ^| findstr ":8000 " ^| findstr "LISTENING"') do (
+    echo  [INFO] Found running backend PID %%P - stopping it before build...
+    taskkill /F /PID %%P >nul 2>&1
+    timeout /t 2 /nobreak >nul
+)
+
 echo  OK - all prerequisites found.
 echo.
 
+:: ── Refresh Python packages in bundled runtime ─────────────────────────────
+echo [2/5] Refreshing Python packages in bundled runtime...
+echo  This ensures the compiled app has all required packages.
+echo.
+"%PYTHON_EXE%" -m pip install -r "%BACKEND%\requirements.txt" python-multipart --quiet --no-warn-script-location
+if errorlevel 1 (
+    echo.
+    echo  WARNING: pip install reported errors above.
+    echo  The build will continue but some features may not work.
+    echo  Check the output above for details.
+    echo.
+    timeout /t 3 /nobreak >nul
+) else (
+    echo  Packages up to date.
+)
+echo.
+
 :: ── Stage resources ────────────────────────────────────────────────────────
-echo [2/4] Staging backend + consumet resources...
+echo [3/5] Staging backend + consumet resources...
 
 :: Clear old staging
 if exist "%TAURI%\backend-staging"  rd /s /q "%TAURI%\backend-staging"
@@ -115,7 +142,7 @@ set "GRABIX_BACKEND_RESOURCE_HASH=fast-build"
 set "GRABIX_BACKEND_RESOURCE_SUBDIR=backend-staging/backend"
 
 :: ── Tauri build ────────────────────────────────────────────────────────────
-echo [3/4] Running Tauri build (this takes a few minutes)...
+echo [4/5] Running Tauri build (this takes a few minutes)...
 echo  PYO3_PYTHON = %PYO3_PYTHON%
 echo.
 
@@ -136,7 +163,7 @@ if not "%BUILD_EXIT%"=="0" (
 
 :: ── Done ───────────────────────────────────────────────────────────────────
 echo.
-echo [4/4] Build finished!
+echo [5/5] Build finished!
 echo.
 echo ==========================================
 echo  EXE (run directly):
@@ -144,6 +171,9 @@ echo    %FRONTEND%\src-tauri\target\release\grabix-ui.exe
 echo.
 echo  Installer (share/install):
 echo    %FRONTEND%\src-tauri\target\release\bundle\nsis\
+echo.
+echo  NOTE: Close 1__Backend.bat before launching the compiled app,
+echo  otherwise port 8000 will be taken and the app will show offline.
 echo ==========================================
 echo.
 pause

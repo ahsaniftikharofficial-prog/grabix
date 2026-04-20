@@ -1692,10 +1692,37 @@ def run_server() -> None:
     """
     import asyncio
     import uvicorn
+    import sys as _sys
 
     _register_download_handlers()
     ensure_runtime_bootstrap()
     recover_download_jobs()  # FIX: restore interrupted downloads after restart
+
+    port = backend_port()
+
+    # ── Pre-flight port check ─────────────────────────────────────────────────
+    # Must happen BEFORE creating uvicorn.Config/Server.  If we skip this and
+    # let uvicorn try to bind, it first runs the FastAPI lifespan (which creates
+    # the run_key_health_worker async task), THEN fails to bind, leaving the
+    # task pending — which produces the confusing "Task was destroyed but it is
+    # pending!" warning in addition to the real Errno 10048 error.
+    try:
+        _probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        _probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+        _probe.bind(("127.0.0.1", port))
+        _probe.close()
+    except OSError:
+        _sys.stderr.write(
+            f"\n ==========================================\n"
+            f"   GRABIX Backend — STARTUP FAILED\n"
+            f"   Port {port} is already in use.\n"
+            f"   Another GRABIX backend is already running.\n"
+            f"   Close it (or its terminal window) first,\n"
+            f"   then restart.\n"
+            f" ==========================================\n\n"
+        )
+        _sys.exit(1)
+    # ─────────────────────────────────────────────────────────────────────────
 
     # On Windows, SelectorEventLoop is required when running on a non-main thread
     # (e.g. when embedded via PyO3). We create it directly instead of using
@@ -1709,7 +1736,7 @@ def run_server() -> None:
     config = uvicorn.Config(
         app,
         host="127.0.0.1",
-        port=backend_port(),
+        port=port,
         log_level=os.getenv("GRABIX_BACKEND_LOG_LEVEL", "warning"),
         log_config=None,  # Don't reconfigure logging — main.py already set it up
     )
