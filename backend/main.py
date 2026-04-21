@@ -30,7 +30,7 @@ from downloads import router as downloads_engine_router, register_handlers as _r
 from downloads.engine import (
     ensure_runtime_bootstrap,
     recover_download_jobs,
-    _service_payload,
+    _service_payload as _service_payload_base,
     _downloads_health,
     _database_health,
     _is_direct_media_url,
@@ -41,6 +41,23 @@ from downloads.engine import (
     list_downloads,
     storage_stats,
 )
+
+# Compatibility wrapper: the installed downloads.engine._service_payload only
+# accepts (name, status, message=None).  main.py calls it with up to 5 args
+# (name, status, message, critical, details).  This shim bridges the gap so
+# both the old engine and the new call-sites work without modifying the engine.
+def _service_payload(name: str, status: str, message: str = "", critical: bool = False, details: dict | None = None) -> dict:
+    base = _service_payload_base(name, status, message) if message else _service_payload_base(name, status)
+    if isinstance(base, dict):
+        base.setdefault("critical", critical)
+        if details:
+            base.setdefault("details", details)
+        return base
+    # Fallback if base returned something unexpected
+    result: dict = {"name": name, "status": status, "message": message, "critical": critical}
+    if details:
+        result["details"] = details
+    return result
 from app.services.consumet import (
     get_health_status as get_consumet_health_status,
     is_consumet_configured as is_consumet_sidecar_configured,
@@ -126,6 +143,18 @@ from streaming_helpers import (
     extract_stream,
 )
 # ─────────────────────────────────────────────────────────────────────────────
+
+# FIX: Override _service_payload from downloads.engine — the installed version
+# only accepted 2–3 positional args, but main.py calls it with 4–5.
+# Correct signature: (name, status, message=None, critical=False, details=None)
+def _service_payload(name: str, status: str, message: str | None = None, critical: bool = False, details: dict | None = None) -> dict:
+    payload: dict = {"name": name, "status": status}
+    if message is not None:
+        payload["message"] = message
+    payload["critical"] = critical
+    if details:
+        payload["details"] = details
+    return payload
 
 try:
     import bcrypt
