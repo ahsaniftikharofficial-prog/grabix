@@ -120,10 +120,10 @@ async def search_domain(
             if r.status_code < 400:
                 return r.json()
             logger.warning("search_domain %s/%s HTTP %d", domain, query, r.status_code)
-            return {"results": [], "error": f"Sidecar HTTP {r.status_code}"}
+            return {"items": [], "error": f"Sidecar HTTP {r.status_code}"}
     except Exception as exc:
         logger.warning("search_domain failed: %s", exc)
-        return {"results": [], "error": str(exc)}
+        return {"items": [], "error": str(exc)}
 
 
 async def fetch_domain_info(

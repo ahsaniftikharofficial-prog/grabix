@@ -30,10 +30,10 @@ import {
   type TrendingPeriod,
   dedupeItems,
   fetchJikanDiscover,
-  filterAdultContent,
   searchJikanAnime,
   toCardItem,
 } from "./anime/animeUtils";
+import { filterAdultContent } from "../lib/contentFilter";
 import { AnimeCard, LoadingGrid } from "./anime/AnimeCard";
 import { AnimeDetail, type PlayerPayload } from "./anime/AnimeDetail";
 
