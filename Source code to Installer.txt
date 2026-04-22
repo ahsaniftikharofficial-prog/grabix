@@ -1,3 +1,15 @@
 set PYO3_PYTHON=H:\Code\Project 3\grabix\grabix-ui\src-tauri\python-runtime\python.exe
 cd /d "H:\Code\Project 3\grabix\grabix-ui"
 npm run tauri build
+
+
+
+
+pytest tests/ -v --timeout=15 2>&1 | tee all_tests_results.txt
+pytest tests/test_shape.py::TestMangaShape -v --timeout=15
+
+
+
+pytest tests/test_features.py -v --timeout=15
+pytest tests/test_shape.py -v --timeout=15
+pytest tests/test_security.py -v --timeout=15
