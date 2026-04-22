@@ -23,6 +23,11 @@ from moviebox.moviebox_loader import (
     _validate_outbound_url,
     _moviebox_cache_get,
     _moviebox_cache_set,
+    # re-exported so moviebox/__init__.py import stays unchanged
+    start_bg_retry,            # noqa: F401
+    restore_from_last_session, # noqa: F401
+    MOVIEBOX_AVAILABLE,        # noqa: F401
+    MOVIEBOX_IMPORT_ERROR,     # noqa: F401
 )
 from moviebox.moviebox_helpers import (
     _moviebox_media_type_value,
