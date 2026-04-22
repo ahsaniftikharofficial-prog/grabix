@@ -9,7 +9,7 @@ from app.services.tmdb import (
 )
 from app.services.imdb import fetch_imdb_chart
 
-router = APIRouter(prefix="/metadata")
+router = APIRouter()  # no prefix — routes are /tmdb/search, /tmdb/details, etc.
 
 
 @router.get("/tmdb/discover")

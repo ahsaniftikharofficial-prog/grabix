@@ -8,3 +8,12 @@
 
 from core.main import *          # re-export everything (routes, lifespan, etc.)
 from core.main import app        # explicit re-export so `main.app` works in tests
+
+# `import *` silently skips names that start with `_`, so library_helpers.py
+# (which does `import main as _m` and then `_m._infer_download_category` etc.)
+# would crash at runtime. Re-export them explicitly here.
+from core.download_helpers import _infer_download_category, _infer_library_display_layout, _normalize_tags_csv  # noqa: F401
+
+# _is_internal_managed_file lives in anime/resolver.py; pull it in so the shim
+# exposes it as `main._is_internal_managed_file`.
+from anime.resolver import _is_internal_managed_file  # noqa: F401

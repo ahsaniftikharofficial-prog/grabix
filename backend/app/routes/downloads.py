@@ -131,6 +131,9 @@ async def download_progress_stream(request: Request):
     Replaces the 1-second polling loop in DownloaderPage.tsx.
     """
     async def event_generator():
+        # Send an immediate keepalive comment so the client receives headers
+        # and the first bytes without waiting for a state change.
+        yield ": ping\n\n"
         last_snapshot: str | None = None
         while True:
             if await request.is_disconnected():

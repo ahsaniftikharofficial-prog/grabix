@@ -11,6 +11,7 @@ Dependency chain (no circular imports):
 """
 from __future__ import annotations
 
+import logging
 from urllib.request import Request as URLRequest, urlopen
 
 from fastapi import APIRouter, HTTPException, Request
@@ -46,6 +47,7 @@ from moviebox.moviebox_fetchers import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/search")
@@ -57,7 +59,15 @@ async def moviebox_search(title: str, media_type: str = "movie", year: int | Non
 
 @router.get("/discover")
 async def moviebox_discover():
-    return await moviebox_discover_payload()
+    try:
+        return await moviebox_discover_payload()
+    except Exception as exc:
+        logger.warning("MovieBox discover failed: %s", exc)
+        raise HTTPException(status_code=502, detail={
+            "message": "MovieBox discover is temporarily unavailable.",
+            "code": "moviebox_failed", "service": "moviebox", "retryable": True,
+            "user_action": "Try again in a moment. If the issue continues, export diagnostics and restart GRABIX.",
+        })
 
 
 @router.get("/search-items")
@@ -71,27 +81,46 @@ async def moviebox_search_items(
     prefer_hindi: bool = True,
     sort_by:      str  = "search",
 ):
-    normalized    = _moviebox_media_type_value(media_type)
-    safe_page     = max(1, page)
-    safe_per_page = min(max(1, per_page), 48)
-    cache_key = (
-        f"moviebox:search:{query}:{safe_page}:{safe_per_page}:{normalized}:"
-        f"{hindi_only}:{anime_only}:{prefer_hindi}:{sort_by}"
-    )
-    cached_value, is_stale = _sqlite_cache_get(cache_key)
-    if cached_value is not None:
-        if is_stale:
-            async def _refresh():
-                await search_items_fetch_and_cache(
-                    cache_key, query, safe_page, safe_per_page,
-                    normalized, hindi_only, anime_only, prefer_hindi, sort_by,
-                )
-            _cache_trigger_bg_refresh(cache_key, _refresh)
-        return cached_value
-    return await search_items_fetch_and_cache(
-        cache_key, query, safe_page, safe_per_page,
-        normalized, hindi_only, anime_only, prefer_hindi, sort_by,
-    )
+    try:
+        normalized    = _moviebox_media_type_value(media_type)
+        safe_page     = max(1, page)
+        safe_per_page = min(max(1, per_page), 48)
+        cache_key = (
+            f"moviebox:search:{query}:{safe_page}:{safe_per_page}:{normalized}:"
+            f"{hindi_only}:{anime_only}:{prefer_hindi}:{sort_by}"
+        )
+        cached_value, is_stale = _sqlite_cache_get(cache_key)
+        if cached_value is not None:
+            if is_stale:
+                async def _refresh():
+                    await search_items_fetch_and_cache(
+                        cache_key, query, safe_page, safe_per_page,
+                        normalized, hindi_only, anime_only, prefer_hindi, sort_by,
+                    )
+                _cache_trigger_bg_refresh(cache_key, _refresh)
+            return cached_value
+        return await search_items_fetch_and_cache(
+            cache_key, query, safe_page, safe_per_page,
+            normalized, hindi_only, anime_only, prefer_hindi, sort_by,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("MovieBox search-items failed: %s", exc)
+        raise HTTPException(status_code=502, detail={
+            "message": "An unexpected backend error occurred.",
+            "code": "moviebox_failed", "service": "moviebox", "retryable": True,
+            "user_action": "Try again in a moment. If the issue continues, export diagnostics and restart GRABIX.",
+        })
+
+
+def _require_subject(subject_id: str | None, title: str | None, endpoint: str) -> None:
+    """Raise 422 if neither subject_id nor title was supplied."""
+    if not subject_id and not title:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{endpoint} requires at least one of: subject_id, title",
+        )
 
 
 @router.get("/details")
@@ -101,6 +130,7 @@ async def moviebox_details(
     media_type: str        = "movie",
     year:       int | None = None,
 ):
+    _require_subject(subject_id, title, "/moviebox/details")
     normalized = _moviebox_media_type_value(media_type)
     cache_key  = f"moviebox:details:{subject_id or title}:{normalized}:{year}"
     cached_value, is_stale = _sqlite_cache_get(cache_key)
@@ -110,7 +140,17 @@ async def moviebox_details(
                 await details_fetch_and_cache(cache_key, subject_id, title, normalized, year)
             _cache_trigger_bg_refresh(cache_key, _refresh)
         return cached_value
-    return await details_fetch_and_cache(cache_key, subject_id, title, normalized, year)
+    try:
+        return await details_fetch_and_cache(cache_key, subject_id, title, normalized, year)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("MovieBox details failed: %s", exc)
+        raise HTTPException(status_code=502, detail={
+            "message": "An unexpected backend error occurred.",
+            "code": "moviebox_failed", "service": "moviebox", "retryable": True,
+            "user_action": "Try again in a moment. If the issue continues, export diagnostics and restart GRABIX.",
+        })
 
 
 @router.get("/sources")
@@ -122,6 +162,7 @@ async def moviebox_sources(
     season:     int        = 1,
     episode:    int        = 1,
 ):
+    _require_subject(subject_id, title, "/moviebox/sources")
     normalized = _moviebox_media_type_value(media_type)
     if normalized == "all":
         raise HTTPException(status_code=400, detail="media_type must not be 'all' for sources")

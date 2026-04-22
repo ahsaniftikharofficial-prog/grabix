@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import httpx
@@ -111,7 +111,7 @@ async def manga_frontpage(section: str = "trending", page: int = 1, limit: int =
 
 @router.get("/seasonal")
 async def manga_seasonal(year: int | None = None, season: str = "WINTER"):
-    safe_year = year or datetime.utcnow().year
+    safe_year = year or datetime.now(timezone.utc).year
     safe_season = season.upper()
     return {"items": await get_seasonal_manga(safe_year, safe_season)}
 
