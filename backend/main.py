@@ -33,6 +33,7 @@ from moviebox import (
     restore_from_last_session as _moviebox_restore_from_last_session,
 )
 from anime import router as anime_router
+from anime.resolver import _is_internal_managed_file
 from downloads import router as downloads_engine_router, register_handlers as _register_download_handlers
 from downloads.engine import (
     ensure_runtime_bootstrap,
@@ -98,7 +99,12 @@ from core.health import (
     _diagnostics_payload,
     router as health_router,
 )
-from core.cache_ops import router as cache_router
+from core.cache_ops import (
+    router as cache_router,
+    _sqlite_cache_get,
+    _sqlite_cache_set,
+    _cache_trigger_bg_refresh,
+)
 from core.download_helpers import (
     _normalize_download_target,
     _infer_download_category,

@@ -26,7 +26,7 @@ function readOption(flag) {
 const cliPort = readOption("--port");
 const cliSiteBase = readOption("--site-base");
 const port = Number(cliPort || process.env.PORT || 3000);
-const siteBase = cliSiteBase || process.env.HIANIME_SITE_BASE || "https://aniwatchtv.to";
+const siteBase = cliSiteBase || process.env.HIANIME_SITE_BASE || "https://hianimez.to";
 const ajaxBase = `${siteBase}/ajax/v2`;
 const scraper = new HiAnime.Scraper();
 
