@@ -1,37 +1,76 @@
 # GRABIX — AI Developer Handoff File
 
 > **YOU ARE WORKING WITH A NON-PROGRAMMER.** Follow these rules on every response:
-> 1. Read this file first. Then read the relevant source files. Then fix.
+> 1. Read this file COMPLETELY before touching any code.
 > 2. Make the **smallest possible fix** — do not over-engineer.
-> 3. Give the **complete corrected file(s)** with the **exact path** for each.
-> 4. Tell the developer exactly where to place each file (e.g. "Replace `backend/streaming_helpers.py` with this").
-> 5. **Update the `## HANDOFF — CURRENT WORK` section** at the bottom of this file after every single response — what you found, what you changed, what the next step is. Never skip this.
+> 3. Before fixing anything, run: `cd backend && python -m pytest tests/test_canary.py -v`
+> 4. Give the **complete corrected file(s)** with the **exact path** for each.
+> 5. After fixing, tell the developer to run canary tests again and confirm they pass.
+> 6. **Update the HANDOFF section** after every response. Never skip this.
+> 7. If you notice a bug you were not asked about — mention it at the end. Do not ignore it.
 
 ---
 
 ## WHAT IS GRABIX
 
 Desktop app for streaming, downloading, and managing anime, movies, TV, and manga.
-Built with Tauri 2. Developer is non-technical — give files, not instructions to edit code manually.
+Built with Tauri 2. Developer is non-technical — always give complete files, not "edit line X".
 
 ---
 
 ## STACK
 
-| Layer | Tech |
-|---|---|
-| Desktop shell | Tauri 2 (Rust) — `grabix-ui/src-tauri/` |
-| Frontend | React 19 + TypeScript + Vite + Tailwind CSS v4 |
-| Backend | Python FastAPI — runs embedded via PyO3/uvicorn on port **8000** |
-| Anime sidecar | Node.js — `consumet-local/server.cjs` on port **3000** |
-| Database | SQLite (WAL mode, pooled connections) — `~/Downloads/GRABIX/grabix.db` |
-| Video download | yt-dlp (lazy-loaded on first use — saves ~1s startup) |
-| Video mux | FFmpeg (bundled in `src-tauri/tools/` or user PATH) |
-| Accelerated DL | aria2c (optional, bundled) |
-| Installer | NSIS only (`"zlib"` compression — `"lzma"` causes file-lock issues) |
+| Layer | Tech | Port |
+|---|---|---|
+| Desktop shell | Tauri 2 (Rust) — `grabix-ui/src-tauri/` | — |
+| Frontend | React 19 + TypeScript + Vite + Tailwind CSS v4 | 1420 (dev) |
+| Backend | Python FastAPI via uvicorn | **8000** |
+| Anime sidecar | Node.js — `consumet-local/server.cjs` | **3000** |
+| Database | SQLite (WAL mode) — `~/Downloads/GRABIX/grabix.db` | — |
+| Video download | yt-dlp (lazy-loaded on first use — saves startup time) | — |
+| Video mux | FFmpeg (bundled or in PATH) | — |
+| Accelerated DL | aria2c (optional, bundled) | — |
+| Installer | NSIS only (`"zlib"` compression) | — |
 
 **Start order:** `1__Backend.bat` → `3__Consumet_api.bat` → `2__Frontend.bat`
-(or `run.bat` for all at once, or use the built `.exe`)
+Or use `run.bat` for all at once.
+
+---
+
+## THE GOLDEN RULE — RUN THIS BEFORE AND AFTER EVERY SINGLE FIX
+
+```
+cd backend
+python -m pytest tests/test_canary.py -v
+```
+
+These 10 tests cover: health ping, downloads list, settings read, ffmpeg status,
+cache stats, providers status, diagnostics logs, check-link, and circuit breaker.
+
+**If any test fails after your fix → undo the fix and try a smaller change.**
+Do not ship code that fails canary tests. These are your smoke alarm.
+
+---
+
+## ACTUAL FILE SIZES — READ BEFORE EDITING
+
+| File | Lines | Status |
+|---|---|---|
+| `grabix-ui/src/components/player/usePlayerState.ts` | **1,028** | RED — still needs splitting |
+| `backend/app/services/megacloud.py` | **617** | YELLOW — large but acceptable |
+| `backend/core/main.py` | **573** | GREEN — split done (was 1,784) |
+| `backend/streaming_helpers.py` | **465** | YELLOW — fragile, see gotchas |
+| `backend/db_helpers.py` | **490** | YELLOW — acceptable |
+| `backend/app/routes/consumet_anime_stream.py` | **415** | YELLOW — acceptable |
+| `grabix-ui/src/pages/AnimePageV2.tsx` | **742** | YELLOW — it is a page, ok |
+| `grabix-ui/src/lib/streamProviders.ts` | **716** | YELLOW — large |
+| `grabix-ui/src/lib/api.ts` | **322** | GREEN |
+| `backend/core/download_helpers.py` | **241** | GREEN |
+| `backend/app/routes/downloads.py` | **194** | GREEN |
+| `backend/app/routes/consumet.py` | **229** | GREEN — split done (was 1,057) |
+| `grabix-ui/src/components/VidSrcPlayer.tsx` | **268** | GREEN — split done (was 2,478) |
+
+**Next file that must be split:** `usePlayerState.ts` (1,028 lines). See split plan below.
 
 ---
 
@@ -40,41 +79,66 @@ Built with Tauri 2. Developer is non-technical — give files, not instructions 
 ```
 grabix-master/
 │
-├── backend/                              ← Python FastAPI backend
-│   ├── main.py                           ← App entry + middleware + health + cache + circuit breaker
-│   ├── db_helpers.py                     ← SQLite pool, settings, format utils, all db_* helpers
+├── backend/
+│   ├── main.py                           ← SHIM ONLY. Re-exports core/main.py. Never add logic here.
+│   ├── db_helpers.py                     ← SQLite pool, settings, format utils (490 lines)
 │   ├── library_helpers.py                ← Library index, reconcile, history, migrate_db
-│   ├── streaming_helpers.py              ← HLS proxy, embed resolution — MUST STAY SYNC (see gotchas)
+│   ├── streaming_helpers.py              ← HLS proxy + embed resolution (465 lines)
+│   │                                        FRAGILE — see gotchas #1 and #2 below
+│   │
+│   ├── core/                             ← Real backend logic (Phase 6 split)
+│   │   ├── main.py                       ← FastAPI app + lifespan + router registration (573 lines)
+│   │   ├── health.py                     ← All /health/* and /diagnostics/* routes
+│   │   ├── cache_ops.py                  ← /cache/* routes + SQLite cache read/write/evict
+│   │   ├── download_helpers.py           ← URL normalization, category inference, auto-retry (241 lines)
+│   │   ├── circuit_breaker.py            ← CircuitBreaker class — always use this, never inline
+│   │   ├── network_monitor.py            ← Network monitor background worker
+│   │   ├── state.py                      ← State helpers
+│   │   ├── cache.py                      ← Cache helpers
+│   │   └── utils.py                      ← Shared utils
 │   │
 │   ├── app/
 │   │   ├── routes/
-│   │   │   ├── aniwatch.py               ← /aniwatch/* — AniWatch discover/search/episodes
-│   │   │   ├── consumet.py               ← /consumet/* — MAIN ANIME PIPELINE + MegaCloud fallback
-│   │   │   ├── downloads.py              ← /downloads/* — download queue CRUD
-│   │   │   ├── manga.py                  ← /manga/* — chapters/pages
-│   │   │   ├── metadata.py               ← /metadata/* — TMDB lookups
-│   │   │   ├── providers.py              ← /providers/* — provider registry
-│   │   │   ├── settings.py               ← /settings/* — app settings read/write
-│   │   │   ├── streaming.py              ← /stream/* — proxy, variants, extract-stream, ffmpeg-status
-│   │   │   └── subtitles.py              ← /subtitles/* — fetch, convert
+│   │   │   ├── aniwatch.py               ← /aniwatch/* routes
+│   │   │   ├── consumet.py               ← /consumet/* thin router — includes sub-routers (229 lines)
+│   │   │   ├── consumet_anime_stream.py  ← /consumet/anime/stream — server-side pipeline (415 lines)
+│   │   │   ├── consumet_anime_debug.py   ← /consumet/anime/debug-stream — step-by-step trace
+│   │   │   ├── consumet_helpers.py       ← _title_score(), _safe_error_body(), _build_sidecar_hint()
+│   │   │   ├── downloads.py              ← /download + /downloads/* routes (194 lines)
+│   │   │   │                                Has _safe() wrapper for CORS-safe error handling
+│   │   │   │                                Has SSE endpoint: GET /downloads/stream (real-time progress)
+│   │   │   ├── manga.py                  ← /manga/* routes
+│   │   │   ├── metadata.py               ← /metadata/* TMDB lookups
+│   │   │   ├── providers.py              ← /providers/* provider registry
+│   │   │   ├── settings.py               ← /settings/* read/write
+│   │   │   ├── streaming.py              ← /stream/* proxy, variants, extract-stream
+│   │   │   └── subtitles.py              ← /subtitles/* fetch, convert
 │   │   │
 │   │   └── services/
-│   │       ├── megacloud.py              ← ⭐ KEY FILE: pure-Python MegaCloud extractor + key worker
-│   │       ├── consumet.py               ← HTTP client wrappers for Node sidecar health/fetch
-│   │       ├── aniwatch.py               ← Thin client to local Node sidecar (port 3000) + cache
+│   │       ├── megacloud.py              ← KEY FILE: Python MegaCloud extractor (617 lines)
+│   │       │                                Ported from JS. Has background key health worker.
+│   │       │                                Key cached in _key_health dict (TTL 1200s / 20 min)
+│   │       ├── consumet.py               ← HTTP client wrappers for Node sidecar
+│   │       ├── aniwatch.py               ← Thin client to sidecar port 3000 + cache
 │   │       ├── tmdb.py                   ← TMDB API client + in-memory cache + TTL
-│   │       ├── imdb.py                   ← IMDB helpers (cinemagoer)
-│   │       ├── history.py                ← Watch history read/write to SQLite
+│   │       ├── imdb.py                   ← IMDB helpers via cinemagoer
+│   │       ├── history.py                ← Watch history read/write
 │   │       ├── runtime_config.py         ← ALL paths, ports, base URLs (single source of truth)
 │   │       ├── runtime_state.py          ← RuntimeStateRegistry — in-memory: downloads, stream cache
 │   │       ├── settings_service.py       ← Settings load/save/merge/payload helpers
 │   │       ├── security.py               ← URL validation, path safety, approved host list
-│   │       ├── network_policy.py         ← Outbound URL policy — allowlist before DNS lookup
-│   │       ├── logging_utils.py          ← Structured JSON logger, log_event(), read_recent_log_events()
+│   │       ├── network_policy.py         ← Outbound URL policy — allowlist BEFORE DNS lookup
+│   │       ├── logging_utils.py          ← Structured JSON logger, log_event()
 │   │       ├── errors.py                 ← json_error_response() — standard error shape
-│   │       ├── desktop_auth.py           ← Desktop auth header validation (packaged mode)
-│   │       ├── archive_installer.py      ← Zip extract + checksum verify for tool downloads
+│   │       ├── desktop_auth.py           ← Desktop auth header validation
+│   │       ├── archive_installer.py      ← Zip extract + checksum verify
+│   │       ├── provider_adapters.py      ← Provider adapter layer
+│   │       ├── provider_helpers.py       ← Provider helper utilities
+│   │       ├── provider_registry.py      ← Provider registry
+│   │       ├── provider_resolvers.py     ← Provider resolution logic
+│   │       ├── provider_types.py         ← Provider type definitions
 │   │       ├── providers.py              ← Provider registry snapshot
+│   │       ├── route_registry.py         ← Route registration helpers
 │   │       ├── stream_extractors.py      ← Stream extraction helper bridge
 │   │       ├── manga_mangadex.py         ← MangaDex client
 │   │       ├── manga_comick.py           ← Comick client
@@ -83,159 +147,229 @@ grabix-master/
 │   │       ├── manga_cache.py            ← Manga-specific cache
 │   │       └── subtitles.py              ← Subtitle fetch/format conversion
 │   │
-│   ├── core/
-│   │   ├── circuit_breaker.py            ← Unified CircuitBreaker class (use THIS, not the one in main.py)
-│   │   ├── cache.py                      ← Cache helpers
-│   │   ├── state.py                      ← State helpers
-│   │   └── utils.py                      ← Shared utils
-│   │
 │   ├── anime/
-│   │   ├── __init__.py                   ← anime router export
-│   │   └── resolver.py                   ← /anime/* routes + AnimeResolveRequest + anime_resolve_cache
+│   │   ├── __init__.py
+│   │   └── resolver.py                   ← /anime/* routes + anime_resolve_cache
 │   │
 │   ├── moviebox/
-│   │   ├── __init__.py                   ← moviebox router + MOVIEBOX_AVAILABLE flag
+│   │   ├── __init__.py                   ← MOVIEBOX_AVAILABLE flag — False if import fails
+│   │   ├── moviebox_fetchers.py
+│   │   ├── moviebox_helpers.py
+│   │   ├── moviebox_loader.py
 │   │   └── routes.py                     ← /moviebox/* routes
 │   │
-│   ├── downloads/
-│   │   └── engine.py                     ← Download engine: yt-dlp + aria2, ensure_runtime_bootstrap,
-│   │                                        recover_download_jobs, _start_download_thread, list_downloads
+│   ├── downloads/                        ← Standalone download engine module
+│   │   └── engine.py                     ← yt-dlp + aria2, ensure_runtime_bootstrap,
+│   │                                        recover_download_jobs, _start_download_thread
 │   │
-│   ├── requirements.txt                  ← fastapi, uvicorn, yt-dlp, moviebox-api==0.4.0.post1,
-│   │                                        httpx, bcrypt, cinemagoer
-│   └── grabix-backend.spec               ← PyInstaller spec (must include curl_cffi in hiddenimports)
+│   ├── tests/
+│   │   ├── test_canary.py                ← THE SMOKE TESTS — run after every change
+│   │   ├── test_features.py
+│   │   ├── test_shape.py
+│   │   └── [other test files]
+│   │
+│   └── requirements.txt                  ← fastapi, uvicorn, yt-dlp, moviebox-api==0.4.0.post1,
+│                                            httpx, bcrypt, cinemagoer, curl_cffi
 │
 ├── consumet-local/
-│   ├── server.cjs                        ← Node.js entry. Providers: HiAnime, AnimeKai, KickAssAnime, AnimePahe
+│   ├── server.cjs                        ← Node.js HiAnime/AniWatch scraper
 │   └── package.json                      ← aniwatch: "latest", @consumet/extensions: ^1.8.8
 │
-├── grabix-ui/                            ← Frontend root
+├── grabix-ui/
 │   ├── src/
-│   │   ├── App.tsx                       ← Page router, backend polling every 2500ms, health state
-│   │   ├── main.tsx                      ← React entry point
-│   │   ├── index.css                     ← ALL CSS variables defined here — never hardcode colors
+│   │   ├── App.tsx                       ← Page router, backend polling every 2500ms
+│   │   ├── index.css                     ← ALL CSS variables — never hardcode colors
 │   │   │
 │   │   ├── pages/
-│   │   │   ├── AnimePageV2.tsx           ← ⭐ PRIMARY anime page (active — use this one)
-│   │   │   ├── AnimePage.tsx             ← OLD anime page (kept for reference only — not primary)
-│   │   │   ├── DownloaderPage.tsx        ← Paste URL → check link → pick quality → download queue
-│   │   │   ├── ConverterPage.tsx         ← FFmpeg converter UI (trim, format conversion)
-│   │   │   ├── LibraryPage.tsx           ← Downloaded files. Marks items "broken" if file deleted.
+│   │   │   ├── AnimePageV2.tsx           ← PRIMARY anime page (742 lines — active, use this)
+│   │   │   ├── AnimePage.tsx             ← OLD anime page — reference only, do not touch
+│   │   │   ├── DownloaderPage.tsx        ← URL → quality picker → download queue
+│   │   │   ├── ConverterPage.tsx         ← FFmpeg converter UI
+│   │   │   ├── LibraryPage.tsx           ← Downloaded files management
 │   │   │   ├── MoviesPage.tsx            ← Movies browse via TMDB
 │   │   │   ├── TVSeriesPage.tsx          ← TV series browse via TMDB
-│   │   │   ├── MangaPage.tsx             ← Manga reader (MangaDex, Comick, offline)
-│   │   │   ├── MovieBoxPage.tsx          ← MovieBox streaming provider UI
+│   │   │   ├── MangaPage.tsx             ← Manga reader
+│   │   │   ├── MovieBoxPage.tsx          ← MovieBox streaming UI
 │   │   │   ├── ExplorePage.tsx           ← Cross-content explore/trending
 │   │   │   ├── BrowsePage.tsx            ← Content browser
 │   │   │   ├── FavoritesPage.tsx         ← Favorited items
-│   │   │   ├── RatingsPage.tsx           ← Top-rated charts (Jikan /top/anime + IMDB IDs)
-│   │   │   ├── SettingsPage.tsx          ← App settings + diagnostics + health checks panel
-│   │   │   ├── HomePage.tsx              ← Home/dashboard
-│   │   │   └── VidSrcPlayer.tsx          ← VidSrc iframe player page
+│   │   │   ├── RatingsPage.tsx           ← Top-rated charts
+│   │   │   ├── SettingsPage.tsx          ← Settings + diagnostics panel
+│   │   │   └── HomePage.tsx              ← Home/dashboard
 │   │   │
 │   │   ├── components/
-│   │   │   ├── VidSrcPlayer.tsx          ← Embedded video player (HLS.js + subtitle support)
+│   │   │   ├── VidSrcPlayer.tsx          ← SPLIT DONE — now 268 lines (JSX shell only)
+│   │   │   │                                Imports everything from player/ subfolder
+│   │   │   ├── player/
+│   │   │   │   ├── usePlayerState.ts     ← RED: 1,028 lines — needs splitting (see plan below)
+│   │   │   │   │                            All useState, useRef, useEffect, useCallback, handlers
+│   │   │   │   ├── helpers.ts            ← Subtitle parsing, CSS injection, stream utilities
+│   │   │   │   └── types.ts              ← Player TypeScript interfaces
+│   │   │   ├── SubtitlePanel.tsx         ← Subtitle track selector (standalone component)
 │   │   │   ├── DownloadOptionsModal.tsx  ← Quality/format picker modal
-│   │   │   ├── Sidebar.tsx               ← Left nav, page switcher, active download count badge
+│   │   │   ├── Sidebar.tsx               ← Left nav + active download count badge
 │   │   │   ├── Topbar.tsx                ← Top bar
 │   │   │   ├── AppToast.tsx              ← Toast notifications
 │   │   │   ├── CachedImage.tsx           ← Image with loading/fallback
 │   │   │   ├── ErrorBoundary.tsx         ← React error boundary per section
 │   │   │   ├── PageStates.tsx            ← PageEmptyState + PageErrorState shared UI
-│   │   │   ├── SubtitlePanel.tsx         ← Subtitle track selector
 │   │   │   ├── TrimSlider.tsx            ← Video trim UI for converter
 │   │   │   ├── WatchdogBanner.tsx        ← Orange banner when backend crashes
-│   │   │   ├── OfflineBanner.tsx         ← Banner when network is offline
+│   │   │   ├── OfflineBanner.tsx         ← Network offline banner
 │   │   │   ├── Icons.tsx                 ← Main SVG icon set
 │   │   │   └── Icons_addition.tsx        ← Additional icons
 │   │   │
 │   │   ├── context/
-│   │   │   ├── ThemeContext.tsx          ← Theme provider (light/dark via data-theme attribute)
-│   │   │   ├── FavoritesContext.tsx      ← Favorites list (localStorage-backed)
+│   │   │   ├── ThemeContext.tsx          ← light/dark via data-theme attribute
+│   │   │   ├── FavoritesContext.tsx      ← Favorites (localStorage-backed)
 │   │   │   ├── ContentFilterContext.tsx  ← Adult content filter toggle
 │   │   │   └── RuntimeHealthContext.tsx  ← Backend health state + refreshHealth()
 │   │   │
 │   │   └── lib/
-│   │       ├── api.ts                    ← BACKEND_API = http://127.0.0.1:8000, backendJson(),
-│   │       │                                fetchBackendPing(), waitForBackendCoreReady(), all TS interfaces
-│   │       ├── streamProviders.ts        ← StreamSource type, MovieBox fetch, resolveAnimePlaybackSources()
-│   │       ├── downloads.ts              ← queueVideoDownload(), queueSubtitleDownload(), resolveSourceDownloadOptions()
-│   │       ├── consumetProviders.ts      ← fetchConsumetAnimeEpisodes(), searchConsumetAnime(), fetchConsumetHealth()
-│   │       ├── aniwatchProviders.ts      ← fetchAniwatchDiscover(), searchAniwatch(), warmAniwatchSections()
-│   │       ├── mangaProviders.ts         ← fetchTrendingManga(), manga search/chapter helpers
+│   │       ├── api.ts                    ← BACKEND_API, backendJson(), all TS interfaces (322 lines)
+│   │       ├── streamProviders.ts        ← StreamSource type, resolveAnimePlaybackSources() (716 lines)
+│   │       ├── downloads.ts              ← queueVideoDownload(), queueSubtitleDownload()
+│   │       ├── consumetProviders.ts      ← fetchConsumetAnimeEpisodes(), searchConsumetAnime()
+│   │       ├── aniwatchProviders.ts      ← fetchAniwatchDiscover(), searchAniwatch()
+│   │       ├── mangaProviders.ts         ← manga search/chapter helpers
 │   │       ├── tmdb.ts                   ← searchTmdbMedia(), fetchTmdbSeasonMap()
 │   │       ├── appSettings.ts            ← Settings load/save helpers
-│   │       ├── cache.ts                  ← Frontend in-memory JSON cache (getCachedJson)
+│   │       ├── cache.ts                  ← Frontend in-memory JSON cache
 │   │       ├── mediaCache.ts             ← Media metadata cache
 │   │       ├── persistentState.ts        ← LocalStorage-backed persistent UI state
 │   │       ├── contentFilter.ts          ← Adult content filter logic
 │   │       ├── supabase.ts               ← Supabase client (optional auth/ratings)
-│   │       ├── imdbCharts.ts             ← IMDB chart helpers (hardcoded IMDB IDs)
+│   │       ├── imdbCharts.ts             ← IMDB chart helpers (hardcoded IDs)
 │   │       ├── topRatedMedia.ts          ← Top-rated fetch helpers
 │   │       ├── performance.ts            ← markPerf() / measurePerf() timing
 │   │       ├── mangaOffline.ts           ← Offline manga storage
 │   │       ├── mangaZip.ts               ← Manga ZIP chapter bundler
-│   │       ├── useOfflineDetection.ts    ← Network offline detection hook
-│   │       ├── useRetryWithBackoff.ts    ← Retry with exponential backoff hook
-│   │       └── useWatchdog.ts            ← Backend watchdog hook (detects backend crash)
+│   │       ├── useOfflineDetection.ts    ← Network offline hook
+│   │       ├── useRetryWithBackoff.ts    ← Retry with exponential backoff
+│   │       └── useWatchdog.ts            ← Backend watchdog (detects crash)
 │   │
 │   └── src-tauri/
-│       ├── tauri.conf.json               ← bundle target: ["nsis"] only, compression: zlib
+│       ├── tauri.conf.json               ← targets: ["nsis"], compression: "zlib"
 │       ├── Cargo.toml
 │       └── src/
-│           ├── main.rs                   ← Tauri entry point
-│           └── lib.rs                    ← PyO3 embed: calls run_server() in main.py on background thread
+│           ├── main.rs                   ← Tauri entry
+│           └── lib.rs                    ← Backend + sidecar process management
 │
-└── consumet-local/
-    ├── server.cjs                        ← Node.js AniWatch/HiAnime scraper
-    └── package.json
+├── build-fast.bat                        ← Full build (pip → stage → npm → cargo)
+├── run.bat                               ← Starts all 3 processes
+├── 1__Backend.bat                        ← Kills stale port 8000 process, starts backend
+├── 2__Frontend.bat                       ← Start frontend
+└── 3__Consumet_api.bat                   ← Start Node sidecar
 ```
 
 ---
 
-## DATA FLOWS
+## CRITICAL ARCHITECTURE NOTES
 
-### Download a video
-1. User pastes URL → `DownloaderPage.tsx` → `GET /check-link?url=...`
-2. `main.py`: validates URL → yt-dlp extracts info → returns title + quality formats
-3. User picks quality → `queueVideoDownload()` in `downloads.ts`
-4. `POST /downloads/queue` → `downloads/engine.py` → `_start_download_thread()`
-5. yt-dlp or aria2 downloads to `~/Downloads/GRABIX/`
-6. Frontend polls `GET /downloads` every 4s for progress update
+### Note 1: backend/main.py IS A SHIM
+`backend/main.py` only re-exports from `backend/core/main.py`.
+When someone says "fix main.py" — the real file to edit is `backend/core/main.py`.
+Never add logic to `backend/main.py`.
 
-### Play anime (full chain)
-1. User picks episode in `AnimePageV2.tsx` → `resolveAnimePlaybackSources()`
-2. Backend `consumet.py` route `/consumet/watch/anime` is called
-3. **Attempt 1:** AniWatch Node sidecar (port 3000) → often fails (npm package broken)
-4. **Attempt 2:** Python MegaCloud extractor → `megacloud.extract_hianime_stream()`
-   - Scrapes client key from HiAnime player JS
-   - Calls MegaCloud getSources API
-   - Decrypts encrypted HLS URL using columnar cipher + keygen2
-5. **Attempt 3:** Gogoanime via Consumet sidecar
-6. **Attempt 4:** Other Consumet providers (AnimeKai, KickAssAnime, AnimePahe)
-7. Resolved HLS URL → `VidSrcPlayer.tsx` → HLS.js plays stream
-8. HLS segments fetched via backend proxy: `GET /stream/proxy?url=<segment_url>`
+### Note 2: The `import main as _m` Circular Import Pattern
+`streaming_helpers.py` uses `import main as _m` inside function bodies (deferred imports).
+This is intentional — it breaks the circular import between `streaming_helpers` and `main`.
+Do NOT refactor these into module-level imports. The functions that do this are:
+- `_resolve_embed_target()` — accesses `_m._validate_outbound_url`
+- `extract_stream()` — accesses `_m.stream_extract_cache`, `_m.STREAM_EXTRACT_CACHE_TTL_SECONDS`
 
-### Backend health polling
-1. `App.tsx` polls `GET /health/capabilities` every 2500ms
-2. Response updates `runtimeState` → Sidebar shows status indicators
-3. If backend unreachable → `WatchdogBanner` shown in orange
-4. Circuit breaker: 3 consecutive failures → skip pinging for 10 min
+### Note 3: stream_proxy() and stream_variants() MUST BE SYNC DEF
+These are called from sync route handlers in `app/routes/streaming.py`.
+Making them `async def` causes FastAPI to return a coroutine object instead of a response —
+this breaks ALL HLS proxy requests and kills the player. This happened once. Never again.
+
+### Note 4: VidSrcPlayer.tsx is now a JSX-only shell
+Real player logic lives in `grabix-ui/src/components/player/usePlayerState.ts` (1,028 lines).
+`VidSrcPlayer.tsx` itself is 268 lines — it imports `usePlayerState` and renders JSX.
+The JSX imports: `usePlayerState`, `formatTime`, `SubtitlePanel`, and Icons.
+
+### Note 5: Downloads has an SSE endpoint
+`GET /downloads/stream` is a Server-Sent Events endpoint that pushes download state every 250ms.
+This replaces the old 1-second polling loop. The event generator in `downloads.py` yields
+`data: <json>\n\n` whenever the downloads dict changes.
+
+### Note 6: The _safe() Pattern in downloads.py
+All engine calls in `downloads.py` are wrapped in `_safe("function_name", fallback, *args)`.
+This prevents CORS errors: unhandled exceptions that escape before Starlette attaches CORS headers
+cause Chrome to report a CORS error instead of the real 500. Keep `_safe()` around all engine calls.
 
 ---
 
-## DATABASE (SQLite)
+## ANIME STREAMING PIPELINE (full chain, read before debugging playback)
 
-**Location:** `~/Downloads/GRABIX/grabix.db` (WAL mode, pooled `_PooledConnection`)
+```
+User clicks episode in AnimePageV2.tsx
+  → resolveAnimePlaybackSources() in streamProviders.ts
+    → GET /consumet/anime/stream?title=&episode=&audio=
+      → consumet_anime_stream.py runs the full server-side pipeline:
+
+        Step 1: Search HiAnime (sidecar port 3000) for anime ID
+                If search fails → return 404 with sidecar hint
+        Step 2: GET /anime/hianime/info → get episode list → find episode ID
+        Step 3: Loop over servers ["vidstreaming", "vidcloud", "t-cloud"]
+                For each server:
+                  Attempt A: AniWatch Node sidecar /anime/hianime/watch
+                             OFTEN FAILS — npm package broken since April 2026
+                  Attempt B: Python megacloud.extract_hianime_stream()
+                             PRIMARY WORKING FALLBACK
+                             Scrapes client key from HiAnime player JS
+                             Calls MegaCloud getSources API
+                             Decrypts HLS URL (columnar cipher + keygen2)
+                  Attempt C: Try opposite audio (dub↔sub) if both fail
+        Step 4: Return {sources, subtitles} or detailed error with _attempt_errors
+
+HLS playback path:
+  VidSrcPlayer.tsx → HLS.js
+  Every segment request → GET /stream/proxy?url=<segment_url>&headers_json=...
+  stream_proxy() (MUST be sync!) → httpx.Client → CDN
+  Playlists get rewritten by _rewrite_hls_playlist() to route all URLs through backend proxy
+  Segments streamed in 64KB chunks (streaming path), playlists buffered fully then rewritten
+```
+
+---
+
+## DOWNLOAD PIPELINE
+
+```
+DownloaderPage.tsx
+  → GET /check-link?url=...          ← core/main.py — yt-dlp info extract, returns formats
+  → POST /download                   ← app/routes/downloads.py
+      → downloads.engine.start_download()
+          → _start_download_thread() → yt-dlp or aria2c subprocess
+  → GET /downloads/stream (SSE)      ← pushes progress every 250ms (preferred)
+  OR GET /downloads                  ← polling fallback (every 4s)
+```
+
+---
+
+## BACKGROUND WORKERS (all started in core/main.py lifespan)
+
+| Worker | Interval | Purpose |
+|---|---|---|
+| `run_key_health_worker` | 1200s (20 min) | Pre-scrape MegaCloud client key before expiry |
+| `_network_monitor_worker` | 15s | Ping 8.8.8.8; auto-pause/resume downloads on network change |
+| `_auto_retry_failed_worker` | 60s | Re-queue failed downloads (max 3 retries, 5min delay) |
+| `_cache_access_flusher` | 60s | Flush LRU access timestamps to SQLite |
+
+---
+
+## DATABASE (SQLite — WAL mode, pooled connections)
+
+Location: `~/Downloads/GRABIX/grabix.db`
 
 | Table | Key Columns | Purpose |
 |---|---|---|
-| `history` | `id, url, title, status, file_path, size, category, tags, created_at, broken` | All download records |
-| `content_cache` | `key, value (JSON), content_type, expires_at, last_accessed` | API response cache (LRU, max 50MB) |
-| `health_log` | `service, status, latency_ms, error, recorded_at` | Service health events (pruned after 24h) |
+| `history` | id, url, title, status, file_path, size, category, tags, created_at, broken | Download records |
+| `content_cache` | key, value (JSON), content_type, expires_at, last_accessed | API response cache |
+| `health_log` | service, status, latency_ms, error, recorded_at | Health events (pruned 24h) |
 
-**Cache TTLs:** discover=6h · details=6h · manga_chapters=12h · search=30min · generic=15min
-**Eviction:** LRU, removes 20 oldest entries when total exceeds 50MB
+Cache TTLs: discover=6h, details=6h, manga_chapters=12h, search=30min, generic=15min
+Eviction: LRU — removes 20 oldest entries when total exceeds 50MB
 
 ---
 
@@ -244,26 +378,34 @@ grabix-master/
 | Variable | Default | Purpose |
 |---|---|---|
 | `GRABIX_BACKEND_PORT` | `8000` | Backend listen port |
-| `GRABIX_TMDB_BEARER_TOKEN` | — | TMDB API auth (also: `TMDB_BEARER_TOKEN`, `TMDB_TOKEN`) |
-| `GRABIX_APP_STATE_ROOT` | auto | Root dir for DB + settings files |
-| `GRABIX_PACKAGED_MODE` | — | Set to `1` in built `.exe` |
-| `GRABIX_DESKTOP_AUTH_TOKEN` | — | Auth token for packaged/production mode |
+| `GRABIX_TMDB_BEARER_TOKEN` | — | TMDB API auth (also: TMDB_BEARER_TOKEN, TMDB_TOKEN) |
+| `GRABIX_APP_STATE_ROOT` | auto | Root dir for DB + settings |
+| `GRABIX_PACKAGED_MODE` | — | Set to `1` in built .exe |
+| `GRABIX_DESKTOP_AUTH_TOKEN` | — | Auth token for production mode |
 | `GRABIX_PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | Backend self-reference URL |
-| `VITE_GRABIX_API_BASE` | `http://127.0.0.1:8000` | Frontend → backend base URL |
-| `CONSUMET_API_BASE` | `http://127.0.0.1:3000` | Consumet Node sidecar URL |
+| `VITE_GRABIX_API_BASE` | `http://127.0.0.1:8000` | Frontend → backend URL |
+| `CONSUMET_API_BASE` | `http://127.0.0.1:3000` | Node sidecar URL |
 
 ---
 
-## BACKGROUND WORKERS
+## DEPENDENCY MAP — what to test after each change
 
-All started automatically in `main.py` lifespan on startup.
-
-| Worker | Interval | Purpose |
+| File you changed | Files that might break | Run these tests |
 |---|---|---|
-| `_network_monitor_worker` | 15s | Ping 8.8.8.8; auto-pause downloads on WiFi drop, auto-resume on restore |
-| `_auto_retry_failed_worker` | 60s | Re-queue failed downloads (max 3 retries, 5min delay between each) |
-| `_cache_access_flusher` | 60s | Flush LRU access timestamps to SQLite |
-| `run_key_health_worker` | 1200s (20min) | Pre-scrape and verify MegaCloud client key before it expires |
+| `core/main.py` | Everything | ALL 10 canary tests |
+| `streaming_helpers.py` | `app/routes/streaming.py`, all HLS playback | Canary 5 + manual player test |
+| `app/services/megacloud.py` | Anime stream pipeline | Manual: play an anime episode |
+| `app/routes/consumet_anime_stream.py` | AnimePageV2, VidSrcPlayer | Canary 2 + manual stream test |
+| `app/routes/downloads.py` | DownloaderPage.tsx | Canary 3 (downloads) |
+| `downloads/engine.py` | downloads.py, core/main.py | Canary 3 (downloads) |
+| `db_helpers.py` | core/main.py, all download routes | Canary 3 + 4 |
+| `core/health.py` | SettingsPage diagnostics | Canary 2 + 7 |
+| `core/cache_ops.py` | cache stats/clear routes | Canary 6 (cache stats) |
+| `app/services/runtime_config.py` | Everything (it holds all paths) | ALL canary tests |
+| `player/usePlayerState.ts` | VidSrcPlayer.tsx (only consumer) | Manual: open player, test controls |
+| `lib/streamProviders.ts` | AnimePageV2.tsx, MovieBoxPage.tsx | Manual: try playing content |
+| `app/routes/settings.py` | SettingsPage.tsx | Canary 4 (settings) |
+| `core/circuit_breaker.py` | health, consumet, aniwatch, moviebox | Canary 10 (circuit breaker) |
 
 ---
 
@@ -272,109 +414,166 @@ All started automatically in `main.py` lifespan on startup.
 | Service | Auth | Used For |
 |---|---|---|
 | TMDB | Bearer token (env var) | Movie/TV metadata, posters, season lists |
-| Jikan (jikan.moe) | None | Anime metadata, top charts, `/top/anime` |
+| Jikan (jikan.moe) | None | Anime metadata, top charts |
 | AniList (GraphQL) | None | Anime/manga metadata fallback |
 | MangaDex | None | Manga chapters + pages (primary) |
-| Comick | None | Manga fallback provider |
+| Comick | None | Manga fallback |
 | HiAnime (aniwatchtv.to) | None (scraped) | Anime episode stream source |
 | MegaCloud | None (key scraped from player JS) | HLS decryption for HiAnime streams |
-| IMDB | None (cinemagoer lib) | Ratings charts (hardcoded IDs in `imdbCharts.ts`) |
-| MovieBox API | None (PyPI package) | Movie streaming (requires `curl_cffi`) |
-| Supabase | Optional | Auth/ratings — not required for core features |
+| IMDB | None (cinemagoer lib) | Ratings charts |
+| MovieBox API | None (PyPI package) | Movie streaming — needs `curl_cffi` |
+| Supabase | Optional | Auth/ratings — not required |
 
 ---
 
-## CIRCUIT BREAKER
+## CSS VARIABLES — NEVER HARDCODE COLORS
 
-Defined in `core/circuit_breaker.py` (use this) and also inline in `main.py`.
-
-- **Threshold:** 3 consecutive failures → circuit opens
-- **Cooldown:** 10 min → skips pinging, serves last known status
-- **Applies to:** consumet, aniwatch, moviebox (NOT: database, ffmpeg, downloads — those are local)
-- **Reset:** `POST /health/circuit-breaker/reset?service=consumet`
-- **View state:** `GET /health/circuit-breaker/status`
-
----
-
-## MOVIEBOX
-
-- Package: `moviebox-api==0.4.0.post1` (pip)
-- Uses `curl_cffi` internally — **must be in `hiddenimports` in `grabix-backend.spec`**
-- `MOVIEBOX_AVAILABLE` flag in `moviebox/__init__.py` — False if import fails
-- Auto-retry every 5min if import failed at startup
-- Fallback chain: embed → vidsrc
-- Download: uses `externalUrl` directly — do not resolve through embed chain
-
----
-
-## INSTALLER / BUILD
-
-- **Format:** NSIS only (`["nsis"]`) — `"all"` causes file-lock errors
-- **Compression:** `"zlib"` — do not use `"lzma"`
-- **Installer hooks:** `grabix-ui/src-tauri/installer-hooks.nsh`
-- **Bundled resources** (`tauri.conf.json`): `python-runtime/**/*`, `backend-staging/backend/**/*`, `consumet-staging/**/*`, `generated/**/*`, `tools/**/*`
-- **PyInstaller entry:** `backend/main.py`
-- **PyO3 entry:** `run_server()` in `main.py` — called from Rust `lib.rs` on a background thread
-- **Windows event loop:** Must use `SelectorEventLoop` when embedded via PyO3. `ProactorEventLoop` (Windows 3.8+ default) fails on non-main thread.
-- **Signal handlers:** Disabled in uvicorn (`server.install_signal_handlers = lambda: None`) — Python only allows signal handlers on the main thread
-
----
-
-## CSS VARIABLES (NEVER HARDCODE COLORS — ALWAYS USE THESE)
-
-Defined in `grabix-ui/src/index.css`. Apply via `var(--name)`.
+All defined in `grabix-ui/src/index.css`. Always use `var(--name)`.
 
 ```
-Layout:        --sidebar-w (220px)  --topbar-h (56px)
-
-Backgrounds:   --bg-app  --bg-sidebar  --bg-surface  --bg-surface2
-               --bg-hover  --bg-active  --bg-input  --bg-overlay
-
-Borders:       --border  --border-focus
-
-Text:          --text-primary  --text-secondary  --text-muted
-               --text-accent  --text-on-accent
-               --text-danger  --text-success  --text-warning
-
-Accent:        --accent  --accent-hover  --accent-light  --accent-subtle
-
-Semantic:      --danger  --success  --warning
-
-Shadows:       --shadow-sm  --shadow-md  --shadow-lg
-
-Fonts:         --font: 'Outfit', 'Google Sans', sans-serif
-               --font-mono: 'JetBrains Mono', 'Google Sans Mono', monospace
+Layout:       --sidebar-w (220px)   --topbar-h (56px)
+Backgrounds:  --bg-app  --bg-sidebar  --bg-surface  --bg-surface2
+              --bg-hover  --bg-active  --bg-input  --bg-overlay
+Borders:      --border  --border-focus
+Text:         --text-primary  --text-secondary  --text-muted
+              --text-accent  --text-on-accent
+              --text-danger  --text-success  --text-warning
+Accent:       --accent  --accent-hover  --accent-light  --accent-subtle
+Semantic:     --danger  --success  --warning
+Shadows:      --shadow-sm  --shadow-md  --shadow-lg
+Fonts:        --font: 'Outfit', 'Google Sans', sans-serif
+              --font-mono: 'JetBrains Mono', monospace
 ```
 
 ---
 
 ## KNOWN GOTCHAS — DO NOT RE-DEBUG THESE
 
-1. **`curl_cffi` missing from PyInstaller spec** → MovieBox silently fails in production builds. Fix: add to `hiddenimports` in `grabix-backend.spec`.
+1. **`stream_proxy()` and `stream_variants()` MUST BE sync `def`.**
+   Changing to `async def` breaks HLS proxying completely — FastAPI returns a coroutine object,
+   not a response. This happened once and killed the player. Never change this.
 
-2. **`stream_proxy()` and `stream_variants()` must be sync `def`** — changed to `async def` once, broke all HLS proxying (FastAPI got a coroutine object instead of a response). Never make these async.
+2. **`import main as _m` inside function bodies is intentional.**
+   `streaming_helpers.py::_resolve_embed_target()` and `extract_stream()` use deferred imports
+   to break a circular import chain. Do NOT move these to module-level imports.
 
-3. **`recover_download_jobs()` not called on startup** → downloads lost on restart. Must be called in both `run_server()` and `ensure_runtime_bootstrap()`.
+3. **`curl_cffi` must be in PyInstaller hiddenimports** — MovieBox silently fails in built .exe.
+   Also now listed directly in `requirements.txt`.
 
-4. **PowerShell `-c` quote escaping in `setup-python-runtime.ps1`** → `SyntaxError` on Windows. Use proper escaping and test carefully before shipping.
+4. **`recover_download_jobs()` MUST be called on startup.**
+   Called in both `run_server()` and `ensure_runtime_bootstrap()` in `core/main.py`.
+   Removing either call causes all in-progress downloads to be lost on restart.
 
-5. **NSIS build target `"all"` causes file-lock errors** → only use `["nsis"]`. Add `Remove-Item` cleanup before rebuild.
+5. **NSIS only, `"zlib"` compression.**
+   `"all"` build target or `"lzma"` causes file-lock errors on Windows during build.
 
-6. **`aniwatch` npm package (v2.27.9) broken since MegaCloud API changed April 2026** → fixed by `megacloud.py` Python fallback. Node sidecar still needed for Gogoanime/AnimePahe fallbacks.
+6. **`aniwatch` npm package broken since April 2026.**
+   MegaCloud API changed. Python `megacloud.py` is the primary fallback now.
+   Node sidecar still needed for Gogoanime/AnimePahe fallbacks.
 
-7. **Consumet sidecar silently discards error bodies** → fixed in `consumet.py` route with `_safe_error_body()` helper and `_attempt_errors` capture list.
+7. **HLS cache TTL must stay at or below 900 seconds.**
+   HiAnime signed URLs expire ~30min. `STREAM_EXTRACT_CACHE_TTL_SECONDS = 900` in `core/main.py`.
+   Never raise this above 900 or playback will fail with expired URL errors.
 
-8. **HLS cache TTL vs HiAnime signed URL expiry** → HiAnime signed URLs expire ~30min. Never cache HLS sources longer than 20min. `STREAM_EXTRACT_CACHE_TTL_SECONDS = 900` (15min) in `main.py` — do not raise this above 900.
+8. **`network_policy.py` allowlist check must run BEFORE DNS lookup.**
+   Reversed order once → caused "Failed to fetch" on valid internal URLs.
 
-9. **`network_policy.py` allowlist check order** → allowlist check must happen BEFORE DNS lookup. Reversing this caused "Failed to fetch" on valid internal URLs.
+9. **MovieBox download uses `externalUrl` directly.**
+   Do not route through the embed resolution chain — this was done correctly, do not undo it.
 
-10. **MovieBox download uses `externalUrl` directly** — do not route it through the embed resolution chain.
+10. **`get_db_connection()` must not have per-call health checks.**
+    Lazy epoch-based check only. Per-call `SELECT 1` ran in tight loops and caused slowdowns.
 
-11. **Duplicate keys in `_create_download_record`** → already removed. If you add new keys, check for duplicates first.
+11. **`AnimePageV2.tsx` is the active primary page.**
+    `AnimePage.tsx` is kept for reference only. Fix bugs in V2 only. Never touch AnimePage.tsx.
 
-12. **`get_db_connection()` had eager `SELECT 1` health check** → ran on every call in tight loops. Replaced with lazy epoch-based check in `db_helpers.py`. Do not add per-call health checks back.
+12. **`backend/main.py` is a shim.**
+    The real file is `backend/core/main.py`. This is the most common AI mistake.
 
-13. **`AnimePageV2.tsx` is the active primary page** — `AnimePage.tsx` is old and kept for reference only. Do not fix bugs in `AnimePage.tsx`.
+13. **Port 8000 auto-kill on restart.**
+    `1__Backend.bat` auto-kills any process holding port 8000 before starting.
+    `core/main.py::run_server()` does a pre-flight socket probe — if port busy, exits cleanly
+    before lifespan runs (this prevents the "Task destroyed" warning).
+
+14. **Windows event loop: SelectorEventLoop only.**
+    ProactorEventLoop (Windows default since Python 3.8) fails on non-main thread.
+    `run_server()` explicitly creates `SelectorEventLoop` on Windows (`os.name == "nt"`).
+
+15. **Signal handlers disabled in uvicorn.**
+    `server.install_signal_handlers = lambda: None`
+    Python only allows signal handlers on the main thread.
+
+16. **MegaCloud client key TTL is 1200s (20 min).**
+    Stored in `_key_health` dict in `megacloud.py`. Background worker refreshes it before expiry.
+    On startup, key is populated on first play naturally. Worker keeps it fresh afterward.
+
+17. **`_safe()` wrapper in `downloads.py` is load-bearing.**
+    All `downloads.engine` calls go through `_safe("function_name", fallback, *args)`.
+    This prevents Chrome from reporting CORS errors instead of the real 500 on crashes.
+    Keep `_safe()` around every engine call. Do not call engine functions directly.
+
+18. **Consumet sidecar silently drops error bodies.**
+    Fixed in `consumet_helpers.py` with `_safe_error_body()` helper.
+    Always use this function when logging a failed sidecar response.
+
+---
+
+## PHASE 2 FILE SPLIT STATUS
+
+### DONE
+| Original file | Was | Now | Split into |
+|---|---|---|---|
+| `backend/main.py` | 1,784 lines | 573 lines (`core/main.py`) | `core/health.py`, `core/cache_ops.py`, `core/network_monitor.py`, `core/download_helpers.py` |
+| `VidSrcPlayer.tsx` | 2,478 lines | 268 lines | `player/usePlayerState.ts`, `player/helpers.ts`, `player/types.ts` |
+| `app/routes/consumet.py` | 1,057 lines | 229 lines | `consumet_anime_stream.py`, `consumet_anime_debug.py`, `consumet_helpers.py` |
+
+### STILL NEEDS SPLITTING
+`player/usePlayerState.ts` — 1,028 lines. This is the only remaining large file.
+
+Suggested split:
+```
+player/
+├── useHlsEngine.ts       (~200 lines) — HLS.js setup, level management, quality switching
+├── useSubtitleEngine.ts  (~200 lines) — subtitle load, parse, render, cue tracking, appearance
+├── usePlayerControls.ts  (~150 lines) — play/pause/seek/volume/fullscreen/keyboard shortcuts
+├── useSourceManager.ts   (~200 lines) — source switching, episode switching, sourceOption switching
+└── usePlayerState.ts     (~280 lines) — thin orchestrator that composes the 4 hooks above
+```
+
+Prompt to give Claude:
+```
+Split grabix-ui/src/components/player/usePlayerState.ts (1,028 lines).
+Create these new files in the same player/ folder:
+- useHlsEngine.ts — all HLS.js logic: Hls instance, level management, adaptive quality
+- useSubtitleEngine.ts — all subtitle loading, VTT parsing, cue tracking, appearance settings
+- usePlayerControls.ts — play/pause/seek/volume/fullscreen/keyboard shortcuts
+- useSourceManager.ts — source switching, episode switching, sourceOption switching
+Keep usePlayerState.ts as a thin orchestrator that imports and composes the above.
+Give me each complete file with full content.
+After saving, run npm run dev and manually test the player.
+```
+
+---
+
+## HOW TO GIVE CLAUDE A BUG TO FIX (use this workflow every time)
+
+### WRONG (what broke things before):
+```
+"Hey Claude, downloads are broken, fix it"
+```
+This forces Claude to guess across thousands of lines.
+
+### RIGHT:
+```
+"Downloads are broken. Error appears when I click Download.
+Relevant file: app/routes/downloads.py (194 lines) — here it is: [paste file].
+Fix only this file. I will run canary tests after."
+```
+
+### 3-step formula:
+1. **Identify** — which file is the problem in? Use the dependency map above.
+2. **Paste** — give Claude that specific file (under 400 lines is ideal).
+3. **Verify** — run `python -m pytest tests/test_canary.py -v` after saving.
 
 ---
 
@@ -383,7 +582,7 @@ Fonts:         --font: 'Outfit', 'Google Sans', sans-serif
 | Endpoint | Purpose |
 |---|---|
 | `GET /health/ping` | Ultra-fast liveness check (no DB, no filesystem) |
-| `GET /health/capabilities` | Full health + capability flags (polled every 2500ms by frontend) |
+| `GET /health/capabilities` | Full health + capability flags (polled every 2500ms by App.tsx) |
 | `GET /health/services` | Per-service status breakdown |
 | `GET /health/log?service=NAME` | Recent health events for a service |
 | `GET /health/circuit-breaker/status` | Circuit breaker state for all services |
@@ -392,95 +591,86 @@ Fonts:         --font: 'Outfit', 'Google Sans', sans-serif
 | `GET /diagnostics/logs?limit=N` | Last N backend log events |
 | `POST /cache/clear` | Wipe content cache (add `?content_type=TYPE` to target one type) |
 | `GET /cache/stats` | Cache size, entry count, per-type breakdown |
-| `GET /consumet/anime/debug-stream?title=&episode=` | Full anime pipeline trace |
+| `GET /consumet/anime/debug-stream?title=&episode=` | Full anime pipeline trace with every step |
 | `GET /consumet/anime/debug-watch/{ep_id}` | Raw sidecar watch result |
 | `GET /providers/status` | All provider registry statuses |
+| `GET /downloads/stream` | SSE endpoint — real-time download progress (250ms updates) |
+
+---
+
+## INSTALLER / BUILD
+
+- **Format:** NSIS only (`["nsis"]`) — never `"all"` (causes file-lock errors)
+- **Compression:** `"zlib"` — never `"lzma"`
+- **Build script:** `build-fast.bat` at project root:
+  Step 1: Check prerequisites (python, npm, cargo)
+  Step 2: pip install requirements against bundled python-runtime
+  Step 3: Stage backend + consumet files
+  Step 4: npm run build
+  Step 5: cargo tauri build
+- **Bundled resources:** `python-runtime/**/*`, `backend-staging/backend/**/*`,
+  `consumet-staging/**/*`, `generated/**/*`, `tools/**/*`
+- **PyInstaller:** `curl_cffi` must be in `hiddenimports` in `grabix-backend.spec`
+- **Windows:** `SelectorEventLoop`, uvicorn signal handlers disabled
 
 ---
 
 ## HANDOFF — CURRENT WORK
 
-### ✅ JUST FIXED — Port 10048 error + Build app offline
-
-**Symptom 1:** Running `1__Backend.bat` crashes with `[Errno 10048] error while attempting to bind on address ('127.0.0.1', 8000)` plus a confusing `Task was destroyed but it is pending! coro=<run_key_health_worker()>` warning.
-
-**Symptom 2:** Compiled app (from `build-fast.bat`) shows every page as "Backend offline" / unavailable — downloader, anime, movies, manga, TV, MovieBox all broken.
-
-**Root cause (both symptoms, same problem):** Port 8000 was already occupied by a previous backend session. When `1__Backend.bat` restarts without cleaning up the old process, uvicorn crashes mid-startup. In the compiled app, `lib.rs` calls `is_port_available(8000)` and if port is taken, Python never starts at all → everything shows offline.
-
-The "Task destroyed" warning was a secondary symptom: uvicorn ran the FastAPI lifespan (which creates the `run_key_health_worker` async task) BEFORE attempting to bind, so when the bind failed the task was left dangling.
-
-**Files changed:**
-
-1. **`backend/main.py`** — `run_server()` now does a socket probe on port 8000 BEFORE creating uvicorn config. If the port is busy it prints a clear error and calls `sys.exit(1)`. This prevents the lifespan from ever running in the failure case, eliminating the "Task destroyed" warning entirely.
-
-2. **`1__Backend.bat`** — Added a `netstat` + `taskkill` block at startup that finds and kills any process already holding port 8000, then waits 2 seconds before launching Python. Restarting the backend now always works without manual intervention.
-
-3. **`build-fast.bat`** — Added step [2/5]: runs `pip install -r requirements.txt python-multipart` against the bundled python-runtime before staging. This ensures the compiled app always has up-to-date packages. Also added auto-kill of any running backend on port 8000 at build start, and a reminder note at the end to close `1__Backend.bat` before launching the compiled app.
-
----
-
-### 🔴 STILL OPEN — HLS Segment Fetching Fails (pre-existing)
-
-**Symptom:** Anime player shows episode duration (HLS source resolved ✓) but video never plays. Browser console shows `"AniWatch · Failed"` on segment requests.
-
-**Root cause candidates (check in this order):**
-
-1. **Missing `User-Agent` in segment proxy** — `streaming_helpers.py` → `stream_proxy()` fetches HLS segments but may not forward `User-Agent`. HiAnime's CDN requires it. Check `_normalize_request_headers()` — it sets a default UA, but confirm it's being passed to the `httpx.Client.get()` call inside `stream_proxy()`.
-
-2. **Python MegaCloud key expired** — the scraped client key may have rotated. Check `GET /health/log?service=megacloud`. If the Python extractor is failing, restart the backend (forces a re-scrape) or wait for the background worker (20min cycle).
-
-3. **Sidecar returning empty sources silently** — aniwatch npm broken since April 2026. If the Python `megacloud.py` fallback isn't being triggered, the sidecar may be returning empty results without an error. Check `GET /consumet/anime/debug-stream?title=<anime>&episode=1` → look at `step3_watch` array.
-
-**Files most likely involved:**
-- `backend/streaming_helpers.py` — segment proxy headers
-- `backend/app/routes/consumet.py` — anime stream pipeline (lines ~460–490)
-- `backend/app/services/megacloud.py` — Python fallback extractor + `_scrape_client_key()`
-- `consumet-local/server.cjs` — Node sidecar (may need `npm update aniwatch`)
-
-**Debug steps:**
-1. `GET /consumet/anime/debug-stream?title=<anime>&episode=1` — check `step3_watch` results
-2. `GET /health/log?service=aniwatch` — recent aniwatch health events
-3. Check `AnimePageV2.tsx` → "Run Full Diagnostics" button — calls the debug endpoint and shows results inline
-4. If all sidecar attempts fail: `cd consumet-local && npm update aniwatch && node server.cjs`
-
----
-
-### ✅ PREVIOUSLY FIXED — Do Not Re-investigate
+### COMPLETED FIXES
 
 | Issue | Fix location |
 |---|---|
-| `stream_proxy()` async crash | `streaming_helpers.py` — reverted to sync `def`, uses `httpx.Client` |
+| Port 10048 crash + Task destroyed warning | `core/main.py::run_server()` — pre-flight socket probe |
+| Compiled app shows backend offline | `build-fast.bat` — pip refresh step added before staging |
+| `1__Backend.bat` fails on stale port | `1__Backend.bat` — netstat+taskkill block added |
+| `stream_proxy()` async crash | `streaming_helpers.py` — reverted to sync `def` |
 | MegaCloud API broken (April 2026) | `app/services/megacloud.py` — Python reimplementation |
 | DB `SELECT 1` on every connection | `db_helpers.py` — lazy epoch-based check |
-| Consumet error bodies silently lost | `app/routes/consumet.py` — `_safe_error_body()` + `_attempt_errors` |
-| Port 10048 crash + Task destroyed warning | `backend/main.py` `run_server()` — pre-flight port probe before uvicorn |
-| Build app shows backend offline | `build-fast.bat` — pip refresh step + auto-kill of running backend |
-| 1__Backend.bat doesn't recover from stale port | `1__Backend.bat` — netstat+taskkill block at startup |
+| Consumet error bodies silently lost | `consumet_helpers.py::_safe_error_body()` |
+| `main.py` was 1,784 lines | Phase 6 split — now `core/main.py` at 573 lines |
+| `VidSrcPlayer.tsx` was 2,478 lines | Split — now 268 lines + `usePlayerState.ts` |
+| `consumet.py` was 1,057 lines | Split into stream + debug + helpers files |
+
+### STILL OPEN
+
+**Issue 1: HLS Segment Fetching Fails (anime video won't play)**
+
+Symptom: Anime player shows episode duration (HLS source resolved) but video never plays.
+Browser console shows "AniWatch Failed" on segment requests.
+
+Root cause candidates in order of likelihood:
+1. Missing or wrong User-Agent in segment proxy
+   Check: `streaming_helpers.py::stream_proxy()` → `_normalize_request_headers()`
+   Confirm the User-Agent actually reaches the CDN request headers.
+2. MegaCloud client key expired
+   Check: `GET /health/log?service=megacloud`
+   Fix: Restart backend (forces re-scrape). Background worker refreshes every 20min.
+3. Sidecar returning empty sources silently
+   Check: `GET /consumet/anime/debug-stream?title=<anime>&episode=1`
+   Look at step3_watch in the response to see what each server attempt returned.
+
+Files to check:
+- `backend/streaming_helpers.py` (segment proxy headers section)
+- `backend/app/routes/consumet_anime_stream.py` (stream pipeline)
+- `backend/app/services/megacloud.py` (Python fallback)
+- `consumet-local/server.cjs` (try: cd consumet-local && npm update aniwatch && node server.cjs)
+
+**Issue 2: usePlayerState.ts is still 1,028 lines**
+Needs to be split into 4 focused hooks. See split plan in Phase 2 section above.
+
+---
 
 ## Working Instructions
 
-When I send you a full source project in a ZIP file, first read the `claude.md` file carefully to understand the project structure, purpose, and current status.
+When I send you a full source project in a ZIP file, read the CLAUDE.md completely first.
 
-Then do the following:
-
-1. Understand the problem I am working on.
-2. Find the relevant files related to that issue.
-3. Inspect the code to identify the real root cause.
-4. Fix the problem permanently with the smallest possible code change.
-5. Do not break any other existing code.
-6. Return only the files that were changed.
-7. For each changed file, clearly tell me:
-   - the file path
-   - where to replace it
-   - the full updated content, ready to copy and paste
-   - and explain in simple short what is happpening what was the problem how did you fix it explain in simple short as possbile 
-   - On every reponse you give me you need to also give me the updated claude.md like if you fix some bug change anything needded to add in claude.md the add it otherwise it is not important for this file then don't do that 
-
-When you make any code change, also update this `claude.md` file so it always reflects the latest:
-- project structure
-- progress
-- fixes already made
-- important notes for future work
-
-The goal is to keep this file current so the next AI session can continue from the latest state without confusion.
+Then:
+1. Understand the exact problem.
+2. Identify the relevant files using the dependency map.
+3. Read those actual files carefully before writing any code.
+4. Fix the problem with the smallest possible change.
+5. Do not touch files you were not asked about.
+6. Return only the changed files with: full content, exact file path, and a simple plain-English explanation of what was wrong and what you changed.
+7. If you noticed any other bug while reading the code, mention it briefly at the end under "Also noticed."
+8. Update this CLAUDE.md if anything significant changed: new fix completed, new gotcha discovered, split status changed, new open issue found. Skip the update if nothing project-knowledge changed.

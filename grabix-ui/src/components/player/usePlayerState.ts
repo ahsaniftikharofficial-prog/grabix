@@ -8,15 +8,15 @@ import {
   useCallback, useEffect, useMemo, useRef, useState,
   type CSSProperties,
 } from "react";
-import { BACKEND_API } from "../lib/api";
-import { inferStreamKind } from "../lib/streamProviders";
-import type { StreamSource } from "../lib/streamProviders";
-import { queueVideoDownload } from "../lib/downloads";
+import { BACKEND_API } from "../../lib/api";
+import { inferStreamKind } from "../../lib/streamProviders";
+import type { StreamSource } from "../../lib/streamProviders";
+import { queueVideoDownload } from "../../lib/downloads";
 import {
   readJsonStorage,
   versionedStorageKey,
   writeJsonStorage,
-} from "../lib/persistentState";
+} from "../../lib/persistentState";
 import type {
   Props,
   SubtitleAppearanceSettings,

@@ -17,6 +17,7 @@ from core.download_helpers import _infer_download_category, _infer_library_displ
 # _is_internal_managed_file lives in anime/resolver.py; pull it in so the shim
 # exposes it as `main._is_internal_managed_file`.
 from anime.resolver import _is_internal_managed_file  # noqa: F401
+from core.cache_ops import _sqlite_cache_get, _sqlite_cache_set  # noqa: F401
 
 if __name__ == "__main__":
     import uvicorn
