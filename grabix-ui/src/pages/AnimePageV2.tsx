@@ -94,6 +94,22 @@ function makeApi(base: string) {
   const b = base.trim().replace(/\/$/, "");
   return {
     async search(q: string): Promise<HiAnimeResult[]> {
+      // 1. Try the Python backend first — it tries the sidecar then falls back to Jikan automatically.
+      //    This means search still works even when the aniwatch npm package is broken (Gotcha #6).
+      try {
+        const br = await fetch(
+          `${BACKEND_API}/aniwatch/search?query=${encodeURIComponent(q)}&page=1`,
+          { signal: AbortSignal.timeout(12000) },
+        );
+        if (br.ok) {
+          const bd = await br.json() as { items?: Array<{ id: string; title: string; type?: string; episodes_count?: number; image?: string }> };
+          const items = (bd.items ?? []).filter(i => i.id && i.title);
+          if (items.length > 0) return items.map(i => ({
+            id: i.id, title: i.title, type: i.type, totalEpisodes: i.episodes_count, image: i.image,
+          }));
+        }
+      } catch { /* backend unavailable — fall through to direct sidecar */ }
+      // 2. Direct sidecar fallback (original behaviour)
       const r = await fetch(`${b}/anime/hianime/${encodeURIComponent(q)}`);
       if (!r.ok) throw new Error(`Search failed: HTTP ${r.status}${r.status === 0 ? " — is consumet running?" : ""}`);
       const data = await r.json() as { results?: HiAnimeResult[] };
@@ -101,7 +117,13 @@ function makeApi(base: string) {
     },
     async info(id: string): Promise<HiAnimeInfo> {
       const r = await fetch(`${b}/anime/hianime/info?id=${encodeURIComponent(id)}`);
-      if (!r.ok) throw new Error(`Info failed: HTTP ${r.status}`);
+      if (!r.ok) {
+        const isJikanId = /^\d+$/.test(id);
+        const tip = isJikanId
+          ? `Info failed: HTTP ${r.status}. This result came from MyAnimeList (search fallback). Update aniwatch to get full HiAnime results: cd consumet-local && npm update aniwatch && node server.cjs`
+          : `Info failed: HTTP ${r.status}`;
+        throw new Error(tip);
+      }
       return r.json() as Promise<HiAnimeInfo>;
     },
     async watch(epId: string, server: Server, cat: Category): Promise<HiAnimeWatch> {

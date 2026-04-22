@@ -15,12 +15,14 @@ headers cause Chrome to report CORS errors instead of the real 500.
 import asyncio
 import json
 import logging
+import shutil
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 import downloads.engine as _engine
+from library_helpers import _build_library_index, _reconcile_library_state
 
 router = APIRouter()
 logger = logging.getLogger("downloads.routes")
@@ -192,3 +194,35 @@ def get_runtime_dependencies():
 @router.post("/runtime/dependencies/install")
 def install_runtime_dependency(dep_id: str):
     return _safe("install_runtime_dependency", None, dep_id)
+
+
+# ── Library routes ────────────────────────────────────────────────────────────
+
+@router.get("/library/index")
+def library_index():
+    try:
+        return {"items": _build_library_index()}
+    except Exception as exc:
+        logger.error("library_index failed: %s", exc, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
+
+@router.post("/library/reconcile")
+def library_reconcile():
+    try:
+        return _reconcile_library_state()
+    except Exception as exc:
+        logger.error("library_reconcile failed: %s", exc, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
+
+# ── Download engines availability ─────────────────────────────────────────────
+
+@router.get("/download-engines")
+def download_engines():
+    return {
+        "engines": [
+            {"id": "aria2", "available": bool(shutil.which("aria2c"))},
+            {"id": "yt-dlp", "available": bool(shutil.which("yt-dlp"))},
+        ]
+    }
