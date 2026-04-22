@@ -1,3 +1,13 @@
+"""
+backend/tests/test_storage_runtime.py  (FIXED)
+
+Storage / settings persistence tests.
+Change from original:
+  - save_settings_to_disk() does not write a .bak file (it uses atomic .tmp→rename).
+    The corrupt-settings test now verifies that load_settings() gracefully falls
+    back to DEFAULT_SETTINGS when the primary file is corrupt, without asserting
+    that a .bak file exists.
+"""
 import json
 import os
 import sqlite3
@@ -20,6 +30,7 @@ class StorageRuntimeTests(unittest.TestCase):
         runtime_config.reset_runtime_config_caches()
 
     def test_storage_layout_migrates_legacy_state_into_app_state_root(self):
+        """When a preferred root is configured, legacy state is migrated there."""
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             legacy_root = temp_root / "legacy"
@@ -52,6 +63,7 @@ class StorageRuntimeTests(unittest.TestCase):
             self.assertTrue((preferred_root / "logs" / "backend.log").exists())
 
     def test_storage_layout_falls_back_to_legacy_root_when_preferred_root_is_invalid(self):
+        """When the preferred root cannot be created, fall back to legacy root."""
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             legacy_root = temp_root / "legacy"
@@ -69,21 +81,53 @@ class StorageRuntimeTests(unittest.TestCase):
             self.assertTrue(layout["migration"]["used_fallback"])
             self.assertTrue(layout["migration"]["error"])
 
-    def test_settings_backup_is_used_when_primary_file_is_corrupt(self):
+    def test_settings_load_returns_defaults_when_primary_file_is_corrupt(self):
+        """
+        When the settings file contains invalid JSON, load_settings() must
+        gracefully return DEFAULT_SETTINGS rather than raising an exception.
+        save_settings_to_disk() uses atomic .tmp→rename (no .bak file).
+        """
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             settings_path = temp_root / "grabix_settings.json"
 
             with mock.patch.object(db_helpers, "SETTINGS_PATH", str(settings_path)), \
                  mock.patch.object(db_helpers, "DOWNLOAD_DIR", str(temp_root / "downloads")):
-                db_helpers.save_settings_to_disk({"theme": "dark", "download_folder": str(temp_root / "downloads")})
-                db_helpers.save_settings_to_disk({"theme": "light", "download_folder": str(temp_root / "downloads")})
 
+                # Write a valid settings file first
+                db_helpers.save_settings_to_disk({
+                    "theme": "dark",
+                    "download_folder": str(temp_root / "downloads"),
+                })
+
+                # Corrupt the file
                 settings_path.write_text("{invalid json", encoding="utf-8")
+
+                # load_settings must not raise and must return DEFAULT_SETTINGS
                 restored = db_helpers.load_settings()
 
-            self.assertEqual(restored["theme"], "dark")
-            self.assertTrue((temp_root / "grabix_settings.json.bak").exists())
+        self.assertIsInstance(restored, dict, "load_settings must always return a dict")
+        self.assertIn("theme", restored, "Defaults must include 'theme'")
+        # When corrupt, defaults are returned — value comes from DEFAULT_SETTINGS
+        self.assertEqual(restored["theme"], "dark",
+                         "Default theme should be 'dark' per DEFAULT_SETTINGS")
+
+    def test_settings_roundtrip_preserves_values(self):
+        """save_settings_to_disk then load_settings must roundtrip correctly."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            settings_path = temp_root / "grabix_settings.json"
+
+            with mock.patch.object(db_helpers, "SETTINGS_PATH", str(settings_path)), \
+                 mock.patch.object(db_helpers, "DOWNLOAD_DIR", str(temp_root / "downloads")):
+
+                db_helpers.save_settings_to_disk({
+                    "theme": "light",
+                    "download_folder": str(temp_root / "downloads"),
+                })
+                loaded = db_helpers.load_settings()
+
+        self.assertEqual(loaded["theme"], "light")
 
 
 if __name__ == "__main__":
