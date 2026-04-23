@@ -30,14 +30,11 @@ import "./index.css";
 const DownloaderPage = lazy(() => import("./pages/DownloaderPage"));
 const ConverterPage = lazy(() => import("./pages/ConverterPage"));
 const LibraryPage = lazy(() => import("./pages/LibraryPage"));
-const AnimePage = lazy(() => import("./pages/AnimePage"));
 const AnimePageV2 = lazy(() => import("./pages/AnimePageV2"));
 
 const MangaPage = lazy(() => import("./pages/MangaPage"));
-const ExplorePage = lazy(() => import("./pages/ExplorePage"));
-const MoviesPage = lazy(() => import("./pages/MoviesPage"));
+const MediaPage = lazy(() => import("./pages/MediaPage"));
 const MovieBoxPage = lazy(() => import("./pages/MovieBoxPage"));
-const TVSeriesPage = lazy(() => import("./pages/TVSeriesPage"));
 const FavoritesPage = lazy(() => import("./pages/FavoritesPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const RatingsPage  = lazy(() => import("./pages/RatingsPage"));
@@ -220,14 +217,12 @@ function Inner() {
     downloader: <ErrorBoundary section="Downloader"><DownloaderPage onDownloadStarting={watchdog.notifyDownloadStarting} /></ErrorBoundary>,
     converter:  <ErrorBoundary section="Converter"><ConverterPage /></ErrorBoundary>,
     library:    <ErrorBoundary section="Library"><LibraryPage /></ErrorBoundary>,
-    anime:      <ErrorBoundary section="Anime"><AnimePage /></ErrorBoundary>,
-    animev2:    <ErrorBoundary section="Anime V2"><AnimePageV2 /></ErrorBoundary>,
+    anime:      <ErrorBoundary section="Anime"><AnimePageV2 /></ErrorBoundary>,
 
     manga:      <ErrorBoundary section="Manga"><MangaPage /></ErrorBoundary>,
-    explore:    <ErrorBoundary section="Explore"><ExplorePage /></ErrorBoundary>,
-    movies:     <ErrorBoundary section="Movies"><MoviesPage /></ErrorBoundary>,
+    movies:     <ErrorBoundary section="Movies"><MediaPage mediaType="movie" /></ErrorBoundary>,
     moviebox:   <ErrorBoundary section="MovieBox"><MovieBoxPage /></ErrorBoundary>,
-    series:     <ErrorBoundary section="TV Series"><TVSeriesPage /></ErrorBoundary>,
+    series:     <ErrorBoundary section="TV Series"><MediaPage mediaType="tv" /></ErrorBoundary>,
     favorites:  <ErrorBoundary section="Favorites"><FavoritesPage /></ErrorBoundary>,
     ratings:    <ErrorBoundary section="Ratings"><RatingsPage /></ErrorBoundary>,
     settings:   <ErrorBoundary section="Settings"><SettingsPage /></ErrorBoundary>,
