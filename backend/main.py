@@ -109,6 +109,16 @@ from core.download_helpers import (
 )
 from core.network_monitor import _start_network_monitor
 
+# ── Re-export helpers that submodules look up via `import main` ───────────────
+# library_helpers and moviebox do `import main as _m; _m._sqlite_cache_get(...)`
+# The implementations live in core/ but must be reachable as main.<name>.
+from core.cache_ops import (
+    _sqlite_cache_get,
+    _sqlite_cache_set,
+    _cache_trigger_bg_refresh,
+)
+from anime.resolver import _is_internal_managed_file
+
 try:
     import bcrypt
     BCRYPT_AVAILABLE = True
@@ -150,6 +160,10 @@ download_helpers.init(
     persist_download_record=_persist_download_record,
     start_download_thread=_start_download_thread,
 )
+# Wire the downloads engine to the same shared dicts so all modules
+# read/write the same in-memory state.
+import downloads.engine as _dl_engine
+_dl_engine.init(downloads, download_controls)
 
 # ── Loggers ───────────────────────────────────────────────────────────────────
 backend_logger = get_logger("backend")
