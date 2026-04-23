@@ -47,7 +47,6 @@ export interface RuntimeHealthPayload {
 export interface BackendPingPayload {
   ok: boolean;
   core_ready: boolean;
-  consumet_url?: string;
   services: Record<string, RuntimeServiceStatus>;
 }
 
@@ -80,7 +79,7 @@ export interface StartupDiagnosticsPayload {
   diagnostics_path: string;
   resource_dir: string;
   backend: StartupSidecarDiagnostic;
-  consumet: StartupSidecarDiagnostic;
+  consumet?: StartupSidecarDiagnostic;
   desktop_auth?: StartupDesktopAuthDiagnostic;
 }
 
@@ -174,7 +173,7 @@ export function deriveRuntimeState(options: {
     if (backendCoreReady) {
       return "recovering";
     }
-    const startupStatuses = [startupDiagnostics?.backend.status, startupDiagnostics?.consumet.status].filter(Boolean);
+    const startupStatuses = [startupDiagnostics?.backend.status, startupDiagnostics?.consumet?.status].filter(Boolean);
     if (startupStatuses.some((status) => status === "starting" || status === "recovering")) {
       return "starting";
     }

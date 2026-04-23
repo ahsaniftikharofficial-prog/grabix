@@ -963,7 +963,7 @@ export default function SettingsPage() {
         </SettingRow>
         {startupDiagnostics && (
           <div style={{ paddingTop: 10, fontSize: 13, color: "var(--text-muted)", lineHeight: 1.6 }}>
-            Backend: {startupDiagnostics.backend.status} · Anime Provider: {startupDiagnostics.consumet.status}
+            Backend: {startupDiagnostics.backend.status}
           </div>
         )}
         {selfTestGate && (
