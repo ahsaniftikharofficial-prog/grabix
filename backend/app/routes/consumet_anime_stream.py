@@ -11,10 +11,11 @@ logger = logging.getLogger("consumet.routes")
 
 
 # ---------------------------------------------------------------------------
-#  /anime/stream  — full anime.py pipeline, server-side
+#  /anime/stream  — GogoAnime + AnimePahe primary pipeline (HiAnime removed)
 #
-#  Steps:  search → pick best match → info/episodes → watch
-#  Captures the real sidecar error body from every failed attempt (KEY FIX).
+#  Steps:  GogoAnime search → episodes → stream
+#          Fallback 1: AnimePahe search → episodes → stream
+#          Fallback 2: HiAnime (last resort, likely down)
 # ---------------------------------------------------------------------------
 
 @stream_router.get("/anime/stream")
@@ -22,11 +23,11 @@ async def consumet_anime_stream(
     title: str = Query(..., min_length=1, description="Anime title to search for"),
     episode: int = Query(1, ge=1, description="Episode number (1-based)"),
     audio: str = Query("sub", description="'sub' or 'dub'"),
-    anime_id: str | None = Query(None, description="Optional known HiAnime ID — skips search"),
+    anime_id: str | None = Query(None, description="Optional known GogoAnime ID — skips search"),
     alt_title: str | None = Query(None, description="Alt title to try if primary search fails"),
 ):
     """
-    Full anime.py streaming pipeline, server-side.
+    Full anime streaming pipeline — GogoAnime first, AnimePahe fallback.
     Returns stream sources + subtitles, or a detailed error with _attempt_errors.
     """
     import httpx
@@ -34,278 +35,322 @@ async def consumet_anime_stream(
 
     base = get_consumet_api_base()
     category = "dub" if audio.strip().lower() == "dub" else "sub"
-    fallback_category = "sub" if category == "dub" else "dub"
-    servers = ["vidstreaming", "vidcloud", "t-cloud"]
+    gogo_dubbed = category == "dub"
+
+    # Build list of titles to try
+    search_titles: list[str] = [title]
+    if alt_title and alt_title.strip() and alt_title.strip() != title.strip():
+        search_titles.append(alt_title.strip())
+
+    attempt_errors: list[str] = []
 
     async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as client:
 
-        # ── Step 1: Resolve anime ID ─────────────────────────────────────────
-        resolved_id: str | None = anime_id
+        # ══════════════════════════════════════════════════════════════════════
+        #  PRIMARY PATH: GogoAnime
+        # ══════════════════════════════════════════════════════════════════════
 
-        if not resolved_id:
-            search_titles = [title]
-            if alt_title and alt_title.strip() and alt_title.strip() != title.strip():
-                search_titles.append(alt_title.strip())
+        # ── Step 1-G: Search GogoAnime ────────────────────────────────────────
+        gogo_anime_id: str | None = anime_id  # allow caller to pass a known id
+        gogo_ep_id: str | None = None
 
+        if not gogo_anime_id:
             for search_term in search_titles:
                 try:
+                    # GogoAnime dub titles often have "(Dub)" suffix
+                    query = f"{search_term} (Dub)" if gogo_dubbed else search_term
                     r = await client.get(
-                        f"{base}/anime/hianime/{urlquote(search_term)}",
+                        f"{base}/anime/gogoanime/{urlquote(query, safe='')}",
                         timeout=15.0,
                     )
                     if r.status_code >= 400:
-                        logger.warning(
-                            "anime/stream: search HTTP %d for '%s' — sidecar: %s",
-                            r.status_code, search_term, _safe_error_body(r),
+                        attempt_errors.append(
+                            f"gogoanime/search/{search_term}: HTTP {r.status_code} — {_safe_error_body(r)}"
                         )
-                        continue
-                    data = r.json()
-                    results = data.get("results") or []
+                        # Also try without (Dub) suffix on failure
+                        if gogo_dubbed:
+                            r2 = await client.get(
+                                f"{base}/anime/gogoanime/{urlquote(search_term, safe='')}",
+                                timeout=15.0,
+                            )
+                            if r2.status_code < 400:
+                                r = r2
+                            else:
+                                continue
+                        else:
+                            continue
+
+                    results = r.json().get("results") or []
                     if not results:
+                        attempt_errors.append(f"gogoanime/search/{search_term}: no results")
                         continue
-                    best = max(results, key=lambda x: _title_score(str(x.get("title", "")), search_term))
-                    resolved_id = str(best.get("id", ""))
-                    if resolved_id:
-                        logger.info("anime/stream: resolved '%s' → id=%s", search_term, resolved_id)
+
+                    # Prefer results matching the dub/sub preference
+                    if gogo_dubbed:
+                        dub_results = [x for x in results if "dub" in str(x.get("title", "")).lower()]
+                        scored_pool = dub_results if dub_results else results
+                    else:
+                        sub_results = [x for x in results if "dub" not in str(x.get("title", "")).lower()]
+                        scored_pool = sub_results if sub_results else results
+
+                    best = max(scored_pool, key=lambda x: _title_score(str(x.get("title", "")), search_term))
+                    gogo_anime_id = str(best.get("id", "")).strip()
+                    if gogo_anime_id:
+                        logger.info("anime/stream: GogoAnime resolved '%s' → id=%s", search_term, gogo_anime_id)
                         break
                 except Exception as exc:
-                    logger.warning("anime/stream: search failed for '%s': %s", search_term, exc)
+                    attempt_errors.append(f"gogoanime/search/{search_term}: exception — {exc}")
+                    logger.warning("anime/stream: GogoAnime search failed for '%s': %s", search_term, exc)
 
-        if not resolved_id:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "sources": [],
-                    "subtitles": [],
-                    "error": (
-                        f"Could not find '{title}' on HiAnime. "
-                        "Check the title spelling, or try the original Japanese title."
-                    ),
-                    "_step": "search",
-                    "_sidecar_hint": (
-                        "If HiAnime search consistently fails, check that the consumet sidecar "
-                        "is running: open a terminal and run 'cd consumet-local && node server.cjs'"
-                    ),
-                },
-            )
-
-        # ── Step 2: Get episode list ─────────────────────────────────────────
-        ep_id: str | None = None
-        info_error: str = ""
-        try:
-            r2 = await client.get(
-                f"{base}/anime/hianime/info",
-                params={"id": resolved_id},
-                timeout=20.0,
-            )
-            if r2.status_code < 400:
-                data2 = r2.json()
-                episodes = data2.get("episodes") or []
-                ep_obj = next((e for e in episodes if e.get("number") == episode), None)
-                if ep_obj is None and episodes:
-                    idx = min(episode - 1, len(episodes) - 1)
-                    ep_obj = episodes[idx]
-                if ep_obj:
-                    ep_id = str(ep_obj.get("id") or ep_obj.get("episodeId") or "")
-            else:
-                info_error = _safe_error_body(r2)
-                logger.warning(
-                    "anime/stream: info HTTP %d for id=%s — sidecar: %s",
-                    r2.status_code, resolved_id, info_error,
-                )
-        except Exception as exc:
-            info_error = str(exc)
-            logger.warning("anime/stream: info fetch failed for id=%s: %s", resolved_id, exc)
-
-        if not ep_id:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "sources": [],
-                    "subtitles": [],
-                    "error": (
-                        f"Episode {episode} not found for '{title}' "
-                        f"(anime_id={resolved_id}). "
-                        + (f"Sidecar error: {info_error}" if info_error else "")
-                    ),
-                    "_step": "info",
-                    "_anime_id": resolved_id,
-                    "_sidecar_error": info_error,
-                    "_sidecar_hint": (
-                        "The sidecar returned no episode list. "
-                        "Try restarting it: 'cd consumet-local && node server.cjs'"
-                    ),
-                },
-            )
-
-        # ── Step 3: Get stream — ALL combos run CONCURRENTLY ────────────────
-        import asyncio as _asyncio
-
-        attempt_errors: list[str] = []
-
-        async def _try_watch(srv: str, cat: str):
+        # ── Step 2-G: Get GogoAnime episode list ──────────────────────────────
+        if gogo_anime_id:
             try:
-                watch_url = f"{base}/anime/hianime/watch/{urlquote(ep_id, safe='')}"
-                r3 = await client.get(
-                    watch_url,
-                    params={"server": srv, "category": cat},
+                r2 = await client.get(
+                    f"{base}/anime/gogoanime/info/{urlquote(gogo_anime_id, safe='')}",
+                    timeout=20.0,
+                )
+                if r2.status_code < 400:
+                    episodes = r2.json().get("episodes") or []
+                    ep_obj = next((e for e in episodes if e.get("number") == episode), None)
+                    if ep_obj is None and episodes:
+                        idx = min(episode - 1, len(episodes) - 1)
+                        ep_obj = episodes[idx]
+                    if ep_obj:
+                        gogo_ep_id = str(ep_obj.get("id") or ep_obj.get("episodeId") or "").strip()
+                        logger.info(
+                            "anime/stream: GogoAnime ep%d id=%s for anime=%s",
+                            episode, gogo_ep_id, gogo_anime_id,
+                        )
+                    else:
+                        attempt_errors.append(f"gogoanime/info: ep{episode} not in episode list")
+                else:
+                    attempt_errors.append(
+                        f"gogoanime/info/{gogo_anime_id}: HTTP {r2.status_code} — {_safe_error_body(r2)}"
+                    )
+            except Exception as exc:
+                attempt_errors.append(f"gogoanime/info: exception — {exc}")
+                logger.warning("anime/stream: GogoAnime info failed for id=%s: %s", gogo_anime_id, exc)
+
+        # ── Step 3-G: Get GogoAnime stream ────────────────────────────────────
+        if gogo_ep_id:
+            try:
+                rw = await client.get(
+                    f"{base}/anime/gogoanime/watch",
+                    params={"episodeId": gogo_ep_id},
                     timeout=25.0,
                 )
-                if r3.status_code >= 400:
-                    err = _safe_error_body(r3)
-                    logger.warning(
-                        "anime/stream: watch HTTP %d ep=%s server=%s cat=%s — %s",
-                        r3.status_code, ep_id, srv, cat, err,
-                    )
-                    return None, f"{srv}/{cat}: HTTP {r3.status_code} — {err}"
-                data3 = r3.json()
-                sources = data3.get("sources") or []
-                if not sources:
-                    inner_err = data3.get("error") or data3.get("detail") or "empty sources array"
-                    return None, f"{srv}/{cat}: 200 OK but no sources — {inner_err}"
-                data3["_anime_id"] = resolved_id
-                data3["_episode_id"] = ep_id
-                data3["_server_used"] = srv
-                data3["_category_used"] = cat
-                logger.info(
-                    "anime/stream: ✓ %d sources for '%s' ep%d via %s/%s",
-                    len(sources), title, episode, srv, cat,
-                )
-                return data3, None
-            except Exception as exc:
-                logger.warning("anime/stream: watch exception ep=%s srv=%s cat=%s: %s", ep_id, srv, cat, exc)
-                return None, f"{srv}/{cat}: exception — {exc}"
-
-        combos = [(srv, cat) for cat in [category, fallback_category] for srv in servers]
-        watch_results = await _asyncio.gather(*[_try_watch(s, c) for s, c in combos])
-
-        for data3, err in watch_results:
-            if err:
-                attempt_errors.append(err)
-            if data3:
-                return JSONResponse(content=data3)
-
-        # ── All HiAnime sidecar attempts failed — try Python MegaCloud extractor ─
-        try:
-            from app.services.megacloud import extract_hianime_stream as _py_extract
-            logger.info("anime/stream: trying Python MegaCloud extractor for ep_id=%s", ep_id)
-            py_result = await _py_extract(ep_id, category)
-            py_sources = py_result.get("sources") or []
-            if py_sources:
-                logger.info("anime/stream: Python extractor succeeded (%d sources)", len(py_sources))
-                return JSONResponse(content={
-                    "sources": py_sources,
-                    "subtitles": py_result.get("subtitles") or [],
-                    "headers": py_result.get("headers") or {},
-                    "_server_used": "python-megacloud",
-                    "_category_used": category,
-                    "_anime_id": resolved_id,
-                    "_episode_id": ep_id,
-                    "_fallback": "python-megacloud",
-                })
-        except Exception as py_exc:
-            logger.warning("anime/stream: Python MegaCloud extractor failed: %s", py_exc)
-
-        # ── Gogoanime fallback ───────────────────────────────────────────────
-        try:
-            logger.info("anime/stream: trying Gogoanime for '%s' ep%d", title, episode)
-            gogo_dubbed = (category == "dub")
-            gogo_titles = [title]
-            if alt_title and alt_title.strip() and alt_title.strip() != title.strip():
-                gogo_titles.append(alt_title.strip())
-            gr = None
-            for gogo_title in gogo_titles:
-                _gr = await client.get(
-                    f"{base}/anime/gogoanime/stream",
-                    params={"title": gogo_title, "episode": episode, "dubbed": str(gogo_dubbed).lower()},
-                    timeout=30.0,
-                )
-                if _gr.status_code < 400 and (_gr.json().get("sources") or []):
-                    gr = _gr
-                    break
-                gr = _gr
-            if gr is None:
-                raise RuntimeError("no gogoanime response")
-            if gr.status_code < 400:
-                gd = gr.json()
-                gogo_sources = gd.get("sources") or []
-                playable = [s for s in gogo_sources if s.get("url") and (
-                    s.get("isM3U8") or ".m3u8" in str(s.get("url", "")) or
-                    str(s.get("quality", "")).lower() not in ("backup", "")
-                )]
-                if not playable:
-                    playable = gogo_sources
-                if playable:
-                    logger.info("anime/stream: Gogoanime succeeded for '%s' ep%d (%d sources)", title, episode, len(playable))
-                    return JSONResponse(content={
-                        "sources": playable,
-                        "subtitles": gd.get("subtitles") or [],
-                        "headers": gd.get("headers") or {},
-                        "_server_used": "gogoanime",
-                        "_category_used": category,
-                        "_fallback": "gogoanime",
-                    })
-        except Exception as gogo_exc:
-            logger.warning("anime/stream: Gogoanime fallback failed for '%s': %s", title, gogo_exc)
-
-        # ── AnimePahe fallback ───────────────────────────────────────────────
-        try:
-            logger.info("anime/stream: HiAnime failed, trying AnimePahe fallback for '%s' ep%d", title, episode)
-            pahe_search_url = f"{base}/anime/animepahe/{urlquote(title, safe='')}"
-            pr = await client.get(pahe_search_url, timeout=12.0)
-            if pr.status_code < 400:
-                pahe_results = pr.json().get("results") or []
-                if pahe_results:
-                    best_pahe = max(
-                        pahe_results,
-                        key=lambda x: _title_score(str(x.get("title", "")), title),
-                    )
-                    pahe_id = str(best_pahe.get("id", "")).strip()
-                    if pahe_id:
-                        pi_r = await client.get(
-                            f"{base}/anime/animepahe/info/{urlquote(pahe_id, safe='')}",
-                            timeout=15.0,
+                if rw.status_code < 400:
+                    wd = rw.json()
+                    sources = wd.get("sources") or []
+                    # Prefer m3u8 / non-backup sources
+                    playable = [
+                        s for s in sources
+                        if s.get("url") and (
+                            s.get("isM3U8")
+                            or ".m3u8" in str(s.get("url", ""))
+                            or str(s.get("quality", "")).lower() not in ("backup", "")
                         )
-                        if pi_r.status_code < 400:
-                            pahe_eps = pi_r.json().get("episodes") or []
-                            pahe_ep = next((e for e in pahe_eps if e.get("number") == episode), None)
-                            if pahe_ep is None and pahe_eps:
-                                idx = min(episode - 1, len(pahe_eps) - 1)
-                                pahe_ep = pahe_eps[idx]
-                            if pahe_ep:
-                                pahe_ep_id = str(pahe_ep.get("id") or pahe_ep.get("episodeId") or "").strip()
-                                if pahe_ep_id:
-                                    ps_r = await client.get(
-                                        f"{base}/anime/animepahe/watch",
-                                        params={"episodeId": pahe_ep_id},
-                                        timeout=15.0,
-                                    )
-                                    if ps_r.status_code < 400:
-                                        ps_data = ps_r.json()
-                                        pahe_sources = ps_data.get("sources") or []
-                                        if pahe_sources:
-                                            logger.info(
-                                                "anime/stream: AnimePahe fallback succeeded for '%s' ep%d (%d sources)",
-                                                title, episode, len(pahe_sources),
-                                            )
-                                            return JSONResponse(content={
-                                                "sources": pahe_sources,
-                                                "subtitles": ps_data.get("subtitles") or [],
-                                                "headers": ps_data.get("headers") or {},
-                                                "_server_used": "animepahe",
-                                                "_category_used": category,
-                                                "_anime_id": pahe_id,
-                                                "_episode_id": pahe_ep_id,
-                                                "_fallback": "animepahe",
-                                            })
-        except Exception as pahe_exc:
-            logger.warning("anime/stream: AnimePahe fallback failed for '%s': %s", title, pahe_exc)
+                    ] or sources
+                    if playable:
+                        logger.info(
+                            "anime/stream: ✓ GogoAnime success for '%s' ep%d (%d sources)",
+                            title, episode, len(playable),
+                        )
+                        return JSONResponse(content={
+                            "sources": playable,
+                            "subtitles": wd.get("subtitles") or [],
+                            "headers": wd.get("headers") or {},
+                            "_provider": "gogoanime",
+                            "_anime_id": gogo_anime_id,
+                            "_episode_id": gogo_ep_id,
+                            "_category_used": category,
+                        })
+                    else:
+                        attempt_errors.append(f"gogoanime/watch: 200 OK but no sources for ep_id={gogo_ep_id}")
+                else:
+                    attempt_errors.append(
+                        f"gogoanime/watch: HTTP {rw.status_code} — {_safe_error_body(rw)}"
+                    )
+            except Exception as exc:
+                attempt_errors.append(f"gogoanime/watch: exception — {exc}")
+                logger.warning("anime/stream: GogoAnime watch failed for ep_id=%s: %s", gogo_ep_id, exc)
 
-        # All attempts failed
+        # ══════════════════════════════════════════════════════════════════════
+        #  FALLBACK 1: AnimePahe
+        # ══════════════════════════════════════════════════════════════════════
+
+        logger.info("anime/stream: GogoAnime failed, trying AnimePahe for '%s' ep%d", title, episode)
+
+        pahe_anime_id: str | None = None
+        pahe_ep_id: str | None = None
+
+        for search_term in search_titles:
+            try:
+                pr = await client.get(
+                    f"{base}/anime/animepahe/{urlquote(search_term, safe='')}",
+                    timeout=15.0,
+                )
+                if pr.status_code >= 400:
+                    attempt_errors.append(
+                        f"animepahe/search/{search_term}: HTTP {pr.status_code} — {_safe_error_body(pr)}"
+                    )
+                    continue
+                pahe_results = pr.json().get("results") or []
+                if not pahe_results:
+                    attempt_errors.append(f"animepahe/search/{search_term}: no results")
+                    continue
+                best_pahe = max(
+                    pahe_results,
+                    key=lambda x: _title_score(str(x.get("title", "")), search_term),
+                )
+                pahe_anime_id = str(best_pahe.get("id", "")).strip()
+                if pahe_anime_id:
+                    logger.info("anime/stream: AnimePahe resolved '%s' → id=%s", search_term, pahe_anime_id)
+                    break
+            except Exception as exc:
+                attempt_errors.append(f"animepahe/search/{search_term}: exception — {exc}")
+                logger.warning("anime/stream: AnimePahe search failed for '%s': %s", search_term, exc)
+
+        if pahe_anime_id:
+            try:
+                pi_r = await client.get(
+                    f"{base}/anime/animepahe/info/{urlquote(pahe_anime_id, safe='')}",
+                    timeout=20.0,
+                )
+                if pi_r.status_code < 400:
+                    pahe_eps = pi_r.json().get("episodes") or []
+                    pahe_ep = next((e for e in pahe_eps if e.get("number") == episode), None)
+                    if pahe_ep is None and pahe_eps:
+                        idx = min(episode - 1, len(pahe_eps) - 1)
+                        pahe_ep = pahe_eps[idx]
+                    if pahe_ep:
+                        pahe_ep_id = str(pahe_ep.get("id") or pahe_ep.get("episodeId") or "").strip()
+                else:
+                    attempt_errors.append(
+                        f"animepahe/info/{pahe_anime_id}: HTTP {pi_r.status_code} — {_safe_error_body(pi_r)}"
+                    )
+            except Exception as exc:
+                attempt_errors.append(f"animepahe/info: exception — {exc}")
+                logger.warning("anime/stream: AnimePahe info failed for id=%s: %s", pahe_anime_id, exc)
+
+        if pahe_ep_id:
+            try:
+                ps_r = await client.get(
+                    f"{base}/anime/animepahe/watch",
+                    params={"episodeId": pahe_ep_id},
+                    timeout=20.0,
+                )
+                if ps_r.status_code < 400:
+                    ps_data = ps_r.json()
+                    pahe_sources = ps_data.get("sources") or []
+                    if pahe_sources:
+                        logger.info(
+                            "anime/stream: ✓ AnimePahe success for '%s' ep%d (%d sources)",
+                            title, episode, len(pahe_sources),
+                        )
+                        return JSONResponse(content={
+                            "sources": pahe_sources,
+                            "subtitles": ps_data.get("subtitles") or [],
+                            "headers": ps_data.get("headers") or {},
+                            "_provider": "animepahe",
+                            "_anime_id": pahe_anime_id,
+                            "_episode_id": pahe_ep_id,
+                            "_category_used": category,
+                        })
+                    else:
+                        attempt_errors.append(f"animepahe/watch: 200 OK but no sources for ep_id={pahe_ep_id}")
+                else:
+                    attempt_errors.append(
+                        f"animepahe/watch: HTTP {ps_r.status_code} — {_safe_error_body(ps_r)}"
+                    )
+            except Exception as exc:
+                attempt_errors.append(f"animepahe/watch: exception — {exc}")
+                logger.warning("anime/stream: AnimePahe watch failed for ep_id=%s: %s", pahe_ep_id, exc)
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  FALLBACK 2: HiAnime (last resort — likely down, kept for future use)
+        # ══════════════════════════════════════════════════════════════════════
+
+        import asyncio as _asyncio
+
+        fallback_category = "sub" if category == "dub" else "dub"
+        hianime_id: str | None = None
+        hianime_ep_id: str | None = None
+
+        for search_term in search_titles:
+            try:
+                r = await client.get(
+                    f"{base}/anime/hianime/{urlquote(search_term, safe='')}",
+                    timeout=10.0,
+                )
+                if r.status_code < 400:
+                    results = r.json().get("results") or []
+                    if results:
+                        best = max(results, key=lambda x: _title_score(str(x.get("title", "")), search_term))
+                        hianime_id = str(best.get("id", "")).strip()
+                        if hianime_id:
+                            break
+            except Exception:
+                pass  # HiAnime is expected to be down — silent failure
+
+        if hianime_id:
+            try:
+                r2 = await client.get(
+                    f"{base}/anime/hianime/info",
+                    params={"id": hianime_id},
+                    timeout=15.0,
+                )
+                if r2.status_code < 400:
+                    episodes = r2.json().get("episodes") or []
+                    ep_obj = next((e for e in episodes if e.get("number") == episode), None)
+                    if ep_obj is None and episodes:
+                        idx = min(episode - 1, len(episodes) - 1)
+                        ep_obj = episodes[idx]
+                    if ep_obj:
+                        hianime_ep_id = str(ep_obj.get("id") or ep_obj.get("episodeId") or "").strip()
+            except Exception:
+                pass
+
+        if hianime_ep_id:
+            servers = ["vidstreaming", "vidcloud", "t-cloud"]
+
+            async def _try_hianime_watch(srv: str, cat: str):
+                try:
+                    rw = await client.get(
+                        f"{base}/anime/hianime/watch/{urlquote(hianime_ep_id, safe='')}",
+                        params={"server": srv, "category": cat},
+                        timeout=20.0,
+                    )
+                    if rw.status_code < 400:
+                        d = rw.json()
+                        if d.get("sources"):
+                            return d, None
+                        return None, f"hianime/{srv}/{cat}: no sources"
+                    return None, f"hianime/{srv}/{cat}: HTTP {rw.status_code}"
+                except Exception as exc:
+                    return None, f"hianime/{srv}/{cat}: exception — {exc}"
+
+            combos = [(srv, cat) for cat in [category, fallback_category] for srv in servers]
+            hi_results = await _asyncio.gather(*[_try_hianime_watch(s, c) for s, c in combos])
+            for d, err in hi_results:
+                if err:
+                    attempt_errors.append(err)
+                if d:
+                    logger.info("anime/stream: ✓ HiAnime fallback succeeded for '%s' ep%d", title, episode)
+                    return JSONResponse(content={
+                        **d,
+                        "_provider": "hianime",
+                        "_anime_id": hianime_id,
+                        "_episode_id": hianime_ep_id,
+                        "_category_used": category,
+                        "_fallback": "hianime",
+                    })
+
+        # ── All providers failed ──────────────────────────────────────────────
         hint = _build_sidecar_hint(attempt_errors)
         logger.error(
-            "anime/stream: all attempts failed for '%s' ep%d (id=%s ep_id=%s). Errors: %s",
-            title, episode, resolved_id, ep_id, attempt_errors,
+            "anime/stream: all providers failed for '%s' ep%d. Errors: %s",
+            title, episode, attempt_errors,
         )
         return JSONResponse(
             status_code=502,
@@ -314,11 +359,9 @@ async def consumet_anime_stream(
                 "subtitles": [],
                 "error": (
                     f"No playable stream found for '{title}' episode {episode}. "
-                    f"Tried HiAnime (vidcloud+vidstreaming+t-cloud, {category.upper()}+{fallback_category.upper()}) + Gogoanime + AnimePahe. "
+                    f"Tried GogoAnime → AnimePahe → HiAnime. "
                     f"{hint}"
                 ),
-                "_anime_id": resolved_id,
-                "_episode_id": ep_id,
                 "_step": "watch",
                 "_attempt_errors": attempt_errors,
                 "_sidecar_hint": hint,
@@ -334,7 +377,6 @@ async def consumet_anime_stream(
 async def consumet_anime_debug_watch(ep_id: str):
     """
     Proxies GET /anime/hianime/debug-watch/{ep_id} from the consumet sidecar.
-    Use when /anime/debug-stream shows step 3 failing.
     """
     import httpx
     from urllib.parse import quote as urlquote
@@ -362,7 +404,7 @@ async def consumet_anime_debug_watch(ep_id: str):
 
 
 # ---------------------------------------------------------------------------
-#  /watch/anime/raw  — raw pass-through (backward compat)
+#  /watch/anime/raw  — raw pass-through: GogoAnime first, HiAnime fallback
 # ---------------------------------------------------------------------------
 
 @stream_router.get("/watch/anime/raw")
@@ -371,37 +413,61 @@ async def consumet_watch_anime_raw(
     server: str = Query("vidcloud"),
     category: str = Query("sub"),
 ):
+    """
+    Raw episode watch — tries GogoAnime first (episode_id as gogoanime ep id),
+    then HiAnime as fallback.
+    """
     import httpx
     from urllib.parse import quote as urlquote
 
     base = get_consumet_api_base()
-    url = f"{base}/anime/hianime/watch/{urlquote(episode_id, safe='')}"
-    servers_to_try = ["vidcloud", "vidstreaming"] if server in ("auto", "") else [server]
-    if server == "vidcloud":
-        servers_to_try = ["vidcloud", "vidstreaming"]
-    elif server == "vidstreaming":
-        servers_to_try = ["vidstreaming", "vidcloud"]
-
     attempt_errors: list[str] = []
+
     async with httpx.AsyncClient(timeout=35.0, follow_redirects=True) as client:
+
+        # Try GogoAnime first
+        try:
+            r = await client.get(
+                f"{base}/anime/gogoanime/watch",
+                params={"episodeId": episode_id},
+                timeout=20.0,
+            )
+            if r.status_code < 400:
+                data = r.json()
+                sources = data.get("sources") or []
+                if sources:
+                    data["_server_used"] = "gogoanime"
+                    data["_category_used"] = category
+                    return JSONResponse(content=data)
+                attempt_errors.append("gogoanime/watch: 200 OK but no sources")
+            else:
+                attempt_errors.append(f"gogoanime/watch: HTTP {r.status_code} — {_safe_error_body(r)}")
+        except Exception as exc:
+            attempt_errors.append(f"gogoanime/watch: exception — {exc}")
+
+        # HiAnime fallback
+        hianime_url = f"{base}/anime/hianime/watch/{urlquote(episode_id, safe='')}"
+        servers_to_try = (
+            ["vidcloud", "vidstreaming"] if server in ("auto", "", "vidcloud")
+            else ["vidstreaming", "vidcloud"] if server == "vidstreaming"
+            else [server]
+        )
         for srv in servers_to_try:
             try:
-                r = await client.get(url, params={"server": srv, "category": category})
+                r = await client.get(hianime_url, params={"server": srv, "category": category})
                 if r.status_code >= 400:
-                    err = _safe_error_body(r)
-                    attempt_errors.append(f"{srv}: HTTP {r.status_code} — {err}")
+                    attempt_errors.append(f"hianime/{srv}: HTTP {r.status_code} — {_safe_error_body(r)}")
                     continue
                 data = r.json()
                 sources = data.get("sources") or []
                 if not sources:
-                    attempt_errors.append(f"{srv}: 200 OK but no sources")
+                    attempt_errors.append(f"hianime/{srv}: 200 OK but no sources")
                     continue
                 data["_server_used"] = srv
                 data["_category_used"] = category
                 return JSONResponse(content=data)
             except Exception as exc:
-                attempt_errors.append(f"{srv}: exception — {exc}")
-                continue
+                attempt_errors.append(f"hianime/{srv}: exception — {exc}")
 
     return JSONResponse(
         status_code=502,

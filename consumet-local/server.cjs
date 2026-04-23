@@ -4,11 +4,23 @@ const cheerio = require("cheerio");
 const { HiAnime } = require("aniwatch");
 const { ANIME } = require("@consumet/extensions");
 
-// Fallback anime provider scrapers (used when HiAnime fails)
-const animeKai = new ANIME.AnimeKai();
-const kickAss = new ANIME.KickAssAnime();
-const animePahe = new ANIME.AnimePahe();
+// Anime providers — GogoAnime primary, AnimePahe fallback
 const gogoAnime = new ANIME.Gogoanime();
+// Override outdated gogoanime.cl URL with the current working mirror
+gogoAnime.baseUrl = "https://anitaku.pe";
+gogoAnime.ajaxUrl = "https://ajax.gogo-load.com/ajax";
+// Patch the internal axios client to send a browser User-Agent (required by anitaku.pe)
+if (gogoAnime.client && gogoAnime.client.defaults) {
+  gogoAnime.client.defaults.headers["User-Agent"] =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+  gogoAnime.client.defaults.headers["Referer"] = "https://anitaku.pe/";
+}
+
+const animePahe = new ANIME.AnimePahe();
+if (animePahe.client && animePahe.client.defaults) {
+  animePahe.client.defaults.headers["User-Agent"] =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+}
 
 function readOption(flag) {
   const directPrefix = `${flag}=`;
@@ -720,7 +732,7 @@ async function route(pathname, searchParams) {
   if (pathname === "/anime/gogoanime/watch") {
     const episodeId = String(searchParams.get("episodeId") || "").trim();
     if (!episodeId) return { status: 400, body: { detail: "episodeId is required" } };
-    const data = await gogoAnime.fetchEpisodeSources(episodeId);
+    const data = await gogoAnime.fetchEpisodeSources(episodeId, null);
     return { status: 200, body: data };
   }
 
@@ -752,7 +764,7 @@ async function route(pathname, searchParams) {
     if (!ep) return { status: 404, body: { sources: [], error: `GogoAnime: episode ${episodeNum} not found for '${title}'` } };
 
     // Fetch sources
-    const srcData = await gogoAnime.fetchEpisodeSources(ep.id);
+    const srcData = await gogoAnime.fetchEpisodeSources(ep.id, null);
     return {
       status: 200,
       body: { ...srcData, _anime_id: bestId, _episode_id: ep.id, _provider: "gogoanime" },
@@ -773,64 +785,9 @@ async function route(pathname, searchParams) {
     };
   }
 
-  // ── AnimeKai routes ────────────────────────────────────────────────────────
+  // AnimeKai removed — not available in consumet v1.4.18
 
-  if (pathname === "/anime/animekai/info") {
-    const id = String(searchParams.get("id") || "").trim();
-    if (!id) return { status: 400, body: { detail: "id is required" } };
-    const data = await animeKai.fetchAnimeInfo(id);
-    return { status: 200, body: data };
-  }
-
-  if (pathname.startsWith("/anime/animekai/watch/")) {
-    const episodeId = decodeURIComponent(pathname.slice("/anime/animekai/watch/".length));
-    const server = searchParams.get("server") || undefined;
-    const data = await animeKai.fetchEpisodeSources(episodeId, server);
-    return { status: 200, body: data };
-  }
-
-  if (pathname.startsWith("/anime/animekai/")) {
-    const query = decodeURIComponent(pathname.slice("/anime/animekai/".length));
-    const data = await animeKai.search(query, parsePage(searchParams.get("page")));
-    return {
-      status: 200,
-      body: {
-        currentPage: data?.currentPage || 1,
-        hasNextPage: Boolean(data?.hasNextPage),
-        results: Array.isArray(data?.results) ? data.results : [],
-      },
-    };
-  }
-
-  // ── KickAssAnime routes ────────────────────────────────────────────────────
-
-  if (pathname === "/anime/kickassanime/info") {
-    const id = String(searchParams.get("id") || "").trim();
-    if (!id) return { status: 400, body: { detail: "id is required" } };
-    const data = await kickAss.fetchAnimeInfo(id);
-    return { status: 200, body: data };
-  }
-
-  if (pathname === "/anime/kickassanime/watch") {
-    const episodeId = String(searchParams.get("episodeId") || "").trim();
-    if (!episodeId) return { status: 400, body: { detail: "episodeId is required" } };
-    const server = searchParams.get("server") || undefined;
-    const data = await kickAss.fetchEpisodeSources(episodeId, server);
-    return { status: 200, body: data };
-  }
-
-  if (pathname.startsWith("/anime/kickassanime/")) {
-    const query = decodeURIComponent(pathname.slice("/anime/kickassanime/".length));
-    const data = await kickAss.search(query, parsePage(searchParams.get("page")));
-    return {
-      status: 200,
-      body: {
-        currentPage: data?.currentPage || 1,
-        hasNextPage: Boolean(data?.hasNextPage),
-        results: Array.isArray(data?.results) ? data.results : [],
-      },
-    };
-  }
+  // KickAssAnime removed — not available in consumet v1.4.18
 
   // ── AnimePahe routes ───────────────────────────────────────────────────────
 
@@ -889,5 +846,5 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(port, "127.0.0.1", () => {
   console.log(`GRABIX Consumet gateway listening on http://127.0.0.1:${port}`);
-  console.log(`Anime provider: HiAnime (${siteBase})`);
+  console.log(`Anime providers: GogoAnime (anitaku.pe) + AnimePahe`);
 });

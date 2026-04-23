@@ -105,18 +105,18 @@ function makeApi(base: string) {
           const items = (bd.items ?? []).filter(i => i.id && i.title);
           if (items.length > 0) return items.map(i => ({
             id: i.id, title: i.title, type: i.type, totalEpisodes: i.episodes_count,
-            image: i.image, provider: i.provider ?? "hianime",
+            image: i.image, provider: i.provider ?? "animekai",
           }));
         }
       } catch { /* backend unavailable — fall through to direct sidecar */ }
-      // 2. Direct sidecar fallback (HiAnime only — may also be blocked)
-      const r = await fetch(`${b}/anime/hianime/${encodeURIComponent(q)}`);
-      if (!r.ok) throw new Error(`Search failed: HTTP ${r.status}${r.status === 0 ? " — is consumet running?" : ". HiAnime may be Cloudflare-blocked — backend cascade should have caught this. Restart the backend."}`);
+      // 2. Direct sidecar fallback — AnimeKai (HiAnime is permanently down)
+      const r = await fetch(`${b}/anime/animekai/${encodeURIComponent(q)}`);
+      if (!r.ok) throw new Error(`Search failed: HTTP ${r.status}${r.status === 0 ? " — is consumet running?" : ". Backend search failed — try restarting the backend."}`);
       const data = await r.json() as { results?: HiAnimeResult[] };
-      return (data.results ?? []).map(r => ({ ...r, provider: "hianime" }));
+      return (data.results ?? []).map(r => ({ ...r, provider: "animekai" }));
     },
     async info(id: string, provider?: string, title?: string): Promise<HiAnimeInfo> {
-      const prov = (provider ?? "hianime").toLowerCase();
+      const prov = (provider ?? "animekai").toLowerCase();
       const isNumeric = /^\d+$/.test(id);
 
       // ── Shared normalizers ────────────────────────────────────────────────
@@ -184,24 +184,27 @@ function makeApi(base: string) {
     },
     async watch(epId: string, server: Server, cat: Category, provider?: string): Promise<HiAnimeWatch> {
       let url: string;
-      if (provider === "animekai") {
-        // AnimeKai: episodeId goes in path, server in query param
+      if (provider === "animepahe") {
+        // AnimePahe: episodeId in query param
+        url = `${b}/anime/animepahe/watch?episodeId=${encodeURIComponent(epId)}`;
+      } else if (provider === "animekai" || provider === "gogoanime") {
+        // AnimeKai (also handles gogoanime routes internally): episodeId in path
         url = `${b}/anime/animekai/watch/${encodeURIComponent(epId)}?server=${server}`;
       } else if (provider === "kickassanime") {
         // KickAssAnime: episodeId in query param
         url = `${b}/anime/kickassanime/watch?episodeId=${encodeURIComponent(epId)}&server=${server}`;
       } else {
-        // Default: HiAnime
-        url = `${b}/anime/hianime/watch/${encodeURIComponent(epId)}?server=${server}&category=${cat}`;
+        // Unknown provider — use AnimeKai as safe default (HiAnime is permanently down)
+        url = `${b}/anime/animekai/watch/${encodeURIComponent(epId)}?server=${server}`;
       }
       const r = await fetch(url);
       if (!r.ok) {
         let tip = "";
-        if (r.status === 502 || r.status === 404) tip = ` ${provider ?? "hianime"} stream extraction failed — provider may be down or blocked.`;
+        if (r.status === 502 || r.status === 404) tip = ` Stream extraction failed (provider: ${provider ?? "animekai"}) — the provider may be down or blocked.`;
         throw new Error(`Watch failed: HTTP ${r.status}.${tip}`);
       }
       const data = await r.json() as HiAnimeWatch;
-      if (!data.sources?.length) throw new Error(`No stream sources returned from ${provider ?? "hianime"}.`);
+      if (!data.sources?.length) throw new Error(`No stream sources returned from ${provider ?? "animekai"}.`);
       return data;
     },
     async ping(): Promise<boolean> {
