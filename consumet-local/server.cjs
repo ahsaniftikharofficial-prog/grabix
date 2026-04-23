@@ -8,6 +8,7 @@ const { ANIME } = require("@consumet/extensions");
 const animeKai = new ANIME.AnimeKai();
 const kickAss = new ANIME.KickAssAnime();
 const animePahe = new ANIME.AnimePahe();
+const gogoAnime = new ANIME.Gogoanime();
 
 function readOption(flag) {
   const directPrefix = `${flag}=`;
@@ -703,6 +704,71 @@ async function route(pathname, searchParams) {
         hasNextPage: Boolean(data?.hasNextPage),
         totalPages: data?.totalPages || 1,
         results: Array.isArray(data?.animes) ? data.animes.map(normalizeSearchResult) : [],
+      },
+    };
+  }
+
+  // ── GogoAnime routes ──────────────────────────────────────────────────────
+
+  if (pathname === "/anime/gogoanime/info") {
+    const id = String(searchParams.get("id") || "").trim();
+    if (!id) return { status: 400, body: { detail: "id is required" } };
+    const data = await gogoAnime.fetchAnimeInfo(id);
+    return { status: 200, body: data };
+  }
+
+  if (pathname === "/anime/gogoanime/watch") {
+    const episodeId = String(searchParams.get("episodeId") || "").trim();
+    if (!episodeId) return { status: 400, body: { detail: "episodeId is required" } };
+    const data = await gogoAnime.fetchEpisodeSources(episodeId);
+    return { status: 200, body: data };
+  }
+
+  // Combined search+info+watch pipeline — used by the Python stream fallback
+  if (pathname === "/anime/gogoanime/stream") {
+    const title = String(searchParams.get("title") || "").trim();
+    const episodeNum = parseInt(searchParams.get("episode") || "1", 10) || 1;
+    const dubbed = String(searchParams.get("dubbed") || "false").toLowerCase() === "true";
+    if (!title) return { status: 400, body: { detail: "title is required" } };
+
+    // Search — try dubbed variant first if requested
+    const queries = dubbed ? [`${title} (dub)`, title] : [title];
+    let bestId = "";
+    for (const q of queries) {
+      const sd = await gogoAnime.search(q);
+      const results = Array.isArray(sd?.results) ? sd.results : [];
+      if (results.length) {
+        bestId = String(results[0].id || "");
+        break;
+      }
+    }
+    if (!bestId) return { status: 404, body: { sources: [], error: `GogoAnime: '${title}' not found` } };
+
+    // Fetch episode list
+    const info = await gogoAnime.fetchAnimeInfo(bestId);
+    const episodes = Array.isArray(info?.episodes) ? info.episodes : [];
+    let ep = episodes.find(e => e.number === episodeNum);
+    if (!ep && episodes.length) ep = episodes[Math.min(episodeNum - 1, episodes.length - 1)];
+    if (!ep) return { status: 404, body: { sources: [], error: `GogoAnime: episode ${episodeNum} not found for '${title}'` } };
+
+    // Fetch sources
+    const srcData = await gogoAnime.fetchEpisodeSources(ep.id);
+    return {
+      status: 200,
+      body: { ...srcData, _anime_id: bestId, _episode_id: ep.id, _provider: "gogoanime" },
+    };
+  }
+
+  if (pathname.startsWith("/anime/gogoanime/")) {
+    const query = decodeURIComponent(pathname.slice("/anime/gogoanime/".length));
+    if (!query) return { status: 400, body: { detail: "query is required" } };
+    const data = await gogoAnime.search(query, parsePage(searchParams.get("page")));
+    return {
+      status: 200,
+      body: {
+        currentPage: data?.currentPage || 1,
+        hasNextPage: Boolean(data?.hasNextPage),
+        results: Array.isArray(data?.results) ? data.results : [],
       },
     };
   }
