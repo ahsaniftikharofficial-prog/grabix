@@ -10,11 +10,9 @@ import sys
 from importlib import import_module
 from typing import Any
 
-from app.services.consumet import fetch_anime_episodes, fetch_anime_watch, get_health_status
 from app.services.provider_helpers import (
     _build_provider_sources,
     _infer_stream_kind,
-    _map_consumet_watch_payload,
     _stream_source,
 )
 from app.services.provider_registry import ProviderRegistry
@@ -144,177 +142,6 @@ class EmbedProviderAdapter(BaseProviderAdapter):
         return await self.sources(**kwargs)
 
 
-class AnimeResolvedProviderAdapter(BaseProviderAdapter):
-    def __init__(self) -> None:
-        super().__init__(
-            name="anime-resolved",
-            family="anime-resolved",
-            policy=ProviderPolicy(timeout_seconds=40.0, retries=0, cooldown_seconds=8.0, circuit_breaker_threshold=5),
-        )
-
-    async def health(self, **kwargs) -> Any:
-        consumet = await get_health_status()
-        if consumet.get("healthy"):
-            return {"status": "online", "message": "HiAnime primary resolver is healthy."}
-        raise ProviderServiceError(
-            code="anime_primary_degraded",
-            message=str(consumet.get("message") or "Anime primary resolver is degraded."),
-            retryable=True,
-            provider=self.name,
-            user_action="Retry the anime provider chain in a moment.",
-            status_code=503,
-        )
-
-    async def sources(self, **kwargs) -> Any:
-        main_module = _main_module()
-        payload = main_module.AnimeResolveRequest(
-            episodeId=str(kwargs.get("episode_id") or ""),
-            animeId=str(kwargs.get("anime_id") or ""),
-            title=str(kwargs.get("title") or ""),
-            altTitle=str(kwargs.get("alt_title") or ""),
-            episodeNumber=int(kwargs.get("episode_number", 1) or 1),
-            audio=str(kwargs.get("audio") or "original"),
-            server=str(kwargs.get("server") or "auto"),
-            isMovie=bool(kwargs.get("is_movie", False)),
-            tmdbId=kwargs.get("tmdb_id"),
-            purpose=str(kwargs.get("purpose") or "play"),
-        )
-        resolved = await main_module.anime_resolve_source(payload)
-        source = resolved.get("source") or {}
-        url = str(source.get("url") or "").strip()
-        if not url:
-            return []
-        # Filter out embed sources — embed URLs (e.g. MegaCloud/VidStreaming iframes)
-        # are unplayable and show "We're Sorry" pages; only keep hls/direct streams.
-        source_kind = str(source.get("kind") or "direct")
-        if source_kind == "embed":
-            return []
-        subtitles = [
-            {
-                "id": f"anime-resolved-sub-{index}",
-                "label": str(track.get("label") or track.get("lang") or f"Subtitle {index + 1}"),
-                "language": str(track.get("lang") or ""),
-                "url": str(track.get("url") or ""),
-            }
-            for index, track in enumerate(resolved.get("subtitles") or [])
-            if isinstance(track, dict) and track.get("url")
-        ]
-        # Ensure anime HLS/direct streams always route through the backend proxy.
-        # HiAnime CDN (MegaCloud/bunnycdn) rejects segment requests without a
-        # Referer header. If the watch payload didn't include headers, inject a
-        # safe default so shouldKeepHlsProxied() returns true in the player.
-        raw_headers = dict(source.get("headers") or {})
-        if not raw_headers:
-            raw_headers = {"Referer": "https://megacloud.blog/"}
-
-        return [
-            _stream_source(
-                source_id=f"anime-resolved-{kwargs.get('anime_id') or 'candidate'}-{kwargs.get('episode_number', 1)}",
-                label=str(resolved.get("selectedServer") or resolved.get("provider") or "HiAnime"),
-                provider=str(resolved.get("provider") or "HiAnime"),
-                kind=str(source.get("kind") or "direct"),
-                url=url,
-                description=str(resolved.get("strategy") or "Resolved anime source"),
-                quality="HLS" if str(source.get("kind") or "") == "hls" else "Auto",
-                external_url=url,
-                can_extract=False,
-                subtitles=subtitles,
-                request_headers=raw_headers,
-            )
-        ]
-
-    async def download_options(self, **kwargs) -> Any:
-        return await self.sources(**kwargs)
-
-    async def subtitles(self, **kwargs) -> Any:
-        sources = await self.sources(**kwargs)
-        return list(sources[0].get("subtitles") or []) if sources else []
-
-
-class ConsumetAnimeProviderAdapter(BaseProviderAdapter):
-    def __init__(self) -> None:
-        super().__init__(
-            name="consumet-watch",
-            family="consumet-watch",
-            policy=ProviderPolicy(timeout_seconds=40.0, retries=0, cooldown_seconds=8.0, circuit_breaker_threshold=5),
-        )
-
-    async def health(self, **kwargs) -> Any:
-        payload = await get_health_status()
-        if payload.get("healthy"):
-            return {"status": "online", "message": str(payload.get("message") or "Consumet anime watch is healthy.")}
-        raise ProviderServiceError(
-            code="consumet_degraded",
-            message=str(payload.get("message") or "Consumet anime watch is degraded."),
-            retryable=True,
-            provider=self.name,
-            user_action="Use the built-in anime fallback chain.",
-            status_code=503,
-        )
-
-    async def details(self, **kwargs) -> Any:
-        media_id = str(kwargs.get("media_id") or "").strip()
-        provider = str(kwargs.get("provider") or "hianime").strip() or "hianime"
-        if not media_id:
-            raise ProviderServiceError(
-                code="anime_id_required",
-                message="Anime provider id is required.",
-                retryable=False,
-                provider=self.name,
-                user_action="Choose an anime result before requesting playback.",
-                status_code=400,
-            )
-        return await fetch_anime_episodes(provider=provider, media_id=media_id)
-
-    async def sources(self, **kwargs) -> Any:
-        provider = str(kwargs.get("provider") or "hianime").strip() or "hianime"
-        media_id = str(kwargs.get("media_id") or "").strip()
-        episode_id = str(kwargs.get("episode_id") or "").strip()
-        episode_number = int(kwargs.get("episode_number", 1) or 1)
-        audio = str(kwargs.get("audio") or "original").strip().lower() or "original"
-        server = str(kwargs.get("server") or "auto").strip().lower() or "auto"
-
-        if not episode_id:
-            details = await self.details(provider=provider, media_id=media_id)
-            items = details.get("items") or []
-            selected = None
-            for item in items:
-                try:
-                    if int(item.get("number") or 0) == episode_number:
-                        selected = item
-                        break
-                except Exception:
-                    continue
-            if selected is None and items:
-                selected = items[0]
-            episode_id = str((selected or {}).get("id") or "").strip()
-
-        if not episode_id:
-            raise ProviderServiceError(
-                code="anime_episode_not_found",
-                message=f"No episode metadata was found for episode {episode_number}.",
-                retryable=False,
-                provider=self.name,
-                user_action="Refresh the anime episode list and try again.",
-                status_code=404,
-            )
-
-        payload = await fetch_anime_watch(
-            provider=provider,
-            episode_id=episode_id,
-            server=None if server == "auto" else server,
-            audio=audio,
-        )
-        return _map_consumet_watch_payload(provider, payload)
-
-    async def download_options(self, **kwargs) -> Any:
-        return await self.sources(**kwargs)
-
-    async def subtitles(self, **kwargs) -> Any:
-        sources = await self.sources(**kwargs)
-        return list(sources[0].get("subtitles") or []) if sources else []
-
-
 # ── Registry singleton ────────────────────────────────────────────────────────
 
 _PROVIDER_REGISTRY: ProviderRegistry | None = None
@@ -326,8 +153,6 @@ def get_provider_registry() -> ProviderRegistry:
         registry = ProviderRegistry()
         registry.register(MovieBoxProviderAdapter())
         registry.register(EmbedProviderAdapter())
-        registry.register(AnimeResolvedProviderAdapter())
-        registry.register(ConsumetAnimeProviderAdapter())
         _PROVIDER_REGISTRY = registry
     return _PROVIDER_REGISTRY
 

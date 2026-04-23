@@ -14,10 +14,6 @@ from pathlib import Path
 
 from fastapi import APIRouter
 
-from app.services.consumet import (
-    get_health_status as get_consumet_health_status,
-    is_consumet_configured as is_consumet_sidecar_configured,
-)
 from app.services.desktop_auth import desktop_auth_state_snapshot
 from app.services.logging_utils import (
     backend_log_path,
@@ -83,11 +79,6 @@ class _HealthCBState:
 
 _health_cb: dict[str, _HealthCBState] = {}
 _health_cb_lock = threading.Lock()
-
-# Consumet health is cached for CONSUMET_HEALTH_CACHE_TTL_SECONDS seconds
-# to avoid hammering the sidecar on every /health/capabilities call.
-CONSUMET_HEALTH_CACHE_TTL_SECONDS = 15
-consumet_health_cache: tuple[float, dict] | None = None
 
 
 def _get_health_cb(service: str) -> _HealthCBState:
@@ -206,8 +197,6 @@ def _tiered_message(
 # ---------------------------------------------------------------------------
 
 async def health_services() -> dict:
-    global consumet_health_cache
-
     ffmpeg_path = shutil.which("ffmpeg")
 
     # ── database & downloads (sync — no network, no circuit breaker needed) ──
@@ -250,105 +239,12 @@ async def health_services() -> dict:
     manga = _service_payload("manga", "online", "Manga routes are available.", False)
     _health_log_write("manga", "online")
 
-    # ── consumet (network ping — circuit breaker + tiered status) ─────────────
-    consumet_cb_open = False
-    if not is_consumet_sidecar_configured():
-        consumet_health = {
-            "configured": False,
-            "healthy": False,
-            "api_base": "",
-            "message": "Consumet sidecar is disabled for this build. Built-in anime fallback mode is active.",
-            "mode": "fallback",
-        }
-        consumet_raw_status = "degraded"
-        consumet_health_cache = (time.time() + CONSUMET_HEALTH_CACHE_TTL_SECONDS, consumet_health)
-    elif _health_cb_is_open("consumet"):
-        consumet_health = (consumet_health_cache or (0, {}))[1] if consumet_health_cache else {}
-        consumet_cb_open = _health_cb_is_open("consumet")
-        consumet_raw_status = _get_health_cb("consumet").last_status
-    elif consumet_health_cache and consumet_health_cache[0] > time.time():
-        consumet_health = consumet_health_cache[1]
-        consumet_raw_status = "online" if consumet_health.get("healthy") else "degraded"
-    else:
-        t0 = time.monotonic()
-        try:
-            consumet_health = await asyncio.wait_for(get_consumet_health_status(), timeout=10.0)
-            latency_ms = (time.monotonic() - t0) * 1000
-            if consumet_health.get("healthy"):
-                consumet_raw_status = _health_cb_record_success("consumet", latency_ms)
-            else:
-                consumet_raw_status = _health_cb_record_failure(
-                    "consumet", consumet_health.get("message", "")
-                )
-        except Exception as exc:
-            consumet_health = {
-                "configured": False, "healthy": False,
-                "message": "Consumet is warming up — anime fallback is already active.",
-                "error": str(exc),
-            }
-            consumet_raw_status = _health_cb_record_failure("consumet", str(exc))
-        consumet_health_cache = (time.time() + CONSUMET_HEALTH_CACHE_TTL_SECONDS, consumet_health)
-
-    consumet_msg = _tiered_message(
-        "consumet", consumet_raw_status,
-        ok_msg      = str(consumet_health.get("message") or "Consumet is healthy."),
-        slow_msg    = "Consumet is responding slowly — anime may buffer.",
-        degraded_msg= "Consumet is degraded — anime running on built-in fallback.",
-        offline_msg = "Consumet is unreachable (circuit open) — anime fallback active.",
-    )
-    consumet = _service_payload(
-        "consumet", consumet_raw_status, consumet_msg, True,
-        {
-            "configured": bool(consumet_health.get("configured")),
-            "api_base": consumet_health.get("api_base", ""),
-            "circuit_open": consumet_cb_open,
-        },
-    )
-
-    anime_primary_healthy = bool(consumet_health.get("healthy", False))
-    anime_fallback_ready = moviebox["status"] in {"online", "slow"}
-    anime_status = consumet_raw_status if anime_primary_healthy else (
-        "online" if anime_fallback_ready else "degraded"
-    )
-    anime = _service_payload(
-        "anime", anime_status,
-        (
-            "Anime playback is fully available."
-            if anime_primary_healthy
-            else (
-                "Anime playback is available through GRABIX fallback providers."
-                if anime_fallback_ready
-                else "Anime running on built-in fallback stack."
-            )
-        ),
-        True,
-    )
-
-    # ── AniWatch (local consumet-local Node sidecar) ──────────────────────────
-    try:
-        from app.services.aniwatch import get_health as _get_aniwatch_health
-        _aw_health = await asyncio.wait_for(_get_aniwatch_health(), timeout=10.0)
-        aw_status = "online" if _aw_health.get("healthy") else "degraded"
-        aw_msg = (
-            "AniWatch local server is healthy."
-            if _aw_health.get("healthy")
-            else "AniWatch local server is warming up — anime fallback active."
-        )
-    except Exception:
-        aw_status = "degraded"
-        aw_msg = "AniWatch local server is starting up."
-    _health_log_write("aniwatch", aw_status)
-    aniwatch = _service_payload("aniwatch", aw_status, aw_msg, True)
-
     services = {
         "backend":   _service_payload("backend", "online", "Backend is responding.", False),
         "database":  database,
         "downloads": downloads_health,
         "ffmpeg":    ffmpeg,
-        "consumet":  consumet,
-        "aniwatch":  aniwatch,
         "moviebox":  moviebox,
-        "anime":     anime,
         "manga":     manga,
     }
 
@@ -372,12 +268,6 @@ async def health_capabilities() -> dict:
         "can_browse_movies": True,
         "can_browse_tv": True,
         "can_use_moviebox": services["moviebox"]["status"] in {"online", "slow"},
-        "can_play_anime": True,
-        "can_play_anime_primary": (
-            services["consumet"]["status"] in {"online", "slow"}
-            or services["aniwatch"]["status"] in {"online", "slow"}
-        ),
-        "can_play_anime_fallback": True,
         "can_read_manga": services["manga"]["status"] in {"online", "slow"},
     }
     CORE_SERVICES = {"database", "downloads", "ffmpeg"}
@@ -402,14 +292,11 @@ def _providers_status_payload(payload: dict) -> dict:
     return {
         "providers": {
             "moviebox": services["moviebox"],
-            "consumet": services["consumet"],
-            "anime":    services["anime"],
             "manga":    services["manga"],
         },
         "fallbacks": {
             "movies": ["moviebox", "embed"],
             "tv":     ["moviebox", "embed"],
-            "anime":  ["backend-resolved", "moviebox", "consumet-watch", "embed"],
             "manga":  ["mangadex", "comick", "offline-cache"],
         },
     }
@@ -457,11 +344,6 @@ async def _diagnostics_payload() -> dict:
             "id": "moviebox_provider_ready",
             "label": "Movie Box provider is ready",
             "passed": runtime["services"]["moviebox"]["status"] == "online",
-        },
-        {
-            "id": "anime_fallback_ready",
-            "label": "Anime playback has fallback coverage",
-            "passed": bool(runtime["capabilities"].get("can_play_anime_fallback")),
         },
         {
             "id": "ffmpeg_ready",
@@ -521,15 +403,9 @@ async def runtime_health_capabilities():
 
 @router.get("/health/ping")
 async def runtime_health_ping():
-    import os as _os
-    _consumet_url = (
-        _os.environ.get("CONSUMET_API_BASE", "").strip().rstrip("/")
-        or "http://127.0.0.1:3000"
-    )
     return {
         "ok": True,
         "core_ready": True,
-        "consumet_url": _consumet_url,
         "services": {
             "backend": _service_payload("backend", "online", "Backend is responding.", False),
         },
@@ -574,7 +450,7 @@ async def runtime_health_log(service: str | None = None, limit: int = 100):
 async def runtime_reset_circuit_breaker(service: str | None = None):
     """
     Manually reset a circuit breaker so health checks resume immediately.
-    POST /health/circuit-breaker/reset?service=consumet  → reset one service
+    POST /health/circuit-breaker/reset?service=moviebox  → reset one service
     POST /health/circuit-breaker/reset                   → reset all services
     """
     with _health_cb_lock:

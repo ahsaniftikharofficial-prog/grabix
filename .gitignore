@@ -106,3 +106,15 @@ consumet-local/
 direct
 backend/test_shape_results.txt
 test_shape_results.txt
+
+# ─── Anime / Consumet sidecar (removed from active dev) ────────────────────
+consumet-local/
+
+# ─── Test result dumps ──────────────────────────────────────────────────────
+backend/all_tests_results.txt
+backend/test_shape_results.txt
+test_shape_results.txt
+
+# ─── Scratch/temp notes ─────────────────────────────────────────────────────
+1804
+direct

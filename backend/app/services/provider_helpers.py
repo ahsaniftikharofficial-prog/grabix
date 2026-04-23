@@ -5,11 +5,9 @@ No adapter or registry imports — safe to import from anywhere.
 """
 from __future__ import annotations
 
-import asyncio
 import re
 from typing import Any
 
-from app.services.consumet import fetch_anime_episodes, fetch_anime_watch
 from app.services.provider_types import ProviderServiceError
 
 
@@ -38,112 +36,6 @@ def _normalize_title_for_match(value: str) -> str:
     lowered = re.sub(r"\bseason\s+\d+\b", " ", lowered)
     lowered = re.sub(r"\s+", " ", lowered).strip()
     return lowered
-
-
-def _anime_title_match_score(candidate_title: str, query_titles: list[str]) -> float:
-    candidate = _normalize_title_for_match(candidate_title)
-    if not candidate:
-        return 0.0
-
-    best = 0.0
-    candidate_tokens = set(candidate.split())
-    for query_title in query_titles:
-        query = _normalize_title_for_match(query_title)
-        if not query:
-            continue
-        score = 0.0
-        if candidate == query:
-            score += 10.0
-        if candidate.startswith(query) or query.startswith(candidate):
-            score += 4.0
-        if query in candidate or candidate in query:
-            score += 3.0
-        query_tokens = set(query.split())
-        if query_tokens:
-            score += (len(candidate_tokens & query_tokens) / len(query_tokens)) * 3.0
-        best = max(best, score)
-    return best
-
-
-async def _discover_anime_candidates_by_title(
-    *,
-    titles: list[str],
-    existing_candidates: list[dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    from app.services.consumet import search_domain
-
-    title_candidates = _unique_titles(titles)[:4]
-    if not title_candidates:
-        return list(existing_candidates or [])
-
-    merged: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    for candidate in existing_candidates or []:
-        provider_name = str(candidate.get("provider") or "hianime").strip() or "hianime"
-        anime_id = str(candidate.get("anime_id") or candidate.get("animeId") or candidate.get("id") or "").strip()
-        if not anime_id:
-            continue
-        key = f"{provider_name}:{anime_id}"
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(candidate)
-
-    fallback_providers = ("animekai", "kickassanime", "animepahe")
-    search_results = await asyncio.gather(
-        *[
-            search_domain("anime", title, provider=provider_name, page=1)
-            for provider_name in fallback_providers
-            for title in title_candidates
-        ],
-        return_exceptions=True,
-    )
-
-    result_index = 0
-    for provider_name in fallback_providers:
-        added_for_provider = 0
-        for _title in title_candidates:
-            result = search_results[result_index]
-            result_index += 1
-            if isinstance(result, Exception):
-                continue
-            ranked_items = sorted(
-                list(result.get("items") or []),
-                key=lambda item: _anime_title_match_score(
-                    str(item.get("title") or item.get("alt_title") or ""),
-                    title_candidates,
-                ),
-                reverse=True,
-            )
-            for item in ranked_items:
-                anime_id = str(item.get("id") or "").strip()
-                if not anime_id:
-                    continue
-                if _anime_title_match_score(
-                    str(item.get("title") or item.get("alt_title") or ""),
-                    title_candidates,
-                ) < 1.5:
-                    continue
-                key = f"{provider_name}:{anime_id}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                merged.append(
-                    {
-                        "provider": provider_name,
-                        "anime_id": anime_id,
-                        "title": str(item.get("title") or "").strip(),
-                        "alt_title": str(item.get("alt_title") or "").strip(),
-                    }
-                )
-                added_for_provider += 1
-                if added_for_provider >= 2:
-                    break
-            if added_for_provider >= 2:
-                break
-
-    return merged
 
 
 # ── Stream kind inference ─────────────────────────────────────────────────────
@@ -265,95 +157,6 @@ def _resolution_payload(
         "attempts": attempts,
         "error": None,
     }
-
-
-# ── Consumet watch mapping ────────────────────────────────────────────────────
-
-def _map_consumet_watch_payload(provider: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
-    headers = dict(payload.get("headers") or {})
-    if not headers:
-        headers = {"Referer": "https://megacloud.blog/"}
-
-    # HiAnime / consumet returns subtitles at the TOP LEVEL of the payload,
-    # NOT inside each individual source object.  Using source.get("subtitles")
-    # always yields [] and makes the CC button say "off" even for sub episodes.
-    payload_subtitles: list[dict[str, Any]] = list(payload.get("subtitles") or [])
-
-    # Embed-only URLs (raw megacloud.blog pages) cannot be played by a video
-    # element -- they require an iframe. Filter them out here so the backend
-    # never returns fake sources that open the player but never load.
-    _EMBED_URL_PATTERNS = ("megacloud.blog", "megacloud.tv", "rapid-cloud.co")
-
-    mapped: list[dict[str, Any]] = []
-    for index, source in enumerate(payload.get("sources") or []):
-        if not isinstance(source, dict) or not source.get("url"):
-            continue
-        url_str = str(source.get("url") or "")
-        is_m3u8 = bool(source.get("isM3U8"))
-        # Skip raw embed page URLs unless they are explicitly marked as M3U8
-        if not is_m3u8 and any(p in url_str for p in _EMBED_URL_PATTERNS):
-            continue
-        # Prefer any source-level subtitles (rare), fall back to payload-level.
-        effective_subtitles = list(source.get("subtitles") or []) or payload_subtitles
-        mapped.append(
-            _stream_source(
-                source_id=str(source.get("id") or f"{provider}-watch-{index}"),
-                label=str(source.get("label") or source.get("quality") or f"Source {index + 1}"),
-                provider=str(source.get("provider") or f"Consumet {provider}"),
-                kind=str(source.get("kind") or ("hls" if source.get("isM3U8") else _infer_stream_kind(str(source.get("url") or ""), str(source.get("mimeType") or "")))),
-                url=str(source.get("url") or ""),
-                description=str(source.get("description") or f"{provider} source"),
-                quality=str(source.get("quality") or "Auto"),
-                mime_type=str(source.get("mimeType") or ""),
-                external_url=str(source.get("externalUrl") or source.get("url") or ""),
-                can_extract=bool(source.get("canExtract", False)),
-                subtitles=effective_subtitles,
-                request_headers=headers,
-                language=str(source.get("language") or ""),
-            )
-        )
-    return mapped
-
-
-# ── Direct anime provider resolution ─────────────────────────────────────────
-
-async def _resolve_direct_anime_provider_sources(
-    *,
-    provider_name: str,
-    anime_id: str,
-    episode_id: str,
-    episode_number: int,
-    audio: str,
-    server: str,
-) -> tuple[list[dict[str, Any]], str]:
-    from fastapi import HTTPException
-
-    resolved_episode_id = episode_id
-    if not resolved_episode_id:
-        details = await fetch_anime_episodes(provider=provider_name, media_id=anime_id)
-        items = list(details.get("items") or [])
-        selected = None
-        for item in items:
-            try:
-                if int(item.get("number") or 0) == episode_number:
-                    selected = item
-                    break
-            except Exception:
-                continue
-        if selected is None and items:
-            selected = items[0]
-        resolved_episode_id = str((selected or {}).get("id") or "").strip()
-
-    if not resolved_episode_id:
-        raise HTTPException(status_code=404, detail=f"No episode metadata was found for episode {episode_number}.")
-
-    payload = await fetch_anime_watch(
-        provider=provider_name,
-        episode_id=resolved_episode_id,
-        server=None if server == "auto" else server,
-        audio=audio,
-    )
-    return _map_consumet_watch_payload(provider_name, payload), resolved_episode_id
 
 
 # ── Embed provider constants ──────────────────────────────────────────────────

@@ -6,7 +6,7 @@ Everything that was in the old monolithic providers.py is now split across:
   provider_registry.py   — ProviderRegistry class
   provider_helpers.py    — pure helpers, stream utilities
   provider_adapters.py   — concrete adapters + registry singleton
-  provider_resolvers.py  — resolve_movie_playback, resolve_tv_playback, resolve_anime_playback
+  provider_resolvers.py  — resolve_movie_playback, resolve_tv_playback
 
 This file re-exports the public API so that no other file needs to change its imports.
 DO NOT add logic here.
@@ -30,15 +30,11 @@ from app.services.provider_registry import ProviderRegistry
 # ── Helpers ───────────────────────────────────────────────────────────────────
 from app.services.provider_helpers import (
     EMBED_PROVIDERS,
-    _anime_title_match_score,
     _attempt_payload,
     _build_provider_sources,
-    _discover_anime_candidates_by_title,
     _infer_stream_kind,
-    _map_consumet_watch_payload,
     _normalize_title_for_match,
     _resolution_payload,
-    _resolve_direct_anime_provider_sources,
     _source_dedup_key,
     _stream_source,
     _unique_titles,
@@ -47,8 +43,6 @@ from app.services.provider_helpers import (
 
 # ── Adapters + singleton ──────────────────────────────────────────────────────
 from app.services.provider_adapters import (
-    AnimeResolvedProviderAdapter,
-    ConsumetAnimeProviderAdapter,
     EmbedProviderAdapter,
     MovieBoxProviderAdapter,
     _main_module,
@@ -59,7 +53,6 @@ from app.services.provider_adapters import (
 # ── Resolvers ─────────────────────────────────────────────────────────────────
 from app.services.provider_resolvers import (
     _resolve_moviebox_sources_by_title,
-    resolve_anime_playback,
     resolve_movie_playback,
     resolve_tv_playback,
 )
@@ -81,10 +74,7 @@ __all__ = [
     # adapters
     "MovieBoxProviderAdapter",
     "EmbedProviderAdapter",
-    "AnimeResolvedProviderAdapter",
-    "ConsumetAnimeProviderAdapter",
     # resolvers
     "resolve_movie_playback",
     "resolve_tv_playback",
-    "resolve_anime_playback",
 ]
