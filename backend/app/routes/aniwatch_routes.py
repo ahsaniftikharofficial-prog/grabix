@@ -10,11 +10,11 @@ from app.services.aniwatch import (
     get_genre_anime,
     get_genres,
     get_health,
-    get_info,
     get_schedule,
     get_spotlight,
     search,
 )
+from app.services.aniwatch_service import get_info
 
 router = APIRouter()
 

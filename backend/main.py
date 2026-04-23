@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 # ── Router imports ────────────────────────────────────────────────────────────
-from app.routes.aniwatch import router as aniwatch_router
+from app.routes.aniwatch_routes import router as aniwatch_router
 from app.routes.consumet import router as consumet_router
 from app.routes.downloads import router as downloads_router
 from app.routes.manga import router as manga_router
@@ -33,7 +33,6 @@ from moviebox import (
     restore_from_last_session as _moviebox_restore_from_last_session,
 )
 from anime import router as anime_router
-from anime.resolver import _is_internal_managed_file
 from downloads import router as downloads_engine_router, register_handlers as _register_download_handlers
 from downloads.engine import (
     ensure_runtime_bootstrap,
@@ -99,12 +98,7 @@ from core.health import (
     _diagnostics_payload,
     router as health_router,
 )
-from core.cache_ops import (
-    router as cache_router,
-    _sqlite_cache_get,
-    _sqlite_cache_set,
-    _cache_trigger_bg_refresh,
-)
+from core.cache_ops import router as cache_router
 from core.download_helpers import (
     _normalize_download_target,
     _infer_download_category,
@@ -280,7 +274,7 @@ app.include_router(aniwatch_router,        prefix="/aniwatch")
 app.include_router(consumet_router,        prefix="/consumet")
 app.include_router(downloads_router)
 app.include_router(manga_router,           prefix="/manga")
-app.include_router(metadata_router,        prefix="/metadata")
+app.include_router(metadata_router)
 app.include_router(providers_router)
 app.include_router(settings_router)
 app.include_router(streaming_router)
