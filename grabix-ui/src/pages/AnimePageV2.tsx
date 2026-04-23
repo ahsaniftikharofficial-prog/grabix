@@ -41,7 +41,7 @@ async function detectConsumetUrl(): Promise<string | null> {
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-interface HiAnimeResult { id: string; title: string; type?: string; totalEpisodes?: number; subOrDub?: string; image?: string; }
+interface HiAnimeResult { id: string; title: string; type?: string; totalEpisodes?: number; subOrDub?: string; image?: string; provider?: string; }
 interface HiAnimeEpisode { id: string; number: number; title?: string; isFiller?: boolean; }
 interface HiAnimeInfo {
   anime?: { info?: { name?: string; poster?: string; description?: string } };
@@ -94,47 +94,114 @@ function makeApi(base: string) {
   const b = base.trim().replace(/\/$/, "");
   return {
     async search(q: string): Promise<HiAnimeResult[]> {
-      // 1. Try the Python backend first — it tries the sidecar then falls back to Jikan automatically.
-      //    This means search still works even when the aniwatch npm package is broken (Gotcha #6).
+      // 1. Try the Python backend first — it cascades: HiAnime → AnimeKai → KickAssAnime → Jikan
       try {
         const br = await fetch(
           `${BACKEND_API}/aniwatch/search?query=${encodeURIComponent(q)}&page=1`,
-          { signal: AbortSignal.timeout(12000) },
+          { signal: AbortSignal.timeout(18000) },
         );
         if (br.ok) {
-          const bd = await br.json() as { items?: Array<{ id: string; title: string; type?: string; episodes_count?: number; image?: string }> };
+          const bd = await br.json() as { items?: Array<{ id: string; title: string; type?: string; episodes_count?: number; image?: string; provider?: string }> };
           const items = (bd.items ?? []).filter(i => i.id && i.title);
           if (items.length > 0) return items.map(i => ({
-            id: i.id, title: i.title, type: i.type, totalEpisodes: i.episodes_count, image: i.image,
+            id: i.id, title: i.title, type: i.type, totalEpisodes: i.episodes_count,
+            image: i.image, provider: i.provider ?? "hianime",
           }));
         }
       } catch { /* backend unavailable — fall through to direct sidecar */ }
-      // 2. Direct sidecar fallback (original behaviour)
+      // 2. Direct sidecar fallback (HiAnime only — may also be blocked)
       const r = await fetch(`${b}/anime/hianime/${encodeURIComponent(q)}`);
-      if (!r.ok) throw new Error(`Search failed: HTTP ${r.status}${r.status === 0 ? " — is consumet running?" : ""}`);
+      if (!r.ok) throw new Error(`Search failed: HTTP ${r.status}${r.status === 0 ? " — is consumet running?" : ". HiAnime may be Cloudflare-blocked — backend cascade should have caught this. Restart the backend."}`);
       const data = await r.json() as { results?: HiAnimeResult[] };
-      return data.results ?? [];
+      return (data.results ?? []).map(r => ({ ...r, provider: "hianime" }));
     },
-    async info(id: string): Promise<HiAnimeInfo> {
-      const r = await fetch(`${b}/anime/hianime/info?id=${encodeURIComponent(id)}`);
-      if (!r.ok) {
-        const isJikanId = /^\d+$/.test(id);
-        const tip = isJikanId
-          ? `Info failed: HTTP ${r.status}. This result came from MyAnimeList (search fallback). Update aniwatch to get full HiAnime results: cd consumet-local && npm update aniwatch && node server.cjs`
-          : `Info failed: HTTP ${r.status}`;
-        throw new Error(tip);
+    async info(id: string, provider?: string, title?: string): Promise<HiAnimeInfo> {
+      const prov = (provider ?? "hianime").toLowerCase();
+      const isNumeric = /^\d+$/.test(id);
+
+      // ── Shared normalizers ────────────────────────────────────────────────
+      const normalizeAnimeKai = (raw: Record<string, unknown>): HiAnimeInfo => {
+        const eps = (raw.episodes as Array<{id:string;number:number;title?:string;isFiller?:boolean}> ?? [])
+          .map(e => ({ id: e.id, number: e.number, title: e.title ?? "", isFiller: e.isFiller ?? false }));
+        return {
+          anime: { info: { name: String(raw.title ?? ""), poster: String(raw.image ?? ""), description: String(raw.description ?? "") } },
+          episodes: eps,
+          totalEpisodes: Number(raw.totalEpisodes ?? eps.length),
+          subEpisodeCount: Number(raw.totalEpisodes ?? eps.length),
+          dubEpisodeCount: 0,
+        };
+      };
+
+      // ── AnimeKai: call sidecar directly ───────────────────────────────────
+      if (prov === "animekai") {
+        const r = await fetch(`${b}/anime/animekai/info?id=${encodeURIComponent(id)}`);
+        if (!r.ok) throw new Error(`AnimeKai info failed: HTTP ${r.status}`);
+        return normalizeAnimeKai(await r.json());
       }
+
+      // ── KickAssAnime: call sidecar directly ───────────────────────────────
+      if (prov === "kickassanime") {
+        const r = await fetch(`${b}/anime/kickassanime/info?id=${encodeURIComponent(id)}`);
+        if (!r.ok) throw new Error(`KickAssAnime info failed: HTTP ${r.status}`);
+        const raw = await r.json() as Record<string,unknown>;
+        const eps = (raw.episodes as Array<{id:string;number:number;title?:string}> ?? [])
+          .map(e => ({ id: e.id, number: e.number, title: e.title ?? "", isFiller: false }));
+        return {
+          anime: { info: { name: String(raw.title ?? ""), poster: String(raw.image ?? ""), description: String(raw.description ?? "") } },
+          episodes: eps,
+          totalEpisodes: Number(raw.totalEpisodes ?? eps.length),
+          subEpisodeCount: Number(raw.totalEpisodes ?? eps.length),
+          dubEpisodeCount: 0,
+        };
+      }
+
+      // ── Jikan / numeric ID: cross-reference via AnimeKai using title ──────
+      // We already have the title from the search result — use it to find the
+      // anime on AnimeKai (which is independent of aniwatchtv.to / Cloudflare).
+      if (prov === "jikan" || isNumeric) {
+        const searchTitle = title ?? "";
+        if (searchTitle) {
+          try {
+            const sr = await fetch(`${b}/anime/animekai/${encodeURIComponent(searchTitle)}`);
+            if (sr.ok) {
+              const sd = await sr.json() as { results?: Array<{id:string;title?:string}> };
+              const firstId = sd.results?.[0]?.id;
+              if (firstId) {
+                const ir = await fetch(`${b}/anime/animekai/info?id=${encodeURIComponent(firstId)}`);
+                if (ir.ok) return normalizeAnimeKai(await ir.json());
+              }
+            }
+          } catch { /* fall through to backend */ }
+        }
+        // If AnimeKai cross-ref failed, fall through to backend below
+      }
+
+      // ── HiAnime / fallback: route through backend ─────────────────────────
+      const provParam = (prov && prov !== "hianime" && prov !== "jikan") ? `&provider=${encodeURIComponent(prov)}` : "";
+      const r = await fetch(`${BACKEND_API}/aniwatch/info?id=${encodeURIComponent(id)}${provParam}`);
+      if (!r.ok) throw new Error(`Info failed: HTTP ${r.status}. Try restarting the backend.`);
       return r.json() as Promise<HiAnimeInfo>;
     },
-    async watch(epId: string, server: Server, cat: Category): Promise<HiAnimeWatch> {
-      const r = await fetch(`${b}/anime/hianime/watch/${encodeURIComponent(epId)}?server=${server}&category=${cat}`);
+    async watch(epId: string, server: Server, cat: Category, provider?: string): Promise<HiAnimeWatch> {
+      let url: string;
+      if (provider === "animekai") {
+        // AnimeKai: episodeId goes in path, server in query param
+        url = `${b}/anime/animekai/watch/${encodeURIComponent(epId)}?server=${server}`;
+      } else if (provider === "kickassanime") {
+        // KickAssAnime: episodeId in query param
+        url = `${b}/anime/kickassanime/watch?episodeId=${encodeURIComponent(epId)}&server=${server}`;
+      } else {
+        // Default: HiAnime
+        url = `${b}/anime/hianime/watch/${encodeURIComponent(epId)}?server=${server}&category=${cat}`;
+      }
+      const r = await fetch(url);
       if (!r.ok) {
         let tip = "";
-        if (r.status === 502 || r.status === 404) tip = " MegaCloud extraction failed — aniwatch package may be outdated.";
+        if (r.status === 502 || r.status === 404) tip = ` ${provider ?? "hianime"} stream extraction failed — provider may be down or blocked.`;
         throw new Error(`Watch failed: HTTP ${r.status}.${tip}`);
       }
       const data = await r.json() as HiAnimeWatch;
-      if (!data.sources?.length) throw new Error("No stream sources returned. The aniwatch package may be outdated.");
+      if (!data.sources?.length) throw new Error(`No stream sources returned from ${provider ?? "hianime"}.`);
       return data;
     },
     async ping(): Promise<boolean> {
@@ -374,7 +441,7 @@ export default function AnimePageV2() {
     setSelectedAnime(anime); setScreen("info"); setAnimeInfo(null);
     setSelectedEp(null); setWatchData(null); setWatchErr(null); setEpFilter(""); setInfoErr(null); setInfoLoading(true);
     try {
-      const info = await api().info(anime.id);
+      const info = await api().info(anime.id, anime.provider);
       setAnimeInfo(info);
       setCategory(!(info.subEpisodeCount ?? 0) && (info.dubEpisodeCount ?? 0) ? "dub" : "sub");
     } catch (e) { setInfoErr(e instanceof Error ? e.message : "Failed to load info."); }
@@ -383,7 +450,7 @@ export default function AnimePageV2() {
 
   const selectEpisode = useCallback(async (ep: HiAnimeEpisode, cat = category, srv = server) => {
     setSelectedEp(ep); setWatchData(null); setWatchErr(null); setDownloadErr(null); setDownloadDialogOpen(false); setWatchLoading(true);
-    try { setWatchData(await api().watch(ep.id, srv, cat)); }
+    try { setWatchData(await api().watch(ep.id, srv, cat, selectedAnime?.provider)); }
     catch (e) { setWatchErr(e instanceof Error ? e.message : "Failed to get stream."); }
     finally { setWatchLoading(false); }
   }, [api, category, server]);
@@ -404,7 +471,7 @@ export default function AnimePageV2() {
       onSelectEpisode: async (n) => {
         const target = episodes.find(e => e.number === n);
         if (!target) throw new Error("Episode not found");
-        const nd = await api().watch(target.id, server, category);
+        const nd = await api().watch(target.id, server, category, selectedAnime?.provider);
         return { sources: buildAnimeV2Sources(nd), subtitle: `${category === "sub" ? "SUB" : "DUB"} · Ep ${n}` };
       },
     });
