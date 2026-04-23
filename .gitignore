@@ -97,3 +97,12 @@ debug-backend.bat
 3. Comsumet_api.bat
 Hianime from consumet api.txt
 backend/all_tests_results.txt
+
+# ─── Anime / Consumet sidecar (removed from active development) ─────────────
+consumet-local/
+
+# ─── Scratch / temp notes ────────────────────────────────────────────────────
+1804
+direct
+backend/test_shape_results.txt
+test_shape_results.txt

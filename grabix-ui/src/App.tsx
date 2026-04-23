@@ -21,7 +21,6 @@ import {
   type StartupDiagnosticsPayload,
   waitForBackendCoreReady,
 } from "./lib/api";
-import { fetchConsumetHealth } from "./lib/consumetProviders";
 import { fetchTrendingManga } from "./lib/mangaProviders";
 import { markPerf, measurePerf } from "./lib/performance";
 import { fetchMovieBoxDiscover } from "./lib/streamProviders";
@@ -30,7 +29,6 @@ import "./index.css";
 const DownloaderPage = lazy(() => import("./pages/DownloaderPage"));
 const ConverterPage = lazy(() => import("./pages/ConverterPage"));
 const LibraryPage = lazy(() => import("./pages/LibraryPage"));
-const AnimePageV2 = lazy(() => import("./pages/AnimePageV2"));
 
 const MangaPage = lazy(() => import("./pages/MangaPage"));
 const MediaPage = lazy(() => import("./pages/MediaPage"));
@@ -205,7 +203,6 @@ function Inner() {
       void Promise.allSettled([
         fetch(`${BACKEND_API}/providers/status`).catch(() => null),
         fetchMovieBoxDiscover().catch(() => null),
-        fetchConsumetHealth().catch(() => null),
         fetchTrendingManga(1).catch(() => null),
       ]);
     }, 900);
@@ -217,8 +214,6 @@ function Inner() {
     downloader: <ErrorBoundary section="Downloader"><DownloaderPage onDownloadStarting={watchdog.notifyDownloadStarting} /></ErrorBoundary>,
     converter:  <ErrorBoundary section="Converter"><ConverterPage /></ErrorBoundary>,
     library:    <ErrorBoundary section="Library"><LibraryPage /></ErrorBoundary>,
-    anime:      <ErrorBoundary section="Anime"><AnimePageV2 /></ErrorBoundary>,
-
     manga:      <ErrorBoundary section="Manga"><MangaPage /></ErrorBoundary>,
     movies:     <ErrorBoundary section="Movies"><MediaPage mediaType="movie" /></ErrorBoundary>,
     moviebox:   <ErrorBoundary section="MovieBox"><MovieBoxPage /></ErrorBoundary>,

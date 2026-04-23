@@ -18,8 +18,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 # ── Router imports ────────────────────────────────────────────────────────────
-from app.routes.aniwatch_routes import router as aniwatch_router
-from app.routes.consumet import router as consumet_router
 from app.routes.downloads import router as downloads_router
 from app.routes.manga import router as manga_router
 from app.routes.metadata import router as metadata_router
@@ -32,7 +30,6 @@ from moviebox import (
     start_bg_retry as _moviebox_start_bg_retry,
     restore_from_last_session as _moviebox_restore_from_last_session,
 )
-from anime import router as anime_router
 from downloads import router as downloads_engine_router, register_handlers as _register_download_handlers
 from downloads.engine import (
     ensure_runtime_bootstrap,
@@ -44,7 +41,6 @@ from downloads.engine import (
 )
 
 # ── Service imports ───────────────────────────────────────────────────────────
-from app.services.megacloud import run_key_health_worker
 from app.services.errors import json_error_response
 from app.services.logging_utils import LOG_DIR, backend_log_path, get_logger, log_event, read_recent_log_events
 from app.services.archive_installer import parse_checksum_manifest, safe_extract_zip, sha256_file
@@ -81,12 +77,6 @@ from db_helpers import (
     _guess_dl_type_from_path, has_ffmpeg, has_aria2, init_db,
 )
 from library_helpers import migrate_db, _build_library_index, _reconcile_library_state
-from streaming_helpers import (
-    _extract_iframe_src, _fetch_json, _normalize_request_headers,
-    _rewrite_hls_playlist, _extract_hls_variants, _looks_like_playable_media_url,
-    _extract_stream_url, _resolve_embed_target, resolve_embed, stream_proxy,
-    stream_variants, _extract_stream_url_via_browser, extract_stream,
-)
 
 # ── Phase 2 core split ────────────────────────────────────────────────────────
 from core import cache_ops, network_monitor, download_helpers
@@ -117,7 +107,6 @@ from core.cache_ops import (
     _sqlite_cache_set,
     _cache_trigger_bg_refresh,
 )
-from anime.resolver import _is_internal_managed_file
 
 try:
     import bcrypt
@@ -146,8 +135,6 @@ ADULT_UNLOCK_WINDOW_SECONDS = 300
 ADULT_UNLOCK_MAX_ATTEMPTS = 5
 adult_unlock_attempts: dict[str, list[float]] = runtime_state.adult_unlock_attempts
 APPROVED_MEDIA_HOSTS = DEFAULT_APPROVED_MEDIA_HOSTS
-CONSUMET_HEALTH_CACHE_TTL_SECONDS = 15
-consumet_health_cache: tuple[float, dict] | None = None
 dependency_install_jobs: dict[str, dict] = runtime_state.dependency_install_jobs
 
 _app_event_loop: asyncio.AbstractEventLoop | None = None
@@ -270,7 +257,6 @@ async def _grabix_lifespan(app: FastAPI):
     cache_ops.set_event_loop(_app_event_loop)   # allow background cache refresh
     ensure_runtime_bootstrap()
     recover_download_jobs()
-    asyncio.create_task(run_key_health_worker(interval_seconds=1200.0))
     yield
 
 
@@ -284,8 +270,6 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization", "Range", "X-Request-ID", DESKTOP_AUTH_HEADER],
 )
 
-app.include_router(aniwatch_router,        prefix="/aniwatch")
-app.include_router(consumet_router,        prefix="/consumet")
 app.include_router(downloads_router)
 app.include_router(manga_router,           prefix="/manga")
 app.include_router(metadata_router)
@@ -294,7 +278,6 @@ app.include_router(settings_router)
 app.include_router(streaming_router)
 app.include_router(subtitles_router,       prefix="/subtitles")
 app.include_router(moviebox_router,        prefix="/moviebox")
-app.include_router(anime_router,           prefix="/anime")
 app.include_router(downloads_engine_router)
 # Phase 2: health, cache, diagnostics, providers routes
 app.include_router(health_router)

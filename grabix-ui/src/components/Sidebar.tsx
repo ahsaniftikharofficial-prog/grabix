@@ -39,7 +39,7 @@ const IconChart = ({ size = 16, color = "currentColor" }: { size?: number; color
   </svg>
 );
 
-export type Page = "downloader" | "converter" | "library" | "anime" | "manga" | "movies" | "moviebox" | "series" | "favorites" | "ratings" | "settings";
+export type Page = "downloader" | "converter" | "library" | "manga" | "movies" | "moviebox" | "series" | "favorites" | "ratings" | "settings";
 
 interface Props {
   page: Page;
@@ -63,7 +63,6 @@ const GROUPS = [
     items: [
       { id: "movies" as Page, label: "Movies", Icon: IconFilm },
       { id: "series" as Page, label: "TV Series", Icon: IconTv },
-      { id: "anime" as Page, label: "Anime", Icon: IconTv },
       { id: "manga" as Page, label: "Manga", Icon: IconBook },
       { id: "moviebox" as Page, label: "Movie Box", Icon: IconBrowse },
       { id: "ratings"   as Page, label: "Ratings",   Icon: IconChart },
