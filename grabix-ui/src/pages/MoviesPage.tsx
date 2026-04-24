@@ -1,4 +1,4 @@
-// grabix-ui/src/pages/MoviesPage.tsx  — Netflix-style rebuild (Phase 2)
+// grabix-ui/src/pages/MoviesPage.tsx — Phase 1 rebuild
 import { useState, useEffect, useRef, useCallback } from "react";
 import { IconSearch, IconPlay, IconDownload, IconX, IconChevronLeft, IconChevronRight } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
@@ -31,24 +31,12 @@ import {
   resolveMoviePlaybackSources,
   type StreamSource,
 } from "../lib/streamProviders";
+import { MovieCard, type Movie } from "../components/movies/MovieCard";
+import { MovieRow } from "../components/movies/MovieRow";
+import { MovieGrid } from "../components/movies/MovieGrid";
+import { useSeenIds } from "../hooks/useSeenIds";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-interface Movie {
-  id: number;
-  title: string;
-  overview: string;
-  poster_path: string | null;
-  backdrop_path?: string | null;
-  vote_average: number;
-  release_date: string;
-  genre_ids?: number[];
-  genres?: { id: number; name: string }[];
-  runtime?: number;
-  imdb_id?: string;
-  tagline?: string;
-  status?: string;
-  original_language?: string;
-}
 interface Genre { id: number; name: string; }
 type SortOption = "popularity.desc" | "vote_average.desc" | "release_date.desc" | "revenue.desc";
 type Tab = "home" | "search";
@@ -58,9 +46,9 @@ const IMG = (path: string | null | undefined, base = IMG_BASE) =>
   path ? `${base}${path}` : "";
 
 const SORT_OPTIONS: { id: SortOption; label: string }[] = [
-  { id: "popularity.desc",    label: "Most Popular"  },
-  { id: "vote_average.desc",  label: "Highest Rated" },
-  { id: "release_date.desc",  label: "Newest First"  },
+  { id: "popularity.desc",    label: "Most Popular"       },
+  { id: "vote_average.desc",  label: "Highest Rated"      },
+  { id: "release_date.desc",  label: "Newest First"       },
   { id: "revenue.desc",       label: "Biggest Box Office" },
 ];
 
@@ -73,28 +61,109 @@ const YEAR_OPTIONS = [
 ];
 
 const RATING_OPTIONS = [
-  { id: 0,   label: "Any Rating" },
-  { id: 9,   label: "9+ ★" },
-  { id: 8,   label: "8+ ★" },
-  { id: 7,   label: "7+ ★" },
-  { id: 6,   label: "6+ ★" },
+  { id: 0, label: "Any Rating" },
+  { id: 9, label: "9+ \u2605" },
+  { id: 8, label: "8+ \u2605" },
+  { id: 7, label: "7+ \u2605" },
+  { id: 6, label: "6+ \u2605" },
 ];
+
+// ── Loading skeleton ──────────────────────────────────────────────────────────
+function LoadingRow() {
+  return (
+    <div style={{ display: "flex", gap: 10, overflow: "hidden" }}>
+      {Array.from({ length: 8 }).map((_, i) => (
+        <div key={i} style={{ flexShrink: 0, width: 130, borderRadius: 10, overflow: "hidden", background: "var(--bg-surface)" }}>
+          <div style={{ height: 195, background: "var(--bg-surface2)" }} />
+          <div style={{ padding: "7px 9px 9px" }}>
+            <div style={{ height: 10, background: "var(--bg-surface2)", borderRadius: 4, marginBottom: 5 }} />
+            <div style={{ height: 8, background: "var(--bg-surface2)", borderRadius: 4, width: "50%" }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Hero Banner ───────────────────────────────────────────────────────────────
+function HeroBanner({ movies, idx, onSelect, onPlay, onPrev, onNext }: {
+  movies: Movie[];
+  idx: number;
+  onSelect: (m: Movie) => void;
+  onPlay: (src: any) => void;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  const m = movies[idx];
+  if (!m) return null;
+  const backdrop = IMG(m.backdrop_path, IMG_LG);
+
+  const handleQuickPlay = async () => {
+    const sources = getMovieSources({ tmdbId: m.id });
+    onPlay({ title: m.title, poster: IMG(m.poster_path), sources });
+  };
+
+  return (
+    <div style={{ position: "relative", height: 400, overflow: "hidden", flexShrink: 0 }}>
+      {backdrop && (
+        <img src={backdrop} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
+      )}
+      <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to right, rgba(0,0,0,0.82) 30%, rgba(0,0,0,0.2) 80%), linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 60%)" }} />
+      <div style={{ position: "absolute", bottom: 40, left: 28, maxWidth: 480, zIndex: 2 }}>
+        <div style={{ fontSize: 26, fontWeight: 800, color: "#fff", marginBottom: 8, lineHeight: 1.2, textShadow: "0 2px 8px rgba(0,0,0,0.6)" }}>{m.title}</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+          {m.vote_average > 0 && (
+            <span style={{ background: "rgba(253,214,99,0.2)", border: "1px solid #fdd663", color: "#fdd663", fontSize: 11, padding: "2px 8px", borderRadius: 20, fontWeight: 700 }}>
+              ★ {m.vote_average.toFixed(1)}
+            </span>
+          )}
+          {m.release_date && (
+            <span style={{ background: "rgba(255,255,255,0.12)", color: "#ddd", fontSize: 11, padding: "2px 8px", borderRadius: 20 }}>
+              {m.release_date.slice(0, 4)}
+            </span>
+          )}
+        </div>
+        {m.overview && (
+          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.8)", lineHeight: 1.6, marginBottom: 16, display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+            {m.overview}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 10 }}>
+          <button className="btn btn-primary" style={{ gap: 7, fontSize: 13, padding: "8px 20px" }} onClick={handleQuickPlay}>
+            <IconPlay size={14} /> Play
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 13, padding: "8px 20px", background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", color: "#fff" }} onClick={() => onSelect(m)}>
+            More Info
+          </button>
+        </div>
+      </div>
+      <button onClick={onPrev} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.5)", border: "none", borderRadius: "50%", width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#fff", zIndex: 3 }}>
+        <IconChevronLeft size={18} />
+      </button>
+      <button onClick={onNext} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.5)", border: "none", borderRadius: "50%", width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#fff", zIndex: 3 }}>
+        <IconChevronRight size={18} />
+      </button>
+      <div style={{ position: "absolute", bottom: 12, right: 20, display: "flex", gap: 6 }}>
+        {movies.map((_, i) => (
+          <div key={i} style={{ width: i === idx ? 20 : 6, height: 6, borderRadius: 3, background: i === idx ? "var(--accent)" : "rgba(255,255,255,0.4)", transition: "width 0.3s" }} />
+        ))}
+      </div>
+    </div>
+  );
+}
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function MoviesPage() {
   const { adultContentBlocked } = useContentFilter();
+  const { reset: resetSeen, filterUnseen, markSeen } = useSeenIds();
 
-  // navigation
   const [tab, setTab] = useState<Tab>("home");
-  // genres
   const [genres, setGenres] = useState<Genre[]>([]);
   const [activeGenre, setActiveGenre] = useState<number | null>(null);
-  // filters
   const [sortBy, setSortBy] = useState<SortOption>("popularity.desc");
   const [filterYear, setFilterYear] = useState<number>(0);
   const [filterRating, setFilterRating] = useState<number>(0);
   const [showFilters, setShowFilters] = useState(false);
-  // content rows
   const [heroItems, setHeroItems] = useState<Movie[]>([]);
   const [heroIdx, setHeroIdx] = useState(0);
   const [trending, setTrending] = useState<Movie[]>([]);
@@ -106,38 +175,32 @@ export default function MoviesPage() {
   const [genrePage, setGenrePage] = useState(1);
   const [genreLoading, setGenreLoading] = useState(false);
   const [genreHasMore, setGenreHasMore] = useState(true);
-  // search
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<Movie[]>([]);
   const [searchPage, setSearchPage] = useState(1);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchHasMore, setSearchHasMore] = useState(true);
-  // detail / player
   const [detail, setDetail] = useState<Movie | null>(null);
   const [player, setPlayer] = useState<{ title: string; subtitle?: string; poster?: string; sources: StreamSource[] } | null>(null);
-  // loading state
   const [homeLoading, setHomeLoading] = useState(true);
   const [homeError, setHomeError] = useState("");
-  // sentinel for infinite scroll
-  const sentinelRef = useRef<HTMLDivElement>(null);
-  const scrollRef    = useRef<HTMLDivElement>(null);
 
-  // ── Hero auto-rotate ────────────────────────────────────────────────────────
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     if (heroItems.length === 0) return;
     const t = setInterval(() => setHeroIdx(i => (i + 1) % heroItems.length), 7000);
     return () => clearInterval(t);
   }, [heroItems]);
 
-  // ── Load genres once ─────────────────────────────────────────────────────────
   useEffect(() => {
     fetchTmdbGenres("movie").then(d => {
       if (d?.genres) setGenres(d.genres);
     }).catch(() => {});
   }, []);
 
-  // ── Load home rows ───────────────────────────────────────────────────────────
   useEffect(() => {
     if (tab !== "home" || activeGenre !== null) return;
     setHomeLoading(true);
@@ -145,7 +208,7 @@ export default function MoviesPage() {
     Promise.all([
       discoverTmdbMedia("movie", "trending", 1),
       discoverTmdbMedia("movie", "popular",  1),
-      discoverTmdbMedia("movie", "top_rated",1),
+      discoverTmdbMedia("movie", "top_rated", 1),
       fetchTmdbNowPlaying(1),
       fetchTmdbUpcoming(1),
     ]).then(([tr, po, tp, np, up]) => {
@@ -161,8 +224,7 @@ export default function MoviesPage() {
     }).finally(() => setHomeLoading(false));
   }, [tab, activeGenre]);
 
-  // ── Load genre results ───────────────────────────────────────────────────────
-  const loadGenrePage = useCallback(async (gid: number, page: number, reset: boolean) => {
+  const loadGenrePage = useCallback(async (gid: number, page: number, isReset: boolean) => {
     setGenreLoading(true);
     try {
       const d = await discoverTmdbByGenre(
@@ -170,15 +232,22 @@ export default function MoviesPage() {
         filterYear || undefined,
         filterRating || undefined
       );
-      const results: Movie[] = d?.results ?? [];
-      setGenreResults(prev => reset ? results : [...prev, ...results]);
-      setGenreHasMore(results.length >= 20);
+      const raw: Movie[] = d?.results ?? [];
+      if (isReset) {
+        resetSeen();
+        markSeen(raw.map(r => r.id));
+        setGenreResults(raw);
+      } else {
+        const fresh = filterUnseen(raw);
+        setGenreResults(prev => [...prev, ...fresh]);
+      }
+      setGenreHasMore(raw.length >= 20);
     } catch {
       setGenreHasMore(false);
     } finally {
       setGenreLoading(false);
     }
-  }, [sortBy, filterYear, filterRating]);
+  }, [sortBy, filterYear, filterRating, resetSeen, markSeen, filterUnseen]);
 
   useEffect(() => {
     if (activeGenre === null) return;
@@ -187,21 +256,27 @@ export default function MoviesPage() {
     loadGenrePage(activeGenre, 1, true);
   }, [activeGenre, sortBy, filterYear, filterRating]);
 
-  // ── Search ───────────────────────────────────────────────────────────────────
-  const doSearch = useCallback(async (q: string, page: number, reset: boolean) => {
+  const doSearch = useCallback(async (q: string, page: number, isReset: boolean) => {
     if (!q.trim()) return;
     setSearchLoading(true);
     try {
       const d = await searchTmdbMedia("movie", q, page);
-      const results: Movie[] = d?.results ?? [];
-      setSearchResults(prev => reset ? results : [...prev, ...results]);
-      setSearchHasMore(results.length >= 20);
+      const raw: Movie[] = d?.results ?? [];
+      if (isReset) {
+        resetSeen();
+        markSeen(raw.map(r => r.id));
+        setSearchResults(raw);
+      } else {
+        const fresh = filterUnseen(raw);
+        setSearchResults(prev => [...prev, ...fresh]);
+      }
+      setSearchHasMore(raw.length >= 20);
     } catch {
       setSearchHasMore(false);
     } finally {
       setSearchLoading(false);
     }
-  }, []);
+  }, [resetSeen, markSeen, filterUnseen]);
 
   useEffect(() => {
     if (tab !== "search" || !searchQuery) return;
@@ -210,7 +285,6 @@ export default function MoviesPage() {
     doSearch(searchQuery, 1, true);
   }, [searchQuery, tab]);
 
-  // ── Infinite scroll ──────────────────────────────────────────────────────────
   useEffect(() => {
     const sentinel = sentinelRef.current;
     if (!sentinel) return;
@@ -249,18 +323,14 @@ export default function MoviesPage() {
     ? (genres.find(g => g.id === activeGenre)?.name ?? "Genre")
     : null;
 
-  // ── Render ───────────────────────────────────────────────────────────────────
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative", background: "var(--bg-base)" }}>
 
-      {/* ── Header ── */}
       <div style={{ padding: "12px 20px", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", display: "flex", alignItems: "center", gap: 12, flexShrink: 0, flexWrap: "wrap" }}>
         <div style={{ marginRight: 4 }}>
           <div style={{ fontSize: 16, fontWeight: 700 }}>Movies</div>
           <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 1 }}>Browse · Stream · Download</div>
         </div>
-
-        {/* search bar */}
         <div style={{ display: "flex", gap: 6, flex: 1, minWidth: 200, maxWidth: 380 }}>
           <div style={{ position: "relative", flex: 1 }}>
             <IconSearch size={13} color="var(--text-muted)" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }} />
@@ -280,8 +350,6 @@ export default function MoviesPage() {
             </button>
           )}
         </div>
-
-        {/* filter toggle */}
         {tab === "home" && activeGenre !== null && (
           <button
             className={`btn ${showFilters ? "btn-primary" : "btn-ghost"}`}
@@ -293,7 +361,6 @@ export default function MoviesPage() {
         )}
       </div>
 
-      {/* ── Genre pills ── */}
       <div style={{ display: "flex", gap: 6, padding: "10px 20px", overflowX: "auto", flexShrink: 0, borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", scrollbarWidth: "none" }}>
         <button
           onClick={() => { setActiveGenre(null); setTab("home"); }}
@@ -312,7 +379,6 @@ export default function MoviesPage() {
         ))}
       </div>
 
-      {/* ── Filter bar (only when genre selected) ── */}
       {showFilters && activeGenre !== null && (
         <div style={{ display: "flex", gap: 10, padding: "10px 20px", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", flexWrap: "wrap", flexShrink: 0 }}>
           <select className="input-base" style={{ fontSize: 12, minWidth: 150 }} value={sortBy} onChange={e => setSortBy(e.target.value as SortOption)}>
@@ -328,10 +394,8 @@ export default function MoviesPage() {
         </div>
       )}
 
-      {/* ── Scrollable content ── */}
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
 
-        {/* === SEARCH RESULTS === */}
         {tab === "search" && (
           <div style={{ padding: "20px 20px" }}>
             <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14, color: "var(--text-secondary)" }}>
@@ -340,13 +404,12 @@ export default function MoviesPage() {
             {searchResults.length === 0 && !searchLoading ? (
               <PageEmptyState title="No movies matched that search" subtitle="Try a different title or spelling." />
             ) : (
-              <PosterGrid movies={filtered(searchResults)} onSelect={setDetail} />
+              <MovieGrid movies={filtered(searchResults)} onSelect={setDetail} />
             )}
             {searchLoading && <LoadingRow />}
           </div>
         )}
 
-        {/* === GENRE RESULTS === */}
         {tab === "home" && activeGenre !== null && (
           <div style={{ padding: "20px 20px" }}>
             <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 14 }}>{displayGenre}</div>
@@ -355,19 +418,18 @@ export default function MoviesPage() {
             ) : genreResults.length === 0 ? (
               <PageEmptyState title="No movies found" subtitle="Try adjusting the filters." />
             ) : (
-              <PosterGrid movies={filtered(genreResults)} onSelect={setDetail} />
+              <MovieGrid movies={filtered(genreResults)} onSelect={setDetail} />
             )}
             {genreLoading && genreResults.length > 0 && <LoadingRow />}
           </div>
         )}
 
-        {/* === HOME === */}
         {tab === "home" && activeGenre === null && (
           <>
             {homeLoading ? (
               <div style={{ padding: 40, display: "flex", flexDirection: "column", gap: 32 }}>
                 <div style={{ height: 380, borderRadius: 16, background: "var(--bg-surface2)" }} />
-                {[0,1,2].map(i => <div key={i} style={{ height: 220, borderRadius: 12, background: "var(--bg-surface2)" }} />)}
+                {[0, 1, 2].map(i => <div key={i} style={{ height: 220, borderRadius: 12, background: "var(--bg-surface2)" }} />)}
               </div>
             ) : homeError ? (
               <div style={{ padding: 40 }}>
@@ -375,7 +437,6 @@ export default function MoviesPage() {
               </div>
             ) : (
               <>
-                {/* Hero Banner */}
                 {heroItems.length > 0 && (
                   <HeroBanner
                     movies={heroItems}
@@ -386,25 +447,21 @@ export default function MoviesPage() {
                     onNext={() => setHeroIdx(i => (i + 1) % heroItems.length)}
                   />
                 )}
-
-                {/* Content rows */}
                 <div style={{ padding: "20px 20px", display: "flex", flexDirection: "column", gap: 28 }}>
-                  {trending.length  > 0 && <MediaRow title="🔥 Trending This Week" movies={filtered(trending)}   onSelect={setDetail} />}
-                  {nowPlaying.length> 0 && <MediaRow title="🎬 Now in Theaters"    movies={filtered(nowPlaying)} onSelect={setDetail} />}
-                  {popular.length   > 0 && <MediaRow title="⭐ Popular Right Now"   movies={filtered(popular)}   onSelect={setDetail} />}
-                  {upcoming.length  > 0 && <MediaRow title="🗓 Coming Soon"         movies={filtered(upcoming)}  onSelect={setDetail} />}
-                  {topRated.length  > 0 && <MediaRow title="🏆 All-Time Top Rated"  movies={filtered(topRated)}  onSelect={setDetail} />}
+                  <MovieRow title="🔥 Trending This Week" movies={filtered(trending)}   onSelect={setDetail} />
+                  <MovieRow title="🎬 Now in Theaters"    movies={filtered(nowPlaying)} onSelect={setDetail} />
+                  <MovieRow title="⭐ Popular Right Now"   movies={filtered(popular)}   onSelect={setDetail} />
+                  <MovieRow title="🗓 Coming Soon"         movies={filtered(upcoming)}  onSelect={setDetail} />
+                  <MovieRow title="🏆 All-Time Top Rated"  movies={filtered(topRated)}  onSelect={setDetail} />
                 </div>
               </>
             )}
           </>
         )}
 
-        {/* Sentinel for infinite scroll */}
         <div ref={sentinelRef} style={{ height: 32 }} />
       </div>
 
-      {/* ── Detail Modal ── */}
       {detail && !player && (
         <MovieDetailModal
           movie={detail}
@@ -413,7 +470,6 @@ export default function MoviesPage() {
         />
       )}
 
-      {/* ── Player ── */}
       {player && (
         <VidSrcPlayer
           title={player.title}
@@ -428,147 +484,7 @@ export default function MoviesPage() {
   );
 }
 
-// ── Hero Banner ───────────────────────────────────────────────────────────────
-function HeroBanner({ movies, idx, onSelect, onPlay, onPrev, onNext }: {
-  movies: Movie[];
-  idx: number;
-  onSelect: (m: Movie) => void;
-  onPlay: (src: any) => void;
-  onPrev: () => void;
-  onNext: () => void;
-}) {
-  const m = movies[idx];
-  if (!m) return null;
-  const backdrop = IMG(m.backdrop_path, IMG_LG);
-
-  const handleQuickPlay = async () => {
-    const sources = getMovieSources({ tmdbId: m.id });
-    onPlay({ title: m.title, poster: IMG(m.poster_path), sources });
-  };
-
-  return (
-    <div style={{ position: "relative", height: 400, overflow: "hidden", flexShrink: 0 }}>
-      {backdrop && (
-        <img
-          src={backdrop}
-          alt=""
-          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
-        />
-      )}
-      {/* gradient overlay */}
-      <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to right, rgba(0,0,0,0.82) 30%, rgba(0,0,0,0.2) 80%), linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 60%)" }} />
-
-      {/* content */}
-      <div style={{ position: "absolute", bottom: 40, left: 28, maxWidth: 480, zIndex: 2 }}>
-        <div style={{ fontSize: 26, fontWeight: 800, color: "#fff", marginBottom: 8, lineHeight: 1.2, textShadow: "0 2px 8px rgba(0,0,0,0.6)" }}>{m.title}</div>
-        <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-          {m.vote_average > 0 && (
-            <span style={{ background: "rgba(253,214,99,0.2)", border: "1px solid #fdd663", color: "#fdd663", fontSize: 11, padding: "2px 8px", borderRadius: 20, fontWeight: 700 }}>
-              ★ {m.vote_average.toFixed(1)}
-            </span>
-          )}
-          {m.release_date && (
-            <span style={{ background: "rgba(255,255,255,0.12)", color: "#ddd", fontSize: 11, padding: "2px 8px", borderRadius: 20 }}>
-              {m.release_date.slice(0, 4)}
-            </span>
-          )}
-        </div>
-        {m.overview && (
-          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.8)", lineHeight: 1.6, marginBottom: 16, display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
-            {m.overview}
-          </div>
-        )}
-        <div style={{ display: "flex", gap: 10 }}>
-          <button className="btn btn-primary" style={{ gap: 7, fontSize: 13, padding: "8px 20px" }} onClick={handleQuickPlay}>
-            <IconPlay size={14} /> Play
-          </button>
-          <button className="btn btn-ghost" style={{ fontSize: 13, padding: "8px 20px", background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", color: "#fff" }} onClick={() => onSelect(m)}>
-            More Info
-          </button>
-        </div>
-      </div>
-
-      {/* prev/next arrows */}
-      <button onClick={onPrev} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.5)", border: "none", borderRadius: "50%", width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#fff", zIndex: 3 }}>
-        <IconChevronLeft size={18} />
-      </button>
-      <button onClick={onNext} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.5)", border: "none", borderRadius: "50%", width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#fff", zIndex: 3 }}>
-        <IconChevronRight size={18} />
-      </button>
-
-      {/* dots */}
-      <div style={{ position: "absolute", bottom: 12, right: 20, display: "flex", gap: 6 }}>
-        {movies.map((_, i) => (
-          <div key={i} style={{ width: i === idx ? 20 : 6, height: 6, borderRadius: 3, background: i === idx ? "var(--accent)" : "rgba(255,255,255,0.4)", transition: "width 0.3s" }} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ── Horizontal Scroll Row ─────────────────────────────────────────────────────
-function MediaRow({ title, movies, onSelect }: { title: string; movies: Movie[]; onSelect: (m: Movie) => void }) {
-  const rowRef = useRef<HTMLDivElement>(null);
-  const scroll = (dir: number) => rowRef.current?.scrollBy({ left: dir * 600, behavior: "smooth" });
-
-  return (
-    <div>
-      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10, display: "flex", alignItems: "center", gap: 8 }}>
-        {title}
-        <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
-          <button onClick={() => scroll(-1)} style={{ background: "var(--bg-surface2)", border: "none", borderRadius: "50%", width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "var(--text-secondary)" }}><IconChevronLeft size={14} /></button>
-          <button onClick={() => scroll(1)}  style={{ background: "var(--bg-surface2)", border: "none", borderRadius: "50%", width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "var(--text-secondary)" }}><IconChevronRight size={14} /></button>
-        </div>
-      </div>
-      <div
-        ref={rowRef}
-        style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 8, scrollbarWidth: "none", cursor: "grab" }}
-      >
-        {movies.slice(0, 30).map(m => <PosterCard key={m.id} movie={m} onClick={() => onSelect(m)} />)}
-      </div>
-    </div>
-  );
-}
-
-// ── Poster Card ───────────────────────────────────────────────────────────────
-function PosterCard({ movie: m, onClick }: { movie: Movie; onClick: () => void }) {
-  const poster = IMG(m.poster_path);
-  return (
-    <div
-      onClick={onClick}
-      style={{ flexShrink: 0, width: 130, cursor: "pointer", borderRadius: 10, overflow: "hidden", background: "var(--bg-surface)", border: "1px solid var(--border)", transition: "transform 0.15s, box-shadow 0.15s" }}
-      onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.transform = "scale(1.05)"; (e.currentTarget as HTMLDivElement).style.boxShadow = "var(--shadow-lg)"; }}
-      onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.transform = "scale(1)"; (e.currentTarget as HTMLDivElement).style.boxShadow = "none"; }}
-    >
-      <div style={{ position: "relative" }}>
-        {poster
-          ? <img src={poster} alt={m.title} style={{ width: "100%", height: 195, objectFit: "cover" }} />
-          : <div style={{ width: "100%", height: 195, background: "var(--bg-surface2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "var(--text-muted)" }}>No Image</div>
-        }
-        {m.vote_average > 0 && (
-          <div style={{ position: "absolute", top: 5, right: 5, background: "rgba(0,0,0,0.75)", color: "#fdd663", fontSize: 10, padding: "2px 6px", borderRadius: 6, fontWeight: 700 }}>
-            ★ {m.vote_average.toFixed(1)}
-          </div>
-        )}
-      </div>
-      <div style={{ padding: "7px 9px 9px" }}>
-        <div style={{ fontSize: 11, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.title}</div>
-        {m.release_date && <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>{m.release_date.slice(0, 4)}</div>}
-      </div>
-    </div>
-  );
-}
-
-// ── Poster Grid (for search / genre) ─────────────────────────────────────────
-function PosterGrid({ movies, onSelect }: { movies: Movie[]; onSelect: (m: Movie) => void }) {
-  return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 12 }}>
-      {movies.map(m => <PosterCard key={m.id} movie={m} onClick={() => onSelect(m)} />)}
-    </div>
-  );
-}
-
-// ── Detail Modal ──────────────────────────────────────────────────────────────
+// ── Movie Detail Modal ────────────────────────────────────────────────────────
 function MovieDetailModal({ movie, onClose, onPlay }: {
   movie: Movie;
   onClose: () => void;
@@ -613,42 +529,29 @@ function MovieDetailModal({ movie, onClose, onPlay }: {
     try {
       const movieYear = d.release_date ? Number(d.release_date.slice(0, 4)) : undefined;
       const sources = await resolveMoviePlaybackSources({
-        tmdbId: movie.id,
-        imdbId: d.imdb_id,
-        title: d.title,
-        year: movieYear,
+        tmdbId: movie.id, imdbId: d.imdb_id, title: d.title, year: movieYear,
       });
       onPlay({
-        title: d.title,
-        poster: poster || undefined,
+        title: d.title, poster: poster || undefined,
         sources: sources.length > 0 ? sources : getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id }),
       });
     } catch {
-      const fallback = getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id });
-      onPlay({ title: d.title, poster: poster || undefined, sources: fallback });
+      onPlay({ title: d.title, poster: poster || undefined, sources: getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id }) });
     } finally {
       setLoadingPlay(false);
     }
   };
 
   const openDownload = async () => {
-    setDownloadLang("english");
-    setDownloadOpts([]);
-    setDownloadQuality("");
-    setDownloadError("");
-    setDownloadOpen(true);
-    setDownloadLoading(true);
+    setDownloadLang("english"); setDownloadOpts([]); setDownloadQuality(""); setDownloadError("");
+    setDownloadOpen(true); setDownloadLoading(true);
     try {
       const movieYear = d.release_date ? Number(d.release_date.slice(0, 4)) : undefined;
       const sources = await fetchMovieBoxSources({ title: d.title, mediaType: "movie", year: movieYear });
       const opts = await resolveSourceDownloadOptions(sources);
-      setDownloadOpts(opts);
-      setDownloadQuality(opts[0]?.id ?? "");
-    } catch {
-      setDownloadError("No download source found.");
-    } finally {
-      setDownloadLoading(false);
-    }
+      setDownloadOpts(opts); setDownloadQuality(opts[0]?.id ?? "");
+    } catch { setDownloadError("No download source found."); }
+    finally { setDownloadLoading(false); }
   };
 
   const confirmDownload = async () => {
@@ -657,19 +560,12 @@ function MovieDetailModal({ movie, onClose, onPlay }: {
     setDownloadLoading(true);
     try {
       await queueVideoDownload({
-        url: opt.url,
-        title: `${d.title} — ${downloadLang === "hindi" ? "Hindi" : "English"} — ${opt.label}`,
-        thumbnail: poster,
-        headers: opt.headers,
-        forceHls: opt.forceHls,
-        category: "Movies",
+        url: opt.url, title: `${d.title} — ${downloadLang === "hindi" ? "Hindi" : "English"} — ${opt.label}`,
+        thumbnail: poster, headers: opt.headers, forceHls: opt.forceHls, category: "Movies",
       });
       setDownloadOpen(false);
-    } catch (e) {
-      setDownloadError(e instanceof Error ? e.message : "Download failed.");
-    } finally {
-      setDownloadLoading(false);
-    }
+    } catch (e) { setDownloadError(e instanceof Error ? e.message : "Download failed."); }
+    finally { setDownloadLoading(false); }
   };
 
   return (
@@ -681,29 +577,20 @@ function MovieDetailModal({ movie, onClose, onPlay }: {
         style={{ background: "var(--bg-surface)", borderRadius: 16, width: "100%", maxWidth: 780, boxShadow: "var(--shadow-lg)", border: "1px solid var(--border)", overflow: "hidden", position: "relative" }}
         onClick={e => e.stopPropagation()}
       >
-        {/* backdrop */}
         {backdrop && (
           <div style={{ position: "relative", height: 200, flexShrink: 0 }}>
             <img src={backdrop} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
             <div style={{ position: "absolute", inset: 0, background: "linear-gradient(transparent 30%, var(--bg-surface))" }} />
           </div>
         )}
-
         <div style={{ padding: "0 22px 26px" }}>
-          {/* title row */}
           <div style={{ display: "flex", gap: 16, marginTop: backdrop ? -60 : 20, position: "relative", zIndex: 1 }}>
-            {poster && (
-              <img src={poster} alt={d.title} style={{ width: 95, height: 142, objectFit: "cover", borderRadius: 10, flexShrink: 0, border: "2px solid var(--border)", boxShadow: "var(--shadow-md)" }} />
-            )}
+            {poster && <img src={poster} alt={d.title} style={{ width: 95, height: 142, objectFit: "cover", borderRadius: 10, flexShrink: 0, border: "2px solid var(--border)", boxShadow: "var(--shadow-md)" }} />}
             <div style={{ flex: 1, paddingTop: backdrop ? 65 : 0, minWidth: 0 }}>
               <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1.2, marginBottom: 6 }}>{d.title}</div>
               {(d as any).tagline && <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic", marginBottom: 8 }}>{(d as any).tagline}</div>}
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
-                {d.vote_average > 0 && (
-                  <span style={{ background: "rgba(253,214,99,0.15)", border: "1px solid #fdd663", color: "#fdd663", fontSize: 11, padding: "2px 9px", borderRadius: 20, fontWeight: 700 }}>
-                    ★ {d.vote_average.toFixed(1)}
-                  </span>
-                )}
+                {d.vote_average > 0 && <span style={{ background: "rgba(253,214,99,0.15)", border: "1px solid #fdd663", color: "#fdd663", fontSize: 11, padding: "2px 9px", borderRadius: 20, fontWeight: 700 }}>★ {d.vote_average.toFixed(1)}</span>}
                 {d.release_date && <span style={{ background: "var(--bg-surface2)", padding: "2px 9px", borderRadius: 20, fontSize: 11, color: "var(--text-secondary)" }}>{d.release_date.slice(0, 4)}</span>}
                 {(d as any).runtime > 0 && <span style={{ background: "var(--bg-surface2)", padding: "2px 9px", borderRadius: 20, fontSize: 11, color: "var(--text-secondary)" }}>{Math.floor((d as any).runtime / 60)}h {(d as any).runtime % 60}m</span>}
                 {(d as any).status && <span style={{ background: "var(--bg-active)", color: "var(--text-accent)", padding: "2px 9px", borderRadius: 20, fontSize: 11 }}>{(d as any).status}</span>}
@@ -714,42 +601,21 @@ function MovieDetailModal({ movie, onClose, onPlay }: {
                 ))}
               </div>
             </div>
-            <button className="btn-icon" style={{ alignSelf: "flex-start", marginTop: backdrop ? 65 : 0, flexShrink: 0 }} onClick={onClose}>
-              <IconX size={15} />
-            </button>
+            <button className="btn-icon" style={{ alignSelf: "flex-start", marginTop: backdrop ? 65 : 0, flexShrink: 0 }} onClick={onClose}><IconX size={15} /></button>
           </div>
-
-          {/* overview */}
-          {d.overview && (
-            <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.75, margin: "16px 0" }}>
-              {d.overview}
-            </div>
-          )}
-
-          {/* action buttons */}
+          {d.overview && <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.75, margin: "16px 0" }}>{d.overview}</div>}
           <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
             <button className="btn btn-primary" style={{ gap: 7, flex: "1 1 120px", justifyContent: "center", minWidth: 0 }} onClick={handlePlay} disabled={loadingPlay}>
               <IconPlay size={14} /> {loadingPlay ? "Loading…" : "Play"}
             </button>
-            {trailerKey && (
-              <button className="btn btn-ghost" style={{ gap: 7, flex: "1 1 100px", justifyContent: "center" }} onClick={() => setShowTrailer(true)}>
-                ▶ Trailer
-              </button>
-            )}
-            <button className="btn btn-ghost" style={{ gap: 7, flex: "1 1 100px", justifyContent: "center" }} onClick={openDownload}>
-              <IconDownload size={14} /> Download
-            </button>
-            <button
-              className="btn btn-ghost"
-              style={{ gap: 7, flex: "1 1 80px", justifyContent: "center", color: fav ? "var(--text-danger)" : undefined }}
-              onClick={() => toggle({ id: `movie-${movie.id}`, title: d.title, poster, type: "movie", tmdbId: movie.id })}
-            >
+            {trailerKey && <button className="btn btn-ghost" style={{ gap: 7, flex: "1 1 100px", justifyContent: "center" }} onClick={() => setShowTrailer(true)}>▶ Trailer</button>}
+            <button className="btn btn-ghost" style={{ gap: 7, flex: "1 1 100px", justifyContent: "center" }} onClick={openDownload}><IconDownload size={14} /> Download</button>
+            <button className="btn btn-ghost" style={{ gap: 7, flex: "1 1 80px", justifyContent: "center", color: fav ? "var(--text-danger)" : undefined }}
+              onClick={() => toggle({ id: `movie-${movie.id}`, title: d.title, poster, type: "movie", tmdbId: movie.id })}>
               <IconHeart size={14} color={fav ? "var(--text-danger)" : "currentColor"} filled={fav} />
               {fav ? "Saved" : "Save"}
             </button>
           </div>
-
-          {/* where to watch */}
           {streamProviders.length > 0 && (
             <div style={{ marginBottom: 20 }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }}>Where to Watch</div>
@@ -763,8 +629,6 @@ function MovieDetailModal({ movie, onClose, onPlay }: {
               </div>
             </div>
           )}
-
-          {/* cast */}
           {cast.length > 0 && (
             <div style={{ marginBottom: 20 }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>Cast</div>
@@ -782,74 +646,33 @@ function MovieDetailModal({ movie, onClose, onPlay }: {
               </div>
             </div>
           )}
-
-          {/* recommendations */}
           {recs.length > 0 && (
             <div>
               <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>More Like This</div>
               <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 6, scrollbarWidth: "none" }}>
-                {recs.map(r => <PosterCard key={r.id} movie={r} onClick={() => { onClose(); setTimeout(() => {}, 10); }} />)}
+                {recs.map(r => <MovieCard key={r.id} movie={r} onClick={() => { onClose(); }} />)}
               </div>
             </div>
           )}
         </div>
       </div>
-
-      {/* trailer iframe overlay */}
       {showTrailer && trailerKey && (
-        <div
-          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", zIndex: 400, display: "flex", alignItems: "center", justifyContent: "center" }}
-          onClick={() => setShowTrailer(false)}
-        >
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", zIndex: 400, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowTrailer(false)}>
           <div style={{ position: "relative", width: "min(900px,90vw)", aspectRatio: "16/9" }} onClick={e => e.stopPropagation()}>
-            <iframe
-              src={`https://www.youtube.com/embed/${trailerKey}?autoplay=1`}
-              style={{ width: "100%", height: "100%", border: "none", borderRadius: 12 }}
-              allow="autoplay; fullscreen"
-              title="Trailer"
-            />
-            <button
-              onClick={() => setShowTrailer(false)}
-              style={{ position: "absolute", top: -36, right: 0, background: "none", border: "none", color: "#fff", fontSize: 18, cursor: "pointer" }}
-            >
-              ✕ Close
-            </button>
+            <iframe src={`https://www.youtube.com/embed/${trailerKey}?autoplay=1`} style={{ width: "100%", height: "100%", border: "none", borderRadius: 12 }} allow="autoplay; fullscreen" title="Trailer" />
+            <button onClick={() => setShowTrailer(false)} style={{ position: "absolute", top: -36, right: 0, background: "none", border: "none", color: "#fff", fontSize: 18, cursor: "pointer" }}>✕ Close</button>
           </div>
         </div>
       )}
-
       <DownloadOptionsModal
-        visible={downloadOpen}
-        title={d.title}
-        poster={poster || undefined}
+        visible={downloadOpen} title={d.title} poster={poster || undefined}
         languageOptions={[{ id: "english", label: "English" }, { id: "hindi", label: "Hindi" }]}
-        selectedLanguage={downloadLang}
-        onSelectLanguage={v => setDownloadLang(v as "english" | "hindi")}
+        selectedLanguage={downloadLang} onSelectLanguage={v => setDownloadLang(v as "english" | "hindi")}
         qualityOptions={downloadOpts.map(o => ({ id: o.id, label: o.label }))}
-        selectedQuality={downloadQuality}
-        onSelectQuality={setDownloadQuality}
-        loading={downloadLoading}
-        error={downloadError}
-        onClose={() => setDownloadOpen(false)}
-        onConfirm={() => void confirmDownload()}
+        selectedQuality={downloadQuality} onSelectQuality={setDownloadQuality}
+        loading={downloadLoading} error={downloadError}
+        onClose={() => setDownloadOpen(false)} onConfirm={() => void confirmDownload()}
       />
-    </div>
-  );
-}
-
-// ── Loading skeleton row ──────────────────────────────────────────────────────
-function LoadingRow() {
-  return (
-    <div style={{ display: "flex", gap: 10, overflow: "hidden" }}>
-      {Array.from({ length: 8 }).map((_, i) => (
-        <div key={i} style={{ flexShrink: 0, width: 130, borderRadius: 10, overflow: "hidden", background: "var(--bg-surface)" }}>
-          <div style={{ height: 195, background: "var(--bg-surface2)" }} />
-          <div style={{ padding: "7px 9px 9px" }}>
-            <div style={{ height: 10, background: "var(--bg-surface2)", borderRadius: 4, marginBottom: 5 }} />
-            <div style={{ height: 8, background: "var(--bg-surface2)", borderRadius: 4, width: "50%" }} />
-          </div>
-        </div>
-      ))}
     </div>
   );
 }
