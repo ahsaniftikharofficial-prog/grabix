@@ -52,3 +52,6 @@ export const IconHardDrive  = (p: IconProps) => <SI {...p}><line x1="22" y1="12"
 export const IconUpload     = (p: IconProps) => <SI {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></SI>;
 export const IconExpand     = (p: IconProps) => <SI {...p}><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><polyline points="21 15 21 21 15 21"/><polyline points="3 9 3 3 9 3"/></SI>;
 export const IconServers    = (p: IconProps) => <SI {...p}><rect x="3" y="4" width="18" height="5" rx="1.5"/><rect x="3" y="10" width="18" height="5" rx="1.5"/><rect x="3" y="16" width="18" height="5" rx="1.5"/><line x1="7" y1="6.5" x2="7.01" y2="6.5"/><line x1="7" y1="12.5" x2="7.01" y2="12.5"/><line x1="7" y1="18.5" x2="7.01" y2="18.5"/></SI>;
+
+export const IconChevronLeft  = (p: IconProps) => <I {...p} d="M15 18l-6-6 6-6" />;
+export const IconChevronRight = (p: IconProps) => <I {...p} d="M9 18l6-6-6-6" />;

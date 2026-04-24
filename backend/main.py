@@ -108,6 +108,19 @@ from core.cache_ops import (
     _cache_trigger_bg_refresh,
 )
 
+def _is_internal_managed_file(path) -> bool:
+    """Return True if *path* lives inside RUNTIME_TOOLS_DIR.
+
+    library_helpers calls this to skip internal tool binaries when building
+    the user-facing library index.
+    """
+    from pathlib import Path as _Path
+    try:
+        rtd = runtime_tools_dir()
+        return _Path(path).resolve().is_relative_to(rtd.resolve())
+    except Exception:
+        return False
+
 try:
     import bcrypt
     BCRYPT_AVAILABLE = True

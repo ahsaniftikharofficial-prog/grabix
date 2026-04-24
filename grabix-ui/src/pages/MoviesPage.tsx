@@ -1,716 +1,854 @@
-// grabix-ui/src/pages/MoviesPage.tsx
-// Updated: Play (VidSrc), Download, Favorite buttons
-
+// grabix-ui/src/pages/MoviesPage.tsx  — Netflix-style rebuild (Phase 2)
 import { useState, useEffect, useRef, useCallback } from "react";
-import { IconSearch, IconStar, IconPlay, IconDownload, IconX } from "../components/Icons";
+import { IconSearch, IconStar, IconPlay, IconDownload, IconX, IconChevronLeft, IconChevronRight } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import { PageEmptyState, PageErrorState } from "../components/PageStates";
 import { useFavorites } from "../context/FavoritesContext";
 import { useContentFilter } from "../context/ContentFilterContext";
-import { fetchConsumetMetaSearch } from "../lib/consumetProviders";
 import { filterAdultContent } from "../lib/contentFilter";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
-import { TMDB_BACKDROP_BASE as IMG_LG, TMDB_IMAGE_BASE as IMG_BASE, discoverTmdbMedia, fetchTmdbDetails, searchTmdbMedia } from "../lib/tmdb";
-import { fetchSharedTopRatedMovies } from "../lib/topRatedMedia";
+import {
+  TMDB_BACKDROP_BASE as IMG_LG,
+  TMDB_IMAGE_BASE as IMG_BASE,
+  TMDB_PROFILE_BASE as IMG_PROF,
+  discoverTmdbMedia,
+  fetchTmdbDetails,
+  searchTmdbMedia,
+  fetchTmdbGenres,
+  discoverTmdbByGenre,
+  fetchTmdbRecommendations,
+  fetchTmdbCredits,
+  fetchTmdbVideos,
+  fetchTmdbNowPlaying,
+  fetchTmdbUpcoming,
+  fetchTmdbWatchProviders,
+} from "../lib/tmdb";
 import VidSrcPlayer from "../components/VidSrcPlayer";
-import { fetchMovieBoxDiscover, fetchMovieBoxSources, getArchiveMovieSources, getMovieSources, resolveMoviePlaybackSources, searchMovieBox, type MovieBoxItem, type StreamSource } from "../lib/streamProviders";
+import {
+  fetchMovieBoxSources,
+  getMovieSources,
+  resolveMoviePlaybackSources,
+  searchMovieBox,
+  type MovieBoxItem,
+  type StreamSource,
+} from "../lib/streamProviders";
 
-interface ArchiveItem {
-  identifier: string; title: string; year?: string;
-  description?: string; thumb?: string;
-}
+// ── Types ─────────────────────────────────────────────────────────────────────
 interface Movie {
-  id: number; title: string; overview: string;
-  poster_path: string; backdrop_path?: string;
-  poster_url?: string; moviebox_subject_id?: string;
-  vote_average: number; release_date: string;
-  imdb_id?: string;
+  id: number;
+  title: string;
+  overview: string;
+  poster_path: string | null;
+  backdrop_path?: string | null;
+  vote_average: number;
+  release_date: string;
+  genre_ids?: number[];
   genres?: { id: number; name: string }[];
+  runtime?: number;
+  imdb_id?: string;
+  tagline?: string;
+  status?: string;
+  original_language?: string;
 }
-type Tab = "popular" | "toprated";
+interface Genre { id: number; name: string; }
+type SortOption = "popularity.desc" | "vote_average.desc" | "release_date.desc" | "revenue.desc";
+type Tab = "home" | "search";
 
-const STATIC_TOP_MOVIES: Array<{ id: number; title: string; year: number }> = [
-  { id: -101, title: "The Shawshank Redemption", year: 1994 },
-  { id: -102, title: "The Godfather", year: 1972 },
-  { id: -103, title: "The Dark Knight", year: 2008 },
-  { id: -104, title: "The Godfather Part II", year: 1974 },
-  { id: -105, title: "12 Angry Men", year: 1957 },
-  { id: -106, title: "Schindler's List", year: 1993 },
-  { id: -107, title: "The Lord of the Rings: The Return of the King", year: 2003 },
-  { id: -108, title: "Pulp Fiction", year: 1994 },
-  { id: -109, title: "The Good, the Bad and the Ugly", year: 1966 },
-  { id: -110, title: "Fight Club", year: 1999 },
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const IMG = (path: string | null | undefined, base = IMG_BASE) =>
+  path ? `${base}${path}` : "";
+
+const SORT_OPTIONS: { id: SortOption; label: string }[] = [
+  { id: "popularity.desc",    label: "Most Popular"  },
+  { id: "vote_average.desc",  label: "Highest Rated" },
+  { id: "release_date.desc",  label: "Newest First"  },
+  { id: "revenue.desc",       label: "Biggest Box Office" },
 ];
 
-function makeFallbackMovieId(subjectId: string): number {
-  let hash = 0;
-  for (const char of subjectId) {
-    hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
-  }
-  return -(Math.abs(hash) || 1);
-}
+const YEAR_OPTIONS = [
+  { id: 0, label: "Any Year" },
+  ...Array.from({ length: 35 }, (_, i) => {
+    const y = new Date().getFullYear() - i;
+    return { id: y, label: String(y) };
+  }),
+];
 
-function mapMovieBoxMovieToMovie(item: MovieBoxItem): Movie {
-  return {
-    id: makeFallbackMovieId(item.id),
-    title: item.title,
-    overview: item.description || "",
-    poster_path: "",
-    poster_url: item.poster_proxy || item.poster || "",
-    moviebox_subject_id: item.id,
-    backdrop_path: "",
-    vote_average: item.imdb_rating ?? 0,
-    release_date: item.year ? `${item.year}-01-01` : "",
-    genres: (item.genres ?? []).map((genre, index) => ({ id: index + 1, name: genre })),
-  };
-}
+const RATING_OPTIONS = [
+  { id: 0,   label: "Any Rating" },
+  { id: 9,   label: "9+ ★" },
+  { id: 8,   label: "8+ ★" },
+  { id: 7,   label: "7+ ★" },
+  { id: 6,   label: "6+ ★" },
+];
 
-function mapStaticMovieToMovie(item: { id: number; title: string; year: number }): Movie {
-  return {
-    id: item.id,
-    title: item.title,
-    overview: "",
-    poster_path: "",
-    backdrop_path: "",
-    vote_average: 0,
-    release_date: `${item.year}-01-01`,
-    genres: [],
-  };
-}
-
-function getMoviePoster(movie: Movie): string {
-  if (movie.poster_url) return movie.poster_url;
-  if (movie.poster_path) return `${IMG_BASE}${movie.poster_path}`;
-  return "";
-}
-
-function getMovieBackdrop(movie: Movie): string {
-  if (movie.backdrop_path) return `${IMG_LG}${movie.backdrop_path}`;
-  return "";
-}
-
+// ── Main Page ─────────────────────────────────────────────────────────────────
 export default function MoviesPage() {
   const { adultContentBlocked } = useContentFilter();
-  const [tab, setTab]       = useState<Tab>("popular");
-  const [movies, setMovies] = useState<Movie[]>([]);
-  const [free]              = useState<ArchiveItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [pageError, setPageError] = useState("");
-  const [search, setSearch] = useState("");
-  const [query, setQuery]   = useState("");
+
+  // navigation
+  const [tab, setTab] = useState<Tab>("home");
+  // genres
+  const [genres, setGenres] = useState<Genre[]>([]);
+  const [activeGenre, setActiveGenre] = useState<number | null>(null);
+  // filters
+  const [sortBy, setSortBy] = useState<SortOption>("popularity.desc");
+  const [filterYear, setFilterYear] = useState<number>(0);
+  const [filterRating, setFilterRating] = useState<number>(0);
+  const [showFilters, setShowFilters] = useState(false);
+  // content rows
+  const [heroItems, setHeroItems] = useState<Movie[]>([]);
+  const [heroIdx, setHeroIdx] = useState(0);
+  const [trending, setTrending] = useState<Movie[]>([]);
+  const [popular, setPopular] = useState<Movie[]>([]);
+  const [topRated, setTopRated] = useState<Movie[]>([]);
+  const [nowPlaying, setNowPlaying] = useState<Movie[]>([]);
+  const [upcoming, setUpcoming] = useState<Movie[]>([]);
+  const [genreResults, setGenreResults] = useState<Movie[]>([]);
+  const [genrePage, setGenrePage] = useState(1);
+  const [genreLoading, setGenreLoading] = useState(false);
+  const [genreHasMore, setGenreHasMore] = useState(true);
+  // search
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<Movie[]>([]);
+  const [searchPage, setSearchPage] = useState(1);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchHasMore, setSearchHasMore] = useState(true);
+  // detail / player
   const [detail, setDetail] = useState<Movie | null>(null);
-  const [freeDetail, setFD] = useState<ArchiveItem | null>(null);
   const [player, setPlayer] = useState<{ title: string; subtitle?: string; poster?: string; sources: StreamSource[] } | null>(null);
-  const [page, setPage]     = useState(1);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const bottomRef = useRef<HTMLDivElement | null>(null);
+  // loading state
+  const [homeLoading, setHomeLoading] = useState(true);
+  const [homeError, setHomeError] = useState("");
+  // sentinel for infinite scroll
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const scrollRef    = useRef<HTMLDivElement>(null);
 
-  const tf = useCallback(async (id: number) => await fetchTmdbDetails("movie", id), []);
+  // ── Hero auto-rotate ────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (heroItems.length === 0) return;
+    const t = setInterval(() => setHeroIdx(i => (i + 1) % heroItems.length), 7000);
+    return () => clearInterval(t);
+  }, [heroItems]);
 
-  const fetchTMDB = async (t: Tab, p = 1) => {
-    setLoading(true);
-    setPageError("");
-    if (p === 1) setMovies([]);
-    if (t === "toprated") {
-      try {
-        const { items } = await fetchSharedTopRatedMovies();
-        const mappedItems = items.map((item) => {
-          if ("moviebox_media_type" in item) {
-            return mapMovieBoxMovieToMovie(item);
-          }
-          return {
-            id: item.id,
-            title: item.title,
-            overview: "",
-            poster_path: item.poster_path ?? "",
-            backdrop_path: "",
-            vote_average: item.vote_average ?? 0,
-            release_date: item.release_date ?? "",
-            genres: [],
-          } as Movie;
-        });
-        const pageSize = 24;
-        const withPoster = mappedItems.filter((m) => getMoviePoster(m) !== "");
-        const slice = withPoster.length > 0 ? withPoster.slice(0, 100) : mappedItems.slice(0, p * pageSize);
-        setMovies(slice.length > 0 ? slice : STATIC_TOP_MOVIES.map(mapStaticMovieToMovie));
-        return;
-      } catch {
-        setMovies(STATIC_TOP_MOVIES.map(mapStaticMovieToMovie));
-        return;
-      } finally {
-        setLoading(false);
-      }
-    }
+  // ── Load genres once ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    fetchTmdbGenres("movie").then(d => {
+      if (d?.genres) setGenres(d.genres);
+    }).catch(() => {});
+  }, []);
 
-    const categories: Record<Tab, "popular" | "top_rated"> = {
-      popular: "popular",
-      toprated: "top_rated",
-    };
+  // ── Load home rows ───────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (tab !== "home" || activeGenre !== null) return;
+    setHomeLoading(true);
+    setHomeError("");
+    Promise.all([
+      discoverTmdbMedia("movie", "trending", 1),
+      discoverTmdbMedia("movie", "popular",  1),
+      discoverTmdbMedia("movie", "top_rated",1),
+      fetchTmdbNowPlaying(1),
+      fetchTmdbUpcoming(1),
+    ]).then(([tr, po, tp, np, up]) => {
+      const trR = tr?.results ?? [];
+      setHeroItems(trR.filter((m: Movie) => m.backdrop_path).slice(0, 6));
+      setTrending(trR);
+      setPopular(po?.results ?? []);
+      setTopRated(tp?.results ?? []);
+      setNowPlaying(np?.results ?? []);
+      setUpcoming(up?.results ?? []);
+    }).catch(() => {
+      setHomeError("Could not load movies. Check your internet connection.");
+    }).finally(() => setHomeLoading(false));
+  }, [tab, activeGenre]);
+
+  // ── Load genre results ───────────────────────────────────────────────────────
+  const loadGenrePage = useCallback(async (gid: number, page: number, reset: boolean) => {
+    setGenreLoading(true);
     try {
-      const d = await discoverTmdbMedia("movie", categories[t], p);
-      if (!d?.results) throw new Error("TMDB movie discover unavailable");
-      setMovies(p === 1 ? (d.results ?? []) : prev => [...prev, ...(d.results ?? [])]);
-      return;
+      const d = await discoverTmdbByGenre(
+        "movie", gid, page, sortBy,
+        filterYear || undefined,
+        filterRating || undefined
+      );
+      const results: Movie[] = d?.results ?? [];
+      setGenreResults(prev => reset ? results : [...prev, ...results]);
+      setGenreHasMore(results.length >= 20);
     } catch {
+      setGenreHasMore(false);
+    } finally {
+      setGenreLoading(false);
     }
-
-    try {
-      const discover = await fetchMovieBoxDiscover();
-      const sections = discover.sections ?? [];
-      const selectedItems = sections
-        .filter((section) => section.id === "movies" || section.id === "most-popular")
-        .flatMap((section) => section.items ?? []);
-      const nextMovies = selectedItems
-        .filter((item) => item.moviebox_media_type === "movie")
-        .map(mapMovieBoxMovieToMovie);
-      setMovies(p === 1 ? nextMovies : prev => [...prev, ...nextMovies]);
-      if (nextMovies.length === 0) {
-        setPageError("Movies could not be loaded right now.");
-      }
-    } catch {
-      setMovies([]);
-      setPageError("Movies could not be loaded right now.");
-    } finally { setLoading(false); }
-  };
-
-  const searchMovies = async (q: string, p = 1) => {
-    setLoading(true);
-    setPageError("");
-    try {
-      const d = await searchTmdbMedia("movie", q, p);
-      if (!d?.results) throw new Error("TMDB movie search unavailable");
-      setMovies(p === 1 ? (d.results ?? []) : prev => [...prev, ...(d.results ?? [])]);
-    } catch {
-      setMovies([]);
-      setPageError("Movie search could not be completed right now.");
-    } finally { setLoading(false); }
-  };
-
-  const retryCurrentView = () => {
-    setPage(1);
-    if (query) {
-      void searchMovies(query, 1);
-      return;
-    }
-    void fetchTMDB(tab, 1);
-  };
+  }, [sortBy, filterYear, filterRating]);
 
   useEffect(() => {
-    setPage(1);
-    if (query) { searchMovies(query, 1); return; }
-    fetchTMDB(tab, 1);
-  }, [tab, query]);
+    if (activeGenre === null) return;
+    setGenrePage(1);
+    setGenreResults([]);
+    loadGenrePage(activeGenre, 1, true);
+  }, [activeGenre, sortBy, filterYear, filterRating]);
+
+  // ── Search ───────────────────────────────────────────────────────────────────
+  const doSearch = useCallback(async (q: string, page: number, reset: boolean) => {
+    if (!q.trim()) return;
+    setSearchLoading(true);
+    try {
+      const d = await searchTmdbMedia("movie", q, page);
+      const results: Movie[] = d?.results ?? [];
+      setSearchResults(prev => reset ? results : [...prev, ...results]);
+      setSearchHasMore(results.length >= 20);
+    } catch {
+      setSearchHasMore(false);
+    } finally {
+      setSearchLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    const root = scrollRef.current;
-    const node = bottomRef.current;
-    if (!root || !node) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting) && !loading) {
-          loadMore();
-        }
-      },
-      { root, rootMargin: "240px 0px" }
-    );
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [loading, page, query, tab]);
+    if (tab !== "search" || !searchQuery) return;
+    setSearchPage(1);
+    setSearchResults([]);
+    doSearch(searchQuery, 1, true);
+  }, [searchQuery, tab]);
 
-  const loadMore = () => { const n = page + 1; setPage(n); if (query) searchMovies(query, n); else fetchTMDB(tab, n); };
+  // ── Infinite scroll ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+    const obs = new IntersectionObserver(entries => {
+      if (!entries[0].isIntersecting) return;
+      if (tab === "search" && searchQuery && !searchLoading && searchHasMore) {
+        const next = searchPage + 1;
+        setSearchPage(next);
+        doSearch(searchQuery, next, false);
+      } else if (activeGenre !== null && !genreLoading && genreHasMore) {
+        const next = genrePage + 1;
+        setGenrePage(next);
+        loadGenrePage(activeGenre, next, false);
+      }
+    }, { rootMargin: "300px" });
+    obs.observe(sentinel);
+    return () => obs.disconnect();
+  }, [tab, searchQuery, searchPage, searchLoading, searchHasMore,
+      activeGenre, genrePage, genreLoading, genreHasMore]);
 
-  const TABS = [
-    { id: "popular"  as Tab, label: "Popular"  },
-    { id: "toprated" as Tab, label: "Top Rated"},
-  ];
-  const filteredMovies = filterAdultContent(movies, adultContentBlocked);
-  const filteredFree = filterAdultContent(free, adultContentBlocked);
+  const submitSearch = () => {
+    const q = searchInput.trim();
+    if (!q) return;
+    setSearchQuery(q);
+    setTab("search");
+  };
 
+  const clearSearch = () => {
+    setSearchInput("");
+    setSearchQuery("");
+    setTab("home");
+  };
+
+  const filtered = (arr: Movie[]) => filterAdultContent(arr, adultContentBlocked);
+  const displayGenre = activeGenre !== null
+    ? (genres.find(g => g.id === activeGenre)?.name ?? "Genre")
+    : null;
+
+  // ── Render ───────────────────────────────────────────────────────────────────
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
-      <div style={{ padding: "14px 24px", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <div>
-          <div style={{ fontSize: 16, fontWeight: 600 }}>Movies</div>
-          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 1 }}>Browse · Stream · Download</div>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative", background: "var(--bg-base)" }}>
+
+      {/* ── Header ── */}
+      <div style={{ padding: "12px 20px", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", display: "flex", alignItems: "center", gap: 12, flexShrink: 0, flexWrap: "wrap" }}>
+        <div style={{ marginRight: 4 }}>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>Movies</div>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 1 }}>Browse · Stream · Download</div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <div style={{ position: "relative" }}>
-            <div style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }}><IconSearch size={13} color="var(--text-muted)" /></div>
-            <input className="input-base" style={{ paddingLeft: 32, width: 220, fontSize: 13 }} placeholder="Search movies…" value={search} onChange={e => setSearch(e.target.value)} onKeyDown={e => e.key === "Enter" && (search.trim() ? setQuery(search.trim()) : setQuery(""))} />
+
+        {/* search bar */}
+        <div style={{ display: "flex", gap: 6, flex: 1, minWidth: 200, maxWidth: 380 }}>
+          <div style={{ position: "relative", flex: 1 }}>
+            <IconSearch size={13} color="var(--text-muted)" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }} />
+            <input
+              className="input-base"
+              style={{ paddingLeft: 32, width: "100%", fontSize: 13 }}
+              placeholder="Search movies…"
+              value={searchInput}
+              onChange={e => setSearchInput(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && submitSearch()}
+            />
           </div>
-          <button className="btn btn-primary" style={{ fontSize: 13 }} onClick={() => search.trim() ? setQuery(search.trim()) : setQuery("")}>Search</button>
-          {query && <button className="btn btn-ghost" style={{ fontSize: 13 }} onClick={() => { setQuery(""); setSearch(""); }}><IconX size={13} /> Clear</button>}
-        </div>
-      </div>
-
-      {!query && (
-        <div style={{ display: "flex", gap: 4, padding: "10px 24px 0", background: "var(--bg-surface)", borderBottom: "1px solid var(--border)" }}>
-          {TABS.map(t => (
-            <button key={t.id} onClick={() => setTab(t.id)} style={{ padding: "7px 16px", fontSize: 13, fontWeight: 500, border: "none", cursor: "pointer", background: "transparent", borderBottom: tab === t.id ? "2px solid var(--accent)" : "2px solid transparent", color: tab === t.id ? "var(--accent)" : "var(--text-muted)", transition: "var(--transition)", borderRadius: 0 }}>
-              {t.label}
+          <button className="btn btn-primary" style={{ fontSize: 13, whiteSpace: "nowrap" }} onClick={submitSearch}>Search</button>
+          {searchQuery && (
+            <button className="btn btn-ghost" style={{ fontSize: 13 }} onClick={clearSearch}>
+              <IconX size={13} /> Clear
             </button>
-          ))}
+          )}
+        </div>
+
+        {/* filter toggle */}
+        {tab === "home" && activeGenre !== null && (
+          <button
+            className={`btn ${showFilters ? "btn-primary" : "btn-ghost"}`}
+            style={{ fontSize: 12, gap: 5 }}
+            onClick={() => setShowFilters(f => !f)}
+          >
+            ⚙ Filters {showFilters ? "▲" : "▼"}
+          </button>
+        )}
+      </div>
+
+      {/* ── Genre pills ── */}
+      <div style={{ display: "flex", gap: 6, padding: "10px 20px", overflowX: "auto", flexShrink: 0, borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", scrollbarWidth: "none" }}>
+        <button
+          onClick={() => { setActiveGenre(null); setTab("home"); }}
+          style={{ padding: "5px 14px", borderRadius: 20, fontSize: 12, fontWeight: 600, border: "none", cursor: "pointer", whiteSpace: "nowrap", background: activeGenre === null && tab === "home" ? "var(--accent)" : "var(--bg-surface2)", color: activeGenre === null && tab === "home" ? "white" : "var(--text-secondary)", transition: "var(--transition)" }}
+        >
+          🏠 Home
+        </button>
+        {genres.map(g => (
+          <button
+            key={g.id}
+            onClick={() => { setActiveGenre(g.id); setTab("home"); setShowFilters(false); }}
+            style={{ padding: "5px 14px", borderRadius: 20, fontSize: 12, fontWeight: 500, border: "none", cursor: "pointer", whiteSpace: "nowrap", background: activeGenre === g.id ? "var(--accent)" : "var(--bg-surface2)", color: activeGenre === g.id ? "white" : "var(--text-secondary)", transition: "var(--transition)" }}
+          >
+            {g.name}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Filter bar (only when genre selected) ── */}
+      {showFilters && activeGenre !== null && (
+        <div style={{ display: "flex", gap: 10, padding: "10px 20px", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", flexWrap: "wrap", flexShrink: 0 }}>
+          <select className="input-base" style={{ fontSize: 12, minWidth: 150 }} value={sortBy} onChange={e => setSortBy(e.target.value as SortOption)}>
+            {SORT_OPTIONS.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+          </select>
+          <select className="input-base" style={{ fontSize: 12, minWidth: 110 }} value={filterYear} onChange={e => setFilterYear(Number(e.target.value))}>
+            {YEAR_OPTIONS.map(y => <option key={y.id} value={y.id}>{y.label}</option>)}
+          </select>
+          <select className="input-base" style={{ fontSize: 12, minWidth: 110 }} value={filterRating} onChange={e => setFilterRating(Number(e.target.value))}>
+            {RATING_OPTIONS.map(r => <option key={r.id} value={r.id}>{r.label}</option>)}
+          </select>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => { setSortBy("popularity.desc"); setFilterYear(0); setFilterRating(0); }}>Reset</button>
         </div>
       )}
 
-      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
-        {loading && filteredMovies.length === 0 ? <LoadingGrid /> :
-         pageError ? (
-          <PageErrorState
-            title="Movies are unavailable right now"
-            subtitle={pageError}
-            onRetry={retryCurrentView}
-          />
-         ) : false ? (
-          <>
-            <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>Public domain films from Archive.org — free to stream and download legally.</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 }}>
-              {filteredFree.map(m => <FreeCard key={m.identifier} movie={m} onClick={() => setFD(m)} />)}
+      {/* ── Scrollable content ── */}
+      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
+
+        {/* === SEARCH RESULTS === */}
+        {tab === "search" && (
+          <div style={{ padding: "20px 20px" }}>
+            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14, color: "var(--text-secondary)" }}>
+              {searchResults.length > 0 ? `Results for "${searchQuery}"` : searchLoading ? "Searching…" : `No results for "${searchQuery}"`}
             </div>
-          </>
-         ) : filteredMovies.length === 0 ? (
-          <PageEmptyState
-            title={query ? "No movies matched that search" : "No movies are available here yet"}
-            subtitle={query ? "Try a different title, year, or spelling." : "Try another section or refresh this page."}
-          />
-         ) : (
+            {searchResults.length === 0 && !searchLoading ? (
+              <PageEmptyState title="No movies matched that search" subtitle="Try a different title or spelling." />
+            ) : (
+              <PosterGrid movies={filtered(searchResults)} onSelect={setDetail} />
+            )}
+            {searchLoading && <LoadingRow />}
+          </div>
+        )}
+
+        {/* === GENRE RESULTS === */}
+        {tab === "home" && activeGenre !== null && (
+          <div style={{ padding: "20px 20px" }}>
+            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 14 }}>{displayGenre}</div>
+            {genreResults.length === 0 && genreLoading ? (
+              <LoadingRow />
+            ) : genreResults.length === 0 ? (
+              <PageEmptyState title="No movies found" subtitle="Try adjusting the filters." />
+            ) : (
+              <PosterGrid movies={filtered(genreResults)} onSelect={setDetail} />
+            )}
+            {genreLoading && genreResults.length > 0 && <LoadingRow />}
+          </div>
+        )}
+
+        {/* === HOME === */}
+        {tab === "home" && activeGenre === null && (
           <>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 }}>
-              {filteredMovies.map(m => <MovieCard key={m.id} movie={m} onClick={() => setDetail(m)} />)}
-            </div>
-            <div ref={bottomRef} style={{ height: 24 }} />
+            {homeLoading ? (
+              <div style={{ padding: 40, display: "flex", flexDirection: "column", gap: 32 }}>
+                <div style={{ height: 380, borderRadius: 16, background: "var(--bg-surface2)" }} />
+                {[0,1,2].map(i => <div key={i} style={{ height: 220, borderRadius: 12, background: "var(--bg-surface2)" }} />)}
+              </div>
+            ) : homeError ? (
+              <div style={{ padding: 40 }}>
+                <PageErrorState title="Movies unavailable" subtitle={homeError} onRetry={() => setHomeLoading(true)} />
+              </div>
+            ) : (
+              <>
+                {/* Hero Banner */}
+                {heroItems.length > 0 && (
+                  <HeroBanner
+                    movies={heroItems}
+                    idx={heroIdx}
+                    onSelect={setDetail}
+                    onPlay={src => setPlayer(src)}
+                    onPrev={() => setHeroIdx(i => (i - 1 + heroItems.length) % heroItems.length)}
+                    onNext={() => setHeroIdx(i => (i + 1) % heroItems.length)}
+                  />
+                )}
+
+                {/* Content rows */}
+                <div style={{ padding: "20px 20px", display: "flex", flexDirection: "column", gap: 28 }}>
+                  {trending.length  > 0 && <MediaRow title="🔥 Trending This Week" movies={filtered(trending)}   onSelect={setDetail} />}
+                  {nowPlaying.length> 0 && <MediaRow title="🎬 Now in Theaters"    movies={filtered(nowPlaying)} onSelect={setDetail} />}
+                  {popular.length   > 0 && <MediaRow title="⭐ Popular Right Now"   movies={filtered(popular)}   onSelect={setDetail} />}
+                  {upcoming.length  > 0 && <MediaRow title="🗓 Coming Soon"         movies={filtered(upcoming)}  onSelect={setDetail} />}
+                  {topRated.length  > 0 && <MediaRow title="🏆 All-Time Top Rated"  movies={filtered(topRated)}  onSelect={setDetail} />}
+                </div>
+              </>
+            )}
           </>
-         )}
+        )}
+
+        {/* Sentinel for infinite scroll */}
+        <div ref={sentinelRef} style={{ height: 32 }} />
       </div>
 
-      {detail && !player && <MovieDetail movie={detail} onClose={() => setDetail(null)} tf={tf} onPlay={(nextPlayer) => { setDetail(null); setPlayer(nextPlayer); }} />}
-      {freeDetail && !player && <FreeDetail movie={freeDetail} onClose={() => setFD(null)} onPlay={(nextPlayer) => { setFD(null); setPlayer(nextPlayer); }} />}
-      {player && <VidSrcPlayer title={player.title} subtitle={player.subtitle} poster={player.poster} sources={player.sources} mediaType="movie" onClose={() => setPlayer(null)} />}
-    </div>
-  );
-}
-
-function MovieCard({ movie, onClick }: { movie: Movie; onClick: () => void }) {
-  const poster = getMoviePoster(movie);
-  return (
-    <div className="card" style={{ overflow: "hidden", cursor: "pointer", transition: "transform 0.15s" }} onClick={onClick} onMouseEnter={e => (e.currentTarget.style.transform = "translateY(-3px)")} onMouseLeave={e => (e.currentTarget.style.transform = "translateY(0)")}>
-      <div style={{ position: "relative" }}>
-        {poster ? <img src={poster} alt={movie.title} style={{ width: "100%", height: 210, objectFit: "cover" }} /> : <div style={{ width: "100%", height: 210, background: "var(--bg-surface2)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>No Poster</div>}
-        {movie.vote_average > 0 && <div style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.75)", color: "#fdd663", fontSize: 11, padding: "2px 7px", borderRadius: 6, display: "flex", alignItems: "center", gap: 3, fontWeight: 600 }}><IconStar size={10} color="#fdd663" /> {movie.vote_average.toFixed(1)}</div>}
-      </div>
-      <div style={{ padding: "8px 10px" }}>
-        <div style={{ fontSize: 12, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{movie.title}</div>
-        {movie.release_date && <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{movie.release_date.slice(0, 4)}</div>}
-      </div>
-    </div>
-  );
-}
-
-function FreeCard({ movie, onClick }: { movie: ArchiveItem; onClick: () => void }) {
-  return (
-    <div className="card" style={{ overflow: "hidden", cursor: "pointer", transition: "transform 0.15s" }} onClick={onClick} onMouseEnter={e => (e.currentTarget.style.transform = "translateY(-3px)")} onMouseLeave={e => (e.currentTarget.style.transform = "translateY(0)")}>
-      <div style={{ position: "relative" }}>
-        <img src={movie.thumb} alt={movie.title} style={{ width: "100%", height: 210, objectFit: "cover" }} onError={e => { (e.target as HTMLImageElement).src = "https://via.placeholder.com/150x210?text=No+Poster"; }} />
-        <div style={{ position: "absolute", top: 6, left: 6, background: "var(--text-success)", color: "white", fontSize: 9, padding: "2px 6px", borderRadius: 5, fontWeight: 700 }}>FREE</div>
-      </div>
-      <div style={{ padding: "8px 10px" }}>
-        <div style={{ fontSize: 12, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{movie.title}</div>
-        {movie.year && <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{movie.year}</div>}
-      </div>
-    </div>
-  );
-}
-
-function ActionButtons({ onPlay, onDownload, onHindi, favId, favItem }: { onPlay: () => void; onDownload: () => void; onHindi?: () => void; favId: string; favItem: any }) {
-  const { isFav, toggle } = useFavorites();
-  const fav = isFav(favId);
-  return (
-    <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
-      <button className="btn btn-primary" style={{ gap: 7, flex: 1, justifyContent: "center" }} onClick={onPlay}>
-        <IconPlay size={15} /> Play
-      </button>
-      {onHindi && (
-        <button className="btn btn-ghost" style={{ gap: 7, justifyContent: "center", paddingInline: 14 }} onClick={onHindi}>
-          Hindi
-        </button>
+      {/* ── Detail Modal ── */}
+      {detail && !player && (
+        <MovieDetailModal
+          movie={detail}
+          onClose={() => setDetail(null)}
+          onPlay={src => { setDetail(null); setPlayer(src); }}
+        />
       )}
-      <button className="btn btn-ghost" style={{ gap: 7, flex: 1, justifyContent: "center" }} onClick={onDownload}>
-        <IconDownload size={15} /> Download
-      </button>
-      <button className="btn btn-ghost" style={{ gap: 7, flex: 1, justifyContent: "center", color: fav ? "var(--text-danger)" : "var(--text-primary)" }} onClick={() => toggle(favItem)}>
-        <IconHeart size={15} color={fav ? "var(--text-danger)" : "currentColor"} filled={fav} />
-        {fav ? "Saved" : "Favorite"}
-      </button>
+
+      {/* ── Player ── */}
+      {player && (
+        <VidSrcPlayer
+          title={player.title}
+          subtitle={player.subtitle}
+          poster={player.poster}
+          sources={player.sources}
+          mediaType="movie"
+          onClose={() => setPlayer(null)}
+        />
+      )}
     </div>
   );
 }
 
-function MovieDetail({ movie, onClose, tf, onPlay }: { movie: Movie; onClose: () => void; tf: (id: number) => Promise<any>; onPlay: (player: { title: string; subtitle?: string; poster?: string; sources: StreamSource[] }) => void }) {
-  const [full, setFull]       = useState<Movie | null>(null);
-  const [altTitles, setAltTitles] = useState<string[]>([]);
-  const [prefetchedPlaybackSources, setPrefetchedPlaybackSources] = useState<StreamSource[]>([]);
-  const [hindiNotice, setHindiNotice] = useState("");
-  const [downloadDialogOpen, setDownloadDialogOpen] = useState(false);
-  const [downloadLanguage, setDownloadLanguage] = useState<"english" | "hindi">("english");
+// ── Hero Banner ───────────────────────────────────────────────────────────────
+function HeroBanner({ movies, idx, onSelect, onPlay, onPrev, onNext }: {
+  movies: Movie[];
+  idx: number;
+  onSelect: (m: Movie) => void;
+  onPlay: (src: any) => void;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  const m = movies[idx];
+  if (!m) return null;
+  const backdrop = IMG(m.backdrop_path, IMG_LG);
+
+  const handleQuickPlay = async () => {
+    const sources = getMovieSources({ tmdbId: m.id });
+    onPlay({ title: m.title, poster: IMG(m.poster_path), sources });
+  };
+
+  return (
+    <div style={{ position: "relative", height: 400, overflow: "hidden", flexShrink: 0 }}>
+      {backdrop && (
+        <img
+          src={backdrop}
+          alt=""
+          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
+        />
+      )}
+      {/* gradient overlay */}
+      <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to right, rgba(0,0,0,0.82) 30%, rgba(0,0,0,0.2) 80%), linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 60%)" }} />
+
+      {/* content */}
+      <div style={{ position: "absolute", bottom: 40, left: 28, maxWidth: 480, zIndex: 2 }}>
+        <div style={{ fontSize: 26, fontWeight: 800, color: "#fff", marginBottom: 8, lineHeight: 1.2, textShadow: "0 2px 8px rgba(0,0,0,0.6)" }}>{m.title}</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+          {m.vote_average > 0 && (
+            <span style={{ background: "rgba(253,214,99,0.2)", border: "1px solid #fdd663", color: "#fdd663", fontSize: 11, padding: "2px 8px", borderRadius: 20, fontWeight: 700 }}>
+              ★ {m.vote_average.toFixed(1)}
+            </span>
+          )}
+          {m.release_date && (
+            <span style={{ background: "rgba(255,255,255,0.12)", color: "#ddd", fontSize: 11, padding: "2px 8px", borderRadius: 20 }}>
+              {m.release_date.slice(0, 4)}
+            </span>
+          )}
+        </div>
+        {m.overview && (
+          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.8)", lineHeight: 1.6, marginBottom: 16, display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+            {m.overview}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 10 }}>
+          <button className="btn btn-primary" style={{ gap: 7, fontSize: 13, padding: "8px 20px" }} onClick={handleQuickPlay}>
+            <IconPlay size={14} /> Play
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 13, padding: "8px 20px", background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", color: "#fff" }} onClick={() => onSelect(m)}>
+            More Info
+          </button>
+        </div>
+      </div>
+
+      {/* prev/next arrows */}
+      <button onClick={onPrev} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.5)", border: "none", borderRadius: "50%", width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#fff", zIndex: 3 }}>
+        <IconChevronLeft size={18} />
+      </button>
+      <button onClick={onNext} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.5)", border: "none", borderRadius: "50%", width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#fff", zIndex: 3 }}>
+        <IconChevronRight size={18} />
+      </button>
+
+      {/* dots */}
+      <div style={{ position: "absolute", bottom: 12, right: 20, display: "flex", gap: 6 }}>
+        {movies.map((_, i) => (
+          <div key={i} style={{ width: i === idx ? 20 : 6, height: 6, borderRadius: 3, background: i === idx ? "var(--accent)" : "rgba(255,255,255,0.4)", transition: "width 0.3s" }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Horizontal Scroll Row ─────────────────────────────────────────────────────
+function MediaRow({ title, movies, onSelect }: { title: string; movies: Movie[]; onSelect: (m: Movie) => void }) {
+  const rowRef = useRef<HTMLDivElement>(null);
+  const scroll = (dir: number) => rowRef.current?.scrollBy({ left: dir * 600, behavior: "smooth" });
+
+  return (
+    <div>
+      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10, display: "flex", alignItems: "center", gap: 8 }}>
+        {title}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
+          <button onClick={() => scroll(-1)} style={{ background: "var(--bg-surface2)", border: "none", borderRadius: "50%", width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "var(--text-secondary)" }}><IconChevronLeft size={14} /></button>
+          <button onClick={() => scroll(1)}  style={{ background: "var(--bg-surface2)", border: "none", borderRadius: "50%", width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "var(--text-secondary)" }}><IconChevronRight size={14} /></button>
+        </div>
+      </div>
+      <div
+        ref={rowRef}
+        style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 8, scrollbarWidth: "none", cursor: "grab" }}
+      >
+        {movies.slice(0, 30).map(m => <PosterCard key={m.id} movie={m} onClick={() => onSelect(m)} />)}
+      </div>
+    </div>
+  );
+}
+
+// ── Poster Card ───────────────────────────────────────────────────────────────
+function PosterCard({ movie: m, onClick }: { movie: Movie; onClick: () => void }) {
+  const poster = IMG(m.poster_path);
+  return (
+    <div
+      onClick={onClick}
+      style={{ flexShrink: 0, width: 130, cursor: "pointer", borderRadius: 10, overflow: "hidden", background: "var(--bg-surface)", border: "1px solid var(--border)", transition: "transform 0.15s, box-shadow 0.15s" }}
+      onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.transform = "scale(1.05)"; (e.currentTarget as HTMLDivElement).style.boxShadow = "var(--shadow-lg)"; }}
+      onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.transform = "scale(1)"; (e.currentTarget as HTMLDivElement).style.boxShadow = "none"; }}
+    >
+      <div style={{ position: "relative" }}>
+        {poster
+          ? <img src={poster} alt={m.title} style={{ width: "100%", height: 195, objectFit: "cover" }} />
+          : <div style={{ width: "100%", height: 195, background: "var(--bg-surface2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "var(--text-muted)" }}>No Image</div>
+        }
+        {m.vote_average > 0 && (
+          <div style={{ position: "absolute", top: 5, right: 5, background: "rgba(0,0,0,0.75)", color: "#fdd663", fontSize: 10, padding: "2px 6px", borderRadius: 6, fontWeight: 700 }}>
+            ★ {m.vote_average.toFixed(1)}
+          </div>
+        )}
+      </div>
+      <div style={{ padding: "7px 9px 9px" }}>
+        <div style={{ fontSize: 11, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.title}</div>
+        {m.release_date && <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>{m.release_date.slice(0, 4)}</div>}
+      </div>
+    </div>
+  );
+}
+
+// ── Poster Grid (for search / genre) ─────────────────────────────────────────
+function PosterGrid({ movies, onSelect }: { movies: Movie[]; onSelect: (m: Movie) => void }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 12 }}>
+      {movies.map(m => <PosterCard key={m.id} movie={m} onClick={() => onSelect(m)} />)}
+    </div>
+  );
+}
+
+// ── Detail Modal ──────────────────────────────────────────────────────────────
+function MovieDetailModal({ movie, onClose, onPlay }: {
+  movie: Movie;
+  onClose: () => void;
+  onPlay: (src: any) => void;
+}) {
+  const { isFav, toggle } = useFavorites();
+  const [full, setFull]               = useState<Movie | null>(null);
+  const [credits, setCredits]         = useState<any>(null);
+  const [recs, setRecs]               = useState<Movie[]>([]);
+  const [providers, setProviders]     = useState<any>(null);
+  const [trailerKey, setTrailerKey]   = useState<string | null>(null);
+  const [showTrailer, setShowTrailer] = useState(false);
+  const [downloadOpen, setDownloadOpen] = useState(false);
+  const [downloadOpts, setDownloadOpts] = useState<DownloadQualityOption[]>([]);
   const [downloadQuality, setDownloadQuality] = useState("");
-  const [downloadOptions, setDownloadOptions] = useState<DownloadQualityOption[]>([]);
+  const [downloadLang, setDownloadLang] = useState<"english" | "hindi">("english");
   const [downloadLoading, setDownloadLoading] = useState(false);
   const [downloadError, setDownloadError] = useState("");
-
-  const isMovieBoxFallback = Boolean(movie.moviebox_subject_id);
-
-  useEffect(() => {
-    if (isMovieBoxFallback) {
-      setFull(null);
-      return;
-    }
-    tf(movie.id).then(setFull).catch(() => {});
-  }, [isMovieBoxFallback, movie.id, tf]);
-  useEffect(() => {
-    let cancelled = false;
-    fetchConsumetMetaSearch(movie.title, "movie")
-      .then((items) => {
-        if (cancelled) return;
-        const titles = items
-          .flatMap((item) => [item.title, item.alt_title])
-          .filter((value): value is string => Boolean(value))
-          .filter((value, index, array) => array.indexOf(value) === index && value.toLowerCase() !== movie.title.toLowerCase())
-          .slice(0, 3);
-        setAltTitles(titles);
-      })
-      .catch(() => {
-        if (!cancelled) setAltTitles([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [movie.title]);
+  const [loadingPlay, setLoadingPlay] = useState(false);
 
   const d = full ?? movie;
-  const movieYear = d.release_date ? Number(d.release_date.slice(0, 4)) : undefined;
-  const poster = getMoviePoster(d);
-  const backdrop = getMovieBackdrop(d);
-  const fallbackSources = getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id });
+  const poster   = IMG(d.poster_path);
+  const backdrop = IMG(d.backdrop_path, IMG_LG);
+  const fav      = isFav(`movie-${movie.id}`);
 
   useEffect(() => {
-    let cancelled = false;
-    resolveMoviePlaybackSources({
-      tmdbId: movie.id,
-      imdbId: d.imdb_id,
-      title: d.title,
-      altTitles,
-      year: Number.isFinite(movieYear) ? movieYear : undefined,
-    })
-      .then((sources) => {
-        if (!cancelled) {
-          setPrefetchedPlaybackSources(sources);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setPrefetchedPlaybackSources([]);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [altTitles, d.imdb_id, d.title, movie.id, movieYear]);
+    fetchTmdbDetails("movie", movie.id, "").then(setFull).catch(() => {});
+    fetchTmdbCredits("movie", movie.id).then(setCredits).catch(() => {});
+    fetchTmdbRecommendations("movie", movie.id).then(r => setRecs(r?.results?.slice(0, 12) ?? [])).catch(() => {});
+    fetchTmdbWatchProviders("movie", movie.id).then(setProviders).catch(() => {});
+    fetchTmdbVideos("movie", movie.id).then(v => {
+      const trailer = (v?.results ?? []).find((r: any) => r.type === "Trailer" && r.site === "YouTube") ?? (v?.results?.[0] ?? null);
+      if (trailer?.key) setTrailerKey(trailer.key);
+    }).catch(() => {});
+  }, [movie.id]);
 
-  const loadMovieBoxSources = async () => {
-    const titles = [d.title, ...altTitles];
-    for (const title of titles) {
-      try {
-        const sources = await fetchMovieBoxSources({
-          title,
-          mediaType: "movie",
-          year: Number.isFinite(movieYear) ? movieYear : undefined,
-        });
-        if (sources.length > 0) return sources;
-      } catch {
-        continue;
-      }
-    }
-    return [];
-  };
+  const cast = (credits?.cast ?? []).slice(0, 12);
+  const streamProviders: any[] = providers?.providers?.flatrate ?? [];
 
-  const isHindiMovieBoxItem = (item: MovieBoxItem) => {
-    const title = (item.title || "").toLowerCase();
-    return Boolean(item.is_hindi) || title.includes("hindi");
-  };
-
-  const loadHindiMovieBoxSources = async () => {
-    const titles = [d.title, ...altTitles];
-    for (const title of titles) {
-      try {
-        const result = await searchMovieBox({
-          query: title,
-          mediaType: "movie",
-          hindiOnly: true,
-          preferHindi: true,
-          sortBy: "search",
-          perPage: 10,
-        });
-        const hindiItem = (result.items ?? []).find((item) => {
-          const sameYear = !movieYear || !item.year || item.year === movieYear;
-          return sameYear && isHindiMovieBoxItem(item);
-        });
-        if (!hindiItem?.id) continue;
-        const sources = await fetchMovieBoxSources({
-          subjectId: hindiItem.id,
-          mediaType: "movie",
-          year: Number.isFinite(movieYear) ? movieYear : undefined,
-        });
-        if (sources.length > 0) {
-          return sources;
-        }
-      } catch {
-        continue;
-      }
-    }
-    return [] as StreamSource[];
-  };
-
-  const loadDownloadOptions = async (language = downloadLanguage) => {
-    setDownloadLoading(true);
-    setDownloadError("");
+  const handlePlay = async () => {
+    setLoadingPlay(true);
     try {
-      const sources = language === "hindi" ? await loadHindiMovieBoxSources() : await loadMovieBoxSources();
-      if (sources.length > 0) {
-        const options = await resolveSourceDownloadOptions(sources);
-        setDownloadOptions(options);
-        setDownloadQuality(options[0]?.id || "");
-        return;
-      }
-      if (language === "hindi") {
-        setDownloadOptions([]);
-        setDownloadQuality("");
-        setDownloadError("No Hindi source available. Try downloading in English.");
-        return;
-      }
+      const movieYear = d.release_date ? Number(d.release_date.slice(0, 4)) : undefined;
+      const sources = await resolveMoviePlaybackSources({
+        tmdbId: movie.id,
+        imdbId: d.imdb_id,
+        title: d.title,
+        year: movieYear,
+      });
+      onPlay({
+        title: d.title,
+        poster: poster || undefined,
+        sources: sources.length > 0 ? sources : getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id }),
+      });
+    } catch {
+      const fallback = getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id });
+      onPlay({ title: d.title, poster: poster || undefined, sources: fallback });
+    } finally {
+      setLoadingPlay(false);
+    }
+  };
 
-      const fallbackOptions = await resolveSourceDownloadOptions(fallbackSources.slice(0, 1));
-      setDownloadOptions(fallbackOptions);
-      setDownloadQuality(fallbackOptions[0]?.id || "");
-      if (fallbackOptions.length === 0) {
-        setDownloadError("No downloadable source was found for this movie.");
-      }
-    } catch (error) {
-      setDownloadOptions([]);
-      setDownloadQuality("");
-      setDownloadError(error instanceof Error ? error.message : "Download options could not be loaded.");
+  const openDownload = async () => {
+    setDownloadLang("english");
+    setDownloadOpts([]);
+    setDownloadQuality("");
+    setDownloadError("");
+    setDownloadOpen(true);
+    setDownloadLoading(true);
+    try {
+      const movieYear = d.release_date ? Number(d.release_date.slice(0, 4)) : undefined;
+      const sources = await fetchMovieBoxSources({ title: d.title, mediaType: "movie", year: movieYear });
+      const opts = await resolveSourceDownloadOptions(sources);
+      setDownloadOpts(opts);
+      setDownloadQuality(opts[0]?.id ?? "");
+    } catch {
+      setDownloadError("No download source found.");
     } finally {
       setDownloadLoading(false);
     }
-  };
-
-  useEffect(() => {
-    if (!downloadDialogOpen) return;
-    void loadDownloadOptions(downloadLanguage);
-  }, [downloadDialogOpen, downloadLanguage, d.title, movieYear]);
-
-  const handlePlay = () => {
-    setHindiNotice("");
-    onPlay({
-      title: d.title,
-      subtitle: "Movie playback with Movie Box primary and embed fallbacks",
-      poster: poster || undefined,
-      sources: prefetchedPlaybackSources.length > 0 ? prefetchedPlaybackSources : fallbackSources,
-    });
-  };
-
-  const handleHindi = async () => {
-    const hindi = await loadHindiMovieBoxSources();
-    if (!hindi.length) {
-      setHindiNotice("No Hindi source found. Watch it in OG language.");
-      return;
-    }
-    setHindiNotice("");
-    onPlay({
-      title: d.title,
-      subtitle: "Hindi playback from MovieBox",
-      poster: poster || undefined,
-      sources: hindi,
-    });
-  };
-
-  const handleDownload = async () => {
-    const movieBoxSources = await loadMovieBoxSources();
-    const movieBoxDirectSource = movieBoxSources[0];
-    const thumbnail = d.poster_path ? `${IMG_BASE}${d.poster_path}` : "";
-    const englishTitle = `${d.title} — English — ${movieBoxDirectSource?.quality || "Auto"}`;
-    if (movieBoxDirectSource) {
-      await queueVideoDownload({
-        url: movieBoxDirectSource.url,
-        title: englishTitle,
-        thumbnail,
-        category: "Movies",
-      });
-      return;
-    }
-
-    const fallbackSource = getMovieSources({ tmdbId: movie.id, imdbId: d.imdb_id })[0];
-    if (fallbackSource) {
-      await queueVideoDownload({
-        url: fallbackSource.url,
-        title: `${d.title} — English — ${fallbackSource.quality || "Auto"}`,
-        thumbnail,
-        headers: fallbackSource.requestHeaders,
-        forceHls: fallbackSource.kind === "hls",
-        category: "Movies",
-      });
-    }
-  };
-  void handleDownload;
-
-  const handleDownloadDialog = async () => {
-    setDownloadLanguage("english");
-    setDownloadQuality("");
-    setDownloadOptions([]);
-    setDownloadError("");
-    setDownloadDialogOpen(true);
   };
 
   const confirmDownload = async () => {
-    const selectedOption = downloadOptions.find((option) => option.id === downloadQuality);
-    if (!selectedOption) {
-      setDownloadError("Choose a quality before downloading.");
-      return;
-    }
-
+    const opt = downloadOpts.find(o => o.id === downloadQuality);
+    if (!opt) { setDownloadError("Select a quality first."); return; }
     setDownloadLoading(true);
     try {
       await queueVideoDownload({
-        url: selectedOption.url,
-        title: `${d.title} — ${downloadLanguage === "hindi" ? "Hindi" : "English"} — ${selectedOption.label}`,
+        url: opt.url,
+        title: `${d.title} — ${downloadLang === "hindi" ? "Hindi" : "English"} — ${opt.label}`,
         thumbnail: poster,
-        headers: selectedOption.headers,
-        forceHls: selectedOption.forceHls,
+        headers: opt.headers,
+        forceHls: opt.forceHls,
         category: "Movies",
-        tags: [downloadLanguage === "hindi" ? "Hindi" : "English"],
       });
-      setDownloadDialogOpen(false);
-    } catch (error) {
-      setDownloadError(error instanceof Error ? error.message : "Could not queue this movie download.");
+      setDownloadOpen(false);
+    } catch (e) {
+      setDownloadError(e instanceof Error ? e.message : "Download failed.");
     } finally {
       setDownloadLoading(false);
     }
   };
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
-      <div style={{ background: "var(--bg-surface)", borderRadius: 16, width: "100%", maxWidth: 700, maxHeight: "90vh", overflow: "hidden", display: "flex", flexDirection: "column", boxShadow: "var(--shadow-lg)", border: "1px solid var(--border)" }} onClick={e => e.stopPropagation()}>
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)", zIndex: 300, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "20px", overflowY: "auto" }}
+      onClick={onClose}
+    >
+      <div
+        style={{ background: "var(--bg-surface)", borderRadius: 16, width: "100%", maxWidth: 780, boxShadow: "var(--shadow-lg)", border: "1px solid var(--border)", overflow: "hidden", position: "relative" }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* backdrop */}
         {backdrop && (
-          <div style={{ position: "relative", flexShrink: 0 }}>
-            <img src={backdrop} alt="" style={{ width: "100%", height: 180, objectFit: "cover" }} />
-            <div style={{ position: "absolute", inset: 0, background: "linear-gradient(transparent 40%, var(--bg-surface))" }} />
+          <div style={{ position: "relative", height: 200, flexShrink: 0 }}>
+            <img src={backdrop} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            <div style={{ position: "absolute", inset: 0, background: "linear-gradient(transparent 30%, var(--bg-surface))" }} />
           </div>
         )}
-        <div style={{ flex: 1, overflowY: "auto", padding: "0 20px 24px" }}>
-          <div style={{ display: "flex", gap: 16, marginTop: backdrop ? -50 : 20 }}>
-            {poster && <img src={poster} alt={d.title} style={{ width: 90, height: 135, objectFit: "cover", borderRadius: 10, flexShrink: 0, border: "2px solid var(--border)", position: "relative", zIndex: 1 }} />}
-            <div style={{ flex: 1, paddingTop: backdrop ? 55 : 0, minWidth: 0 }}>
-              <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 6 }}>{d.title}</div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-                {d.vote_average > 0 && <span style={{ display: "flex", alignItems: "center", gap: 4, background: "var(--bg-surface2)", padding: "3px 9px", borderRadius: 20, fontSize: 12, fontWeight: 600, color: "#fdd663" }}><IconStar size={11} color="#fdd663" /> {d.vote_average.toFixed(1)}</span>}
-                {d.release_date && <span style={{ background: "var(--bg-surface2)", padding: "3px 9px", borderRadius: 20, fontSize: 12, color: "var(--text-secondary)" }}>{d.release_date.slice(0, 4)}</span>}
+
+        <div style={{ padding: "0 22px 26px" }}>
+          {/* title row */}
+          <div style={{ display: "flex", gap: 16, marginTop: backdrop ? -60 : 20, position: "relative", zIndex: 1 }}>
+            {poster && (
+              <img src={poster} alt={d.title} style={{ width: 95, height: 142, objectFit: "cover", borderRadius: 10, flexShrink: 0, border: "2px solid var(--border)", boxShadow: "var(--shadow-md)" }} />
+            )}
+            <div style={{ flex: 1, paddingTop: backdrop ? 65 : 0, minWidth: 0 }}>
+              <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1.2, marginBottom: 6 }}>{d.title}</div>
+              {(d as any).tagline && <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic", marginBottom: 8 }}>{(d as any).tagline}</div>}
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                {d.vote_average > 0 && (
+                  <span style={{ background: "rgba(253,214,99,0.15)", border: "1px solid #fdd663", color: "#fdd663", fontSize: 11, padding: "2px 9px", borderRadius: 20, fontWeight: 700 }}>
+                    ★ {d.vote_average.toFixed(1)}
+                  </span>
+                )}
+                {d.release_date && <span style={{ background: "var(--bg-surface2)", padding: "2px 9px", borderRadius: 20, fontSize: 11, color: "var(--text-secondary)" }}>{d.release_date.slice(0, 4)}</span>}
+                {(d as any).runtime > 0 && <span style={{ background: "var(--bg-surface2)", padding: "2px 9px", borderRadius: 20, fontSize: 11, color: "var(--text-secondary)" }}>{Math.floor((d as any).runtime / 60)}h {(d as any).runtime % 60}m</span>}
+                {(d as any).status && <span style={{ background: "var(--bg-active)", color: "var(--text-accent)", padding: "2px 9px", borderRadius: 20, fontSize: 11 }}>{(d as any).status}</span>}
               </div>
               <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-                {(full?.genres ?? []).slice(0, 4).map((g: any) => <span key={g.id} style={{ background: "var(--bg-active)", color: "var(--text-accent)", padding: "2px 7px", borderRadius: 10, fontSize: 11, fontWeight: 500 }}>{g.name}</span>)}
+                {(d.genres ?? []).slice(0, 5).map((g: any) => (
+                  <span key={g.id} style={{ background: "var(--bg-surface2)", border: "1px solid var(--border)", color: "var(--text-secondary)", padding: "2px 8px", borderRadius: 10, fontSize: 11 }}>{g.name}</span>
+                ))}
               </div>
             </div>
-            <button className="btn-icon" style={{ alignSelf: "flex-start", flexShrink: 0, marginTop: backdrop ? 55 : 0 }} onClick={onClose}><IconX size={16} /></button>
+            <button className="btn-icon" style={{ alignSelf: "flex-start", marginTop: backdrop ? 65 : 0, flexShrink: 0 }} onClick={onClose}>
+              <IconX size={15} />
+            </button>
           </div>
-          {d.overview && <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7, margin: "14px 0" }}>{d.overview}</div>}
-          <ActionButtons
-            onPlay={handlePlay}
-            onDownload={handleDownloadDialog}
-            onHindi={handleHindi}
-            favId={`movie-${movie.id}`}
-            favItem={{ id: `movie-${movie.id}`, title: d.title, poster: poster, type: "movie", tmdbId: movie.id, imdbId: d.imdb_id }}
-          />
-          {hindiNotice && <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: -4 }}>{hindiNotice}</div>}
+
+          {/* overview */}
+          {d.overview && (
+            <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.75, margin: "16px 0" }}>
+              {d.overview}
+            </div>
+          )}
+
+          {/* action buttons */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
+            <button className="btn btn-primary" style={{ gap: 7, flex: "1 1 120px", justifyContent: "center", minWidth: 0 }} onClick={handlePlay} disabled={loadingPlay}>
+              <IconPlay size={14} /> {loadingPlay ? "Loading…" : "Play"}
+            </button>
+            {trailerKey && (
+              <button className="btn btn-ghost" style={{ gap: 7, flex: "1 1 100px", justifyContent: "center" }} onClick={() => setShowTrailer(true)}>
+                ▶ Trailer
+              </button>
+            )}
+            <button className="btn btn-ghost" style={{ gap: 7, flex: "1 1 100px", justifyContent: "center" }} onClick={openDownload}>
+              <IconDownload size={14} /> Download
+            </button>
+            <button
+              className="btn btn-ghost"
+              style={{ gap: 7, flex: "1 1 80px", justifyContent: "center", color: fav ? "var(--text-danger)" : undefined }}
+              onClick={() => toggle({ id: `movie-${movie.id}`, title: d.title, poster, type: "movie", tmdbId: movie.id })}
+            >
+              <IconHeart size={14} color={fav ? "var(--text-danger)" : "currentColor"} filled={fav} />
+              {fav ? "Saved" : "Save"}
+            </button>
+          </div>
+
+          {/* where to watch */}
+          {streamProviders.length > 0 && (
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }}>Where to Watch</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {streamProviders.slice(0, 6).map((p: any) => (
+                  <div key={p.provider_id} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--bg-surface2)", padding: "4px 10px", borderRadius: 8, fontSize: 11 }}>
+                    {p.logo_path && <img src={`https://image.tmdb.org/t/p/w45${p.logo_path}`} alt="" style={{ width: 16, height: 16, borderRadius: 3 }} />}
+                    {p.provider_name}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* cast */}
+          {cast.length > 0 && (
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>Cast</div>
+              <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 6, scrollbarWidth: "none" }}>
+                {cast.map((c: any) => (
+                  <div key={c.id} style={{ flexShrink: 0, width: 70, textAlign: "center" }}>
+                    {c.profile_path
+                      ? <img src={`${IMG_PROF}${c.profile_path}`} alt={c.name} style={{ width: 52, height: 52, borderRadius: "50%", objectFit: "cover", margin: "0 auto 5px", display: "block", border: "2px solid var(--border)" }} />
+                      : <div style={{ width: 52, height: 52, borderRadius: "50%", background: "var(--bg-surface2)", margin: "0 auto 5px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>👤</div>
+                    }
+                    <div style={{ fontSize: 10, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</div>
+                    <div style={{ fontSize: 9, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.character}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* recommendations */}
+          {recs.length > 0 && (
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>More Like This</div>
+              <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 6, scrollbarWidth: "none" }}>
+                {recs.map(r => <PosterCard key={r.id} movie={r} onClick={() => { onClose(); setTimeout(() => {}, 10); }} />)}
+              </div>
+            </div>
+          )}
         </div>
       </div>
+
+      {/* trailer iframe overlay */}
+      {showTrailer && trailerKey && (
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", zIndex: 400, display: "flex", alignItems: "center", justifyContent: "center" }}
+          onClick={() => setShowTrailer(false)}
+        >
+          <div style={{ position: "relative", width: "min(900px,90vw)", aspectRatio: "16/9" }} onClick={e => e.stopPropagation()}>
+            <iframe
+              src={`https://www.youtube.com/embed/${trailerKey}?autoplay=1`}
+              style={{ width: "100%", height: "100%", border: "none", borderRadius: 12 }}
+              allow="autoplay; fullscreen"
+              title="Trailer"
+            />
+            <button
+              onClick={() => setShowTrailer(false)}
+              style={{ position: "absolute", top: -36, right: 0, background: "none", border: "none", color: "#fff", fontSize: 18, cursor: "pointer" }}
+            >
+              ✕ Close
+            </button>
+          </div>
+        </div>
+      )}
+
       <DownloadOptionsModal
-        visible={downloadDialogOpen}
+        visible={downloadOpen}
         title={d.title}
         poster={poster || undefined}
-        languageOptions={[
-          { id: "english", label: "English" },
-          { id: "hindi", label: "Hindi" },
-        ]}
-        selectedLanguage={downloadLanguage}
-        onSelectLanguage={(value) => setDownloadLanguage(value as "english" | "hindi")}
-        qualityOptions={downloadOptions.map((option) => ({ id: option.id, label: option.label }))}
+        languageOptions={[{ id: "english", label: "English" }, { id: "hindi", label: "Hindi" }]}
+        selectedLanguage={downloadLang}
+        onSelectLanguage={v => setDownloadLang(v as "english" | "hindi")}
+        qualityOptions={downloadOpts.map(o => ({ id: o.id, label: o.label }))}
         selectedQuality={downloadQuality}
         onSelectQuality={setDownloadQuality}
         loading={downloadLoading}
         error={downloadError}
-        onClose={() => setDownloadDialogOpen(false)}
+        onClose={() => setDownloadOpen(false)}
         onConfirm={() => void confirmDownload()}
       />
     </div>
   );
 }
 
-function FreeDetail({ movie, onClose, onPlay }: { movie: ArchiveItem; onClose: () => void; onPlay: (player: { title: string; subtitle?: string; poster?: string; sources: StreamSource[] }) => void }) {
-  const archiveUrl = `https://archive.org/details/${movie.identifier}`;
-
-  const sendDl = async () => {
-    try {
-      await queueVideoDownload({
-        url: archiveUrl,
-        title: `${movie.title} — English — Source`,
-        thumbnail: movie.thumb ?? "",
-        category: "Movies",
-      });
-    }
-    catch { /* ignore */ }
-  };
-
+// ── Loading skeleton row ──────────────────────────────────────────────────────
+function LoadingRow() {
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
-      <div style={{ background: "var(--bg-surface)", borderRadius: 16, width: "100%", maxWidth: 680, maxHeight: "90vh", overflow: "hidden", display: "flex", flexDirection: "column", boxShadow: "var(--shadow-lg)", border: "1px solid var(--border)" }} onClick={e => e.stopPropagation()}>
-        <div style={{ display: "flex", alignItems: "flex-start", gap: 16, padding: "20px 20px 0" }}>
-          <img src={movie.thumb} alt={movie.title} style={{ width: 90, height: 130, objectFit: "cover", borderRadius: 8, flexShrink: 0, border: "1px solid var(--border)" }} onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-              <div style={{ fontSize: 16, fontWeight: 700 }}>{movie.title}</div>
-              <span style={{ background: "var(--text-success)", color: "white", fontSize: 9, padding: "2px 6px", borderRadius: 5, fontWeight: 700 }}>FREE</span>
-            </div>
-            {movie.year && <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{movie.year} · Public domain · Archive.org</div>}
-          </div>
-          <button className="btn-icon" style={{ flexShrink: 0 }} onClick={onClose}><IconX size={16} /></button>
-        </div>
-        <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px 24px" }}>
-          {movie.description && <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7, marginBottom: 16 }}>{typeof movie.description === "string" ? movie.description.replace(/<[^>]+>/g, "").slice(0, 400) + "…" : ""}</div>}
-          <ActionButtons
-            onPlay={() => onPlay({
-              title: movie.title,
-              subtitle: "Archive.org public-domain stream",
-              poster: movie.thumb ?? undefined,
-              sources: getArchiveMovieSources(movie.identifier),
-            })}
-            onDownload={sendDl}
-            favId={`archive-${movie.identifier}`}
-            favItem={{ id: `archive-${movie.identifier}`, title: movie.title, poster: movie.thumb ?? "", type: "movie", tmdbId: 0 }}
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function LoadingGrid() {
-  return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 }}>
-      {Array.from({ length: 16 }).map((_, i) => (
-        <div key={i} className="card" style={{ overflow: "hidden" }}>
-          <div style={{ width: "100%", height: 210, background: "var(--bg-surface2)" }} />
-          <div style={{ padding: "8px 10px" }}>
-            <div style={{ height: 12, background: "var(--bg-surface2)", borderRadius: 4, marginBottom: 6 }} />
-            <div style={{ height: 10, background: "var(--bg-surface2)", borderRadius: 4, width: "60%" }} />
+    <div style={{ display: "flex", gap: 10, overflow: "hidden" }}>
+      {Array.from({ length: 8 }).map((_, i) => (
+        <div key={i} style={{ flexShrink: 0, width: 130, borderRadius: 10, overflow: "hidden", background: "var(--bg-surface)" }}>
+          <div style={{ height: 195, background: "var(--bg-surface2)" }} />
+          <div style={{ padding: "7px 9px 9px" }}>
+            <div style={{ height: 10, background: "var(--bg-surface2)", borderRadius: 4, marginBottom: 5 }} />
+            <div style={{ height: 8, background: "var(--bg-surface2)", borderRadius: 4, width: "50%" }} />
           </div>
         </div>
       ))}
