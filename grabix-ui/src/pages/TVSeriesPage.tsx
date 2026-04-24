@@ -1,6 +1,6 @@
 // grabix-ui/src/pages/TVSeriesPage.tsx  — Netflix-style rebuild (Phase 2)
 import { useState, useEffect, useRef, useCallback } from "react";
-import { IconSearch, IconStar, IconPlay, IconDownload, IconX, IconChevronLeft, IconChevronRight } from "../components/Icons";
+import { IconSearch, IconPlay, IconDownload, IconX, IconChevronLeft, IconChevronRight } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import { PageEmptyState, PageErrorState } from "../components/PageStates";
@@ -455,7 +455,7 @@ function HeroBanner({ shows, idx, onSelect, onPlay, onPrev, onNext }: {
   const backdrop = IMG(s.backdrop_path, IMG_LG);
 
   const handleQuickPlay = () => {
-    const sources = getTvSources({ tmdbId: s.id, season: 1, episode: 1 });
+    const sources = getTvSources(s.id, { season: 1, episode: 1 });
     onPlay({ title: s.name, subtitle: "S01 E01", poster: IMG(s.poster_path), sources });
   };
 
@@ -642,14 +642,14 @@ function ShowDetailModal({ show, onClose, onPlay }: {
         title: d.name,
         subtitle: `Season ${season} · Episode ${episode}`,
         poster: poster || undefined,
-        sources: sources.length > 0 ? sources : getTvSources({ tmdbId: show.id, season, episode }),
+        sources: sources.length > 0 ? sources : getTvSources(show.id, { season, episode }),
       });
     } catch {
       onPlay({
         title: d.name,
         subtitle: `Season ${season} · Episode ${episode}`,
         poster: poster || undefined,
-        sources: getTvSources({ tmdbId: show.id, season, episode }),
+        sources: getTvSources(show.id, { season, episode }),
       });
     }
   };

@@ -1,6 +1,6 @@
 // grabix-ui/src/pages/MoviesPage.tsx  — Netflix-style rebuild (Phase 2)
 import { useState, useEffect, useRef, useCallback } from "react";
-import { IconSearch, IconStar, IconPlay, IconDownload, IconX, IconChevronLeft, IconChevronRight } from "../components/Icons";
+import { IconSearch, IconPlay, IconDownload, IconX, IconChevronLeft, IconChevronRight } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import { PageEmptyState, PageErrorState } from "../components/PageStates";
@@ -29,8 +29,6 @@ import {
   fetchMovieBoxSources,
   getMovieSources,
   resolveMoviePlaybackSources,
-  searchMovieBox,
-  type MovieBoxItem,
   type StreamSource,
 } from "../lib/streamProviders";
 
