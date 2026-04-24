@@ -36,6 +36,10 @@ const MovieBoxPage = lazy(() => import("./pages/MovieBoxPage"));
 const FavoritesPage = lazy(() => import("./pages/FavoritesPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const RatingsPage  = lazy(() => import("./pages/RatingsPage"));
+const NewAndHotPage       = lazy(() => import("./pages/NewAndHotPage"));
+const TopImdbPage         = lazy(() => import("./pages/TopImdbPage"));
+const ContinueWatchingPage = lazy(() => import("./pages/ContinueWatchingPage"));
+const RecentlyAddedPage   = lazy(() => import("./pages/RecentlyAddedPage"));
 
 function Inner() {
   const offlineState = useOfflineDetection(BACKEND_API);
@@ -221,6 +225,10 @@ function Inner() {
     favorites:  <ErrorBoundary section="Favorites"><FavoritesPage /></ErrorBoundary>,
     ratings:    <ErrorBoundary section="Ratings"><RatingsPage /></ErrorBoundary>,
     settings:   <ErrorBoundary section="Settings"><SettingsPage /></ErrorBoundary>,
+    newandhot:        <ErrorBoundary section="New & Hot"><NewAndHotPage /></ErrorBoundary>,
+    topimdb:          <ErrorBoundary section="Top IMDb"><TopImdbPage /></ErrorBoundary>,
+    continuewatching: <ErrorBoundary section="Continue Watching"><ContinueWatchingPage /></ErrorBoundary>,
+    recentlyadded:    <ErrorBoundary section="Recently Added"><RecentlyAddedPage /></ErrorBoundary>,
   };
 
   const refreshRuntimeHealth = async () => {

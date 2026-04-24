@@ -39,7 +39,34 @@ const IconChart = ({ size = 16, color = "currentColor" }: { size?: number; color
   </svg>
 );
 
-export type Page = "downloader" | "converter" | "library" | "manga" | "movies" | "moviebox" | "series" | "favorites" | "ratings" | "settings";
+const IconFlame = ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M8.5 14.5A6.5 6.5 0 0 0 17 9c0-3-1.5-5-4-7-1 3-3 4-5 6-1 1-2 2.5-2 4a6 6 0 0 0 2.5 5" />
+    <path d="M12 22c-3 0-5-2-5-5 0-2 1-3.5 3-5 0 2 1 3 2.5 3.5C13 14 14 12 14 10c2 1.5 3 4 3 6 0 3-2 6-5 6z" />
+  </svg>
+);
+
+const IconStar = ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+  </svg>
+);
+
+const IconPlay = ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="10" />
+    <polygon points="10 8 16 12 10 16 10 8" />
+  </svg>
+);
+
+const IconClock = ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="10" />
+    <polyline points="12 6 12 12 16 14" />
+  </svg>
+);
+
+ "downloader" | "converter" | "library" | "manga" | "movies" | "moviebox" | "series" | "favorites" | "ratings" | "settings" | "newandhot" | "topimdb" | "continuewatching" | "recentlyadded";
 
 interface Props {
   page: Page;
@@ -67,6 +94,10 @@ const GROUPS = [
       { id: "moviebox" as Page, label: "Movie Box", Icon: IconBrowse },
       { id: "ratings"   as Page, label: "Ratings",   Icon: IconChart },
       { id: "favorites" as Page, label: "Favorites", Icon: IconHeart },
+      { id: "newandhot"        as Page, label: "New & Hot",         Icon: IconFlame },
+      { id: "topimdb"          as Page, label: "Top IMDb",          Icon: IconStar },
+      { id: "continuewatching" as Page, label: "Continue Watching", Icon: IconPlay },
+      { id: "recentlyadded"    as Page, label: "Recently Added",    Icon: IconClock },
     ],
   },
   {
