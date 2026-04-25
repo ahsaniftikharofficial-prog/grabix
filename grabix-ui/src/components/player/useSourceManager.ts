@@ -47,6 +47,9 @@ export function useSourceManager({
 
   const embedLoadedRef       = useRef(false);
   const sourceRetryCountsRef = useRef<Record<string, number>>({});
+  const embedRetryCountRef   = useRef<Record<string, number>>({});
+  // Stable ref to goToNextSource to avoid stale closures in setTimeout callbacks
+  const goToNextSourceRef    = useRef<(reason: string) => void>(() => {});
 
   const [activeSubtitleText, setActiveSubtitleText] = useState(subtitle ?? "");
   const [activeSearchTitle, setActiveSearchTitle]   = useState(subtitleSearchTitle ?? title);
@@ -57,6 +60,8 @@ export function useSourceManager({
   const [activeSourceOptionId, setActiveSourceOptionId] = useState(sourceOptions?.[0]?.id ?? "");
   const [resolvedEmbedUrl, setResolvedEmbedUrl]     = useState("");
   const [resolvedPlaybackUrl, setResolvedPlaybackUrl] = useState("");
+  // Local key incremented on each embed retry attempt so the timeout effect re-runs
+  const [embedAttemptKey, setEmbedAttemptKey]       = useState(0);
 
   // Sync incoming props → state
   useEffect(() => {
@@ -111,18 +116,38 @@ export function useSourceManager({
     }
     setResolvedPlaybackUrl("");
     embedLoadedRef.current = false;
-    if (!activeSource) return;
-    if (activeSource.kind === "embed") {
-      const t = window.setTimeout(() => {
-        if (!embedLoadedRef.current) {
-          embedLoadedRef.current = true;
-          setFallbackNotice("Stream is taking a while. Use the server picker to switch if needed.");
-          setIsLoading(false);
-        }
-      }, 8_000);
-      return () => window.clearTimeout(t);
+    // Reset embed retry counter whenever the active source changes
+    if (activeSource) {
+      embedRetryCountRef.current[activeSource.id] = 0;
+      setEmbedAttemptKey(0);
     }
   }, [activeSource]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Embed auto-retry + auto-failover ─────────────────────────────────────────
+  // Runs on every source change AND every retry attempt (embedAttemptKey).
+  // If the iframe's onLoad hasn't fired within 10s, retry up to 3 times,
+  // then switch to the next source automatically.
+  useEffect(() => {
+    if (!activeSource || activeSource.kind !== "embed") return;
+    embedLoadedRef.current = false; // reset for this attempt
+    const key = activeSource.id;
+    const t = window.setTimeout(() => {
+      if (embedLoadedRef.current) return; // already loaded — do nothing
+      const retries = embedRetryCountRef.current[key] ?? 0;
+      if (retries < 3) {
+        embedRetryCountRef.current[key] = retries + 1;
+        setFallbackNotice(`Server not responding. Retrying (${retries + 1}/3)...`);
+        setIsLoading(true);
+        setEmbedAttemptKey((k) => k + 1);
+        setReloadKey((k) => k + 1);
+      } else {
+        // Exhausted retries — switch to next source
+        embedRetryCountRef.current[key] = 0;
+        goToNextSourceRef.current("timeout");
+      }
+    }, 10_000);
+    return () => window.clearTimeout(t);
+  }, [activeSource, activeIndex, embedAttemptKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Embed URL resolution ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -173,6 +198,10 @@ export function useSourceManager({
     setErrorText(message); setIsLoading(false); setStatusText("Failed");
   }, [activeSource, activeIndex, allSources, hasFallback, findPreparedSiblingIndex,
       setErrorText, setIsLoading, setIsPlaying, setStatusText, setFallbackNotice, setReloadKey]);
+
+  // Keep goToNextSourceRef always pointing to the latest goToNextSource to avoid
+  // stale closures inside the embed retry setTimeout callbacks.
+  useEffect(() => { goToNextSourceRef.current = goToNextSource; }, [goToNextSource]);
 
   const onSourcePlaying = useCallback((sourceUrl: string) => {
     const key = `${activeIndex}:${sourceUrl}`;
