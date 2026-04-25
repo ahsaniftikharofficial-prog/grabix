@@ -1,22 +1,18 @@
 """
-streaming_helpers.py — FIXED (sync stream_proxy restored + httpx sync)
+streaming_helpers.py — FIXED
 
-Root cause of backend crash:
-  The previous optimized version changed stream_proxy() and stream_variants()
-  to async def. But streaming.py routes call them as plain sync functions:
-      def stream_proxy(url, request, headers_json=""):
-          return get_route_handler("streaming", "stream_proxy")(url, request, headers_json)
-  Calling an async function without await returns a coroutine object — FastAPI
-  can't serialize a coroutine as a response, crashing on every proxy request.
+Changes from previous version:
+  1. _extract_stream_url() used subprocess ["yt-dlp", "--get-url", ...]
+     → returned ONE URL, no quality variants, no subtitles, slow.
 
-Fix:
-  stream_proxy() and stream_variants() are back to sync def.
-  They now use httpx.Client (sync) instead of urllib.request.urlopen — still
-  better than the original (connection pooling, timeout handling, redirect
-  following) but compatible with the sync route wrappers.
+  2. Now uses yt_dlp Python API directly via ytdlp_extract_full():
+     → Returns ALL quality variants + subtitle URLs in one shot
+     → extract_stream() now returns {url, quality, format, variants, subtitles}
+     → Frontend can build a full quality picker and load subtitles automatically
 
-  extract_stream() stays async def (its route IS async def extract_stream).
-  Pre-compiled regex constants kept from the optimized version.
+  3. fast_extract() also returns variants/subtitles for API consistency.
+
+  stream_proxy() and stream_variants() are unchanged (sync def, httpx.Client).
 """
 
 from __future__ import annotations
@@ -24,7 +20,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import subprocess
 import time
 from urllib.parse import quote, urljoin
 from urllib.request import Request as URLRequest, urlopen
@@ -45,7 +40,6 @@ _SUBTITLE_TOKENS  = frozenset({".vtt", ".webvtt", ".srt"})
 _SEGMENT_TOKENS   = frozenset({".m4s", ".cmfa", ".cmfv", ".mp4"})
 _AUDIO_TOKENS     = frozenset({".aac", ".m4a", ".mp3", ".ac3", ".ec3"})
 _KEY_TOKENS       = frozenset({".key", ".bin"})
-_NETWORK_METHODS  = frozenset({"Network.requestWillBeSent", "Network.responseReceived"})
 
 
 # ── Pure utilities ────────────────────────────────────────────────────────────
@@ -168,27 +162,18 @@ def _looks_like_playable_media_url(url: str) -> bool:
 
 # ── Fast HTTP stream scanner ─────────────────────────────────────────────────
 # Fetches the embed page HTML and scans it for playable URLs using regex.
-# Completes in 2-5 seconds vs yt-dlp's 15-30s. No subprocess, no browser.
-# Falls back to yt-dlp only if this returns nothing.
+# Completes in 2-5 seconds. Falls back to yt-dlp only if this returns nothing.
 
-# Patterns that commonly appear in embed page JS containing stream URLs
 _FAST_PATTERNS: list[re.Pattern[str]] = [
-    # "file":"https://...m3u8"  or  file:"https://..."
     re.compile(r'["\']?file["\']?\s*:\s*["\']([^"\']+\.m3u8[^"\']*)["\']', re.IGNORECASE),
-    # source:"https://...m3u8"
     re.compile(r'["\']?source["\']?\s*:\s*["\']([^"\']+\.m3u8[^"\']*)["\']', re.IGNORECASE),
-    # hls:"https://..." or hlsUrl:"..."
     re.compile(r'["\']?hls(?:Url)?["\']?\s*:\s*["\']([^"\']+\.m3u8[^"\']*)["\']', re.IGNORECASE),
-    # src="https://....m3u8"
     re.compile(r'\bsrc\s*=\s*["\']([^"\']+\.m3u8[^"\']*)["\']', re.IGNORECASE),
-    # Any quoted https:// URL containing .m3u8
     re.compile(r'["\']?(https?://[^"\'<>\s]+\.m3u8[^"\'<>\s]*)["\']?', re.IGNORECASE),
-    # Direct .mp4 links as fallback
     re.compile(r'["\']?file["\']?\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']', re.IGNORECASE),
     re.compile(r'["\']?(https?://[^"\'<>\s]+\.mp4[^"\'<>\s]*)["\']?', re.IGNORECASE),
 ]
 
-# Noise URLs to skip even if they match a pattern (ads, tracking, analytics)
 _FAST_SKIP_HOSTS: frozenset[str] = frozenset({
     "doubleclick", "googlesyndication", "googletagmanager", "adnxs",
     "juicyads", "exoclick", "trafficjunky", "propellerads", "adsterra",
@@ -219,10 +204,8 @@ def _fast_scan_html(html: str) -> str | None:
                 continue
             seen.add(url)
             low = url.lower()
-            # Skip ad/noise hosts
             if any(skip in low for skip in _FAST_SKIP_HOSTS):
                 continue
-            # Must be a plausible media URL
             if ".m3u8" in low or ".mp4" in low:
                 return url
     return None
@@ -231,11 +214,7 @@ def _fast_scan_html(html: str) -> str | None:
 def fast_extract(url: str) -> dict | None:
     """
     Try to extract a direct stream URL from an embed page in <5 seconds.
-    Returns {"url": ..., "quality": "Auto", "format": "hls"|"direct"} or None.
-    Strategy:
-      1. GET the embed page (follow up to 3 redirects, 6s connect/read timeout)
-      2. Scan HTML/JS with regex patterns
-      3. If the page contains a nested iframe, fetch that page too and scan again
+    Returns {url, quality, format, variants, subtitles} or None.
     """
     visited: set[str] = set()
 
@@ -259,7 +238,6 @@ def fast_extract(url: str) -> dict | None:
         if found:
             return found
 
-        # Try one level of nested iframe
         if depth == 0:
             iframe_match = _IFRAME_RE.search(html)
             if iframe_match:
@@ -275,28 +253,130 @@ def fast_extract(url: str) -> dict | None:
         return None
 
     kind = "hls" if ".m3u8" in stream_url.lower() else "direct"
-    return {"url": stream_url, "quality": "Auto", "format": kind}
+    return {
+        "url": stream_url,
+        "quality": "Auto",
+        "format": kind,
+        "variants": [{"quality": "Auto", "url": stream_url, "bandwidth": 0}],
+        "subtitles": [],
+    }
 
 
-def _extract_stream_url(url: str) -> tuple[str, str]:
-    result = subprocess.run(
-        ["yt-dlp", "--get-url", "--no-playlist", url],
-        capture_output=True,
-        text=True,
-        timeout=30,
+# ── yt-dlp Python API extractor ───────────────────────────────────────────────
+# Uses yt_dlp as a library (not subprocess) to get ALL quality variants + subtitles.
+
+def ytdlp_extract_full(url: str) -> dict:
+    """
+    Extract stream info using the yt-dlp Python API.
+    Returns {url, quality, format, variants: [{quality, url, bandwidth}], subtitles: [{lang, url, format, label}]}.
+    Raises RuntimeError if no stream is found.
+    """
+    try:
+        import yt_dlp  # noqa: PLC0415
+    except ImportError as exc:
+        raise RuntimeError("yt_dlp is not installed") from exc
+
+    ydl_opts: dict = {
+        "quiet": True,
+        "no_warnings": True,
+        "no_color": True,
+        "format": "bestvideo+bestaudio/best",
+        "referer": url,
+        "socket_timeout": 20,
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    if not info:
+        raise RuntimeError("yt-dlp returned no info for this URL")
+
+    formats: list[dict] = info.get("formats") or []
+
+    # ── Build quality variant list ────────────────────────────────────────────
+    seen_urls: set[str] = set()
+    variants: list[dict] = []
+
+    def _add_fmt(fmt: dict, quality_label: str) -> None:
+        fmt_url = fmt.get("url", "")
+        if not fmt_url or fmt_url in seen_urls:
+            return
+        seen_urls.add(fmt_url)
+        bandwidth = int((fmt.get("tbr") or fmt.get("abr") or fmt.get("vbr") or 0) * 1000)
+        variants.append({"quality": quality_label, "url": fmt_url, "bandwidth": bandwidth})
+
+    # Combined audio+video formats sorted by height descending
+    av_formats = [
+        f for f in formats
+        if f.get("url") and f.get("height")
+        and f.get("vcodec", "none") != "none"
+        and f.get("acodec", "none") != "none"
+    ]
+    av_formats.sort(key=lambda f: f.get("height", 0), reverse=True)
+    for fmt in av_formats:
+        _add_fmt(fmt, f"{fmt['height']}p")
+
+    # Fall back to any video format with height
+    if not variants:
+        video_fmts = [
+            f for f in formats
+            if f.get("url") and f.get("height") and f.get("vcodec", "none") != "none"
+        ]
+        video_fmts.sort(key=lambda f: f.get("height", 0), reverse=True)
+        for fmt in video_fmts:
+            _add_fmt(fmt, f"{fmt['height']}p")
+
+    # Last resort: any URL from info
+    if not variants:
+        direct = info.get("url", "")
+        if not direct:
+            for fmt in reversed(formats):
+                if fmt.get("url"):
+                    direct = fmt["url"]
+                    break
+        if direct and direct not in seen_urls:
+            variants.append({"quality": "Auto", "url": direct, "bandwidth": 0})
+
+    if not variants:
+        raise RuntimeError("yt-dlp found no usable stream URLs")
+
+    # ── Build subtitle list ───────────────────────────────────────────────────
+    subtitles: list[dict] = []
+    sub_dict: dict = info.get("subtitles") or {}
+    priority_langs = ["en", "en-US", "en-GB"]
+    sorted_langs = sorted(
+        sub_dict.keys(),
+        key=lambda lang: (0 if lang in priority_langs else 1, lang),
     )
-    output_lines = result.stdout.strip().splitlines()
-    direct_url = output_lines[0].strip() if output_lines else ""
-    if not direct_url:
-        raise RuntimeError(result.stderr.strip() or "No stream found")
-    return direct_url, ("hls" if ".m3u8" in direct_url.lower() else "direct")
+    for lang in sorted_langs:
+        sub_formats: list[dict] = sub_dict[lang] or []
+        preferred = next(
+            (sf for sf in sub_formats if sf.get("ext") in ("vtt", "srt") and sf.get("url")),
+            next((sf for sf in sub_formats if sf.get("url")), None),
+        )
+        if preferred:
+            subtitles.append({
+                "lang": lang,
+                "url": preferred["url"],
+                "format": preferred.get("ext", "vtt"),
+                "label": lang.upper(),
+            })
+
+    best = variants[0]
+    kind = "hls" if ".m3u8" in best["url"].lower() else "direct"
+
+    return {
+        "url": best["url"],
+        "quality": best["quality"],
+        "format": kind,
+        "variants": variants,
+        "subtitles": subtitles,
+    }
 
 
 # ── Deferred-main wrappers ────────────────────────────────────────────────────
 
 def _resolve_embed_target(url: str, max_depth: int = 3) -> str:
-    import main as _m  # deferred to avoid circular import
-
     current = str(url or "").strip()
     if not current:
         return ""
@@ -341,9 +421,6 @@ def resolve_embed(url: str):
 
 
 # ── FIXED: sync stream_proxy using httpx.Client ───────────────────────────────
-# Route in streaming.py is `def stream_proxy(...)` (not async) — must stay sync.
-# httpx.Client is still better than urlopen: connection pooling, proper redirects,
-# clean timeout API.
 
 def stream_proxy(url: str, request: Request, headers_json: str = ""):
     parsed_headers: dict[str, str] = {}
@@ -360,16 +437,11 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
             parsed_headers = {}
 
     request_headers = _normalize_request_headers(parsed_headers)
-
-    # Add headers that CDNs (bunny.net, MegaCloud) require or strongly prefer.
-    # Without Accept/Accept-Encoding many CDNs return 403 or serve wrong content.
     request_headers.setdefault("Accept", "*/*")
     request_headers.setdefault("Accept-Encoding", "gzip, deflate, br")
     request_headers.setdefault("Accept-Language", "en-US,en;q=0.9")
     request_headers.setdefault("Sec-Fetch-Mode", "cors")
     request_headers.setdefault("Sec-Fetch-Site", "cross-site")
-    # Force fresh response from CDN — prevents 304 "Not Modified" which
-    # causes HLS.js to hang waiting for a cached playlist it doesn't have.
     request_headers["Cache-Control"] = "no-cache"
     request_headers["Pragma"] = "no-cache"
 
@@ -377,11 +449,6 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
     if range_header:
         request_headers["Range"] = range_header
 
-    # ── Segment vs manifest detection ────────────────────────────────────────
-    # Video/audio segments (.ts, .m4s, .aac …) are streamed in 64 KB chunks so
-    # the browser receives the first bytes in ~50 ms instead of waiting for the
-    # entire 1–3 MB segment to buffer server-side first.
-    # HLS manifests (.m3u8) must still be fully buffered so we can rewrite URLs.
     clean_path = url.split("?")[0].lower()
     is_segment = any(
         clean_path.endswith(ext)
@@ -389,9 +456,6 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
     )
 
     if is_segment:
-        # ── Chunked streaming path (fast) ─────────────────────────────────────
-        # httpx.stream keeps the upstream connection open and yields data as it
-        # arrives; no full-body buffer needed.
         def _iter_segment():
             try:
                 with httpx.stream(
@@ -401,11 +465,11 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
                     timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0),
                 ) as r:
                     if r.status_code not in (200, 206):
-                        return  # HLS.js will retry / failover
-                    for chunk in r.iter_bytes(65536):  # 64 KB chunks
+                        return
+                    for chunk in r.iter_bytes(65536):
                         yield chunk
             except Exception:
-                return  # client disconnected or CDN error — just stop
+                return
 
         return StreamingResponse(
             _iter_segment(),
@@ -417,22 +481,13 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
             },
         )
 
-    # ── Full-buffer path for manifests and other resources ───────────────────
     try:
         with httpx.Client(timeout=20.0, follow_redirects=True) as client:
             upstream = client.get(url, headers=request_headers)
     except Exception as exc:
-        # Raise 502 — hls.js will treat this as a fatal network error and
-        # immediately call goToNextSource() instead of retrying for 120 seconds.
         raise HTTPException(status_code=502, detail=f"Stream proxy failed: {exc}") from exc
 
-    # Fail fast on CDN errors: raise an HTTP exception so hls.js gets a proper
-    # error status and triggers its fatal-error handler immediately, rather than
-    # silently retrying for the entire 120-second startup window.
     if upstream.status_code not in (200, 206):
-        # Always return 502 (not the upstream code) so HLS.js treats it as a
-        # fatal network error and immediately tries the next source, rather
-        # than misinterpreting e.g. 304 as a cached-content response and hanging.
         raise HTTPException(
             status_code=502,
             detail=f"CDN returned {upstream.status_code} for proxied resource",
@@ -443,10 +498,6 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
     lowered_url = final_url.lower()
     lowered_media = media_type.lower()
 
-    # Content sniffing: some CDNs return application/octet-stream even for m3u8
-    # playlists, and after redirects the final URL may not contain ".m3u8".
-    # Check the actual body prefix — a valid HLS playlist always starts with
-    # "#EXTM3U" (possibly after a UTF-8 BOM).
     raw_content = upstream.content
     text_preview = raw_content[:16].lstrip(b"\xef\xbb\xbf").decode("utf-8", errors="ignore")
     is_m3u8 = (
@@ -472,7 +523,6 @@ def stream_proxy(url: str, request: Request, headers_json: str = ""):
             response_headers[header_name] = header_value
 
     sniffed_media_type = media_type or "application/octet-stream"
-    # MPEG-TS segments start with 0x47 sync byte
     if raw_content and raw_content[:1] == b"G":
         if not sniffed_media_type.lower().startswith(("video/", "audio/")):
             sniffed_media_type = "video/mp2t"
@@ -519,26 +569,41 @@ def stream_variants(url: str, headers_json: str = ""):
     return {"variants": _extract_hls_variants(response.text, final_url)}
 
 
-# ── Browser-based stream extractor (unchanged) ────────────────────────────────
+# ── Browser-based stream extractor (stub) ─────────────────────────────────────
 
 def _extract_stream_url_via_browser(url: str) -> tuple[str, str] | None:
-    """
-    Browser-based stream extraction has been removed.
-    Selenium/Edge is unreliable and not worth the dependency.
-    Returns None so callers fall through to the next strategy.
-    """
+    """Browser-based extraction removed — unreliable. Returns None so callers fall through."""
     return None
 
 
+# ── Main async extract endpoint ───────────────────────────────────────────────
+
 async def extract_stream(url: str):
-    import main as _m  # deferred
+    """
+    Extract a direct playable stream URL from an embed URL.
+
+    Response shape:
+      {
+        url:       str,          # best/first playable URL
+        quality:   str,          # e.g. "1080p" or "Auto"
+        format:    "hls"|"direct",
+        variants:  [{quality, url, bandwidth}],   # all quality options
+        subtitles: [{lang, url, format, label}],  # subtitle tracks
+      }
+
+    Strategy:
+      1. Fast HTTP regex scan (2-5 s) — works on simple embed pages
+      2. yt-dlp Python API (15-30 s) — handles obfuscated/JS-heavy pages,
+         returns full quality variant list and subtitles
+    """
+    import main as _m  # deferred to avoid circular import
 
     safe_url = _m._validate_outbound_url(url)
     cached   = _m.stream_extract_cache.get(safe_url)
     if cached and cached[0] > time.time():
         return cached[1]
 
-    # ── Stage 1: Fast HTTP scanner (2-5s, no subprocess) ─────────────────────
+    # ── Stage 1: Fast HTTP scanner (2-5 s, no subprocess) ────────────────────
     fast_result = fast_extract(safe_url)
     if fast_result:
         _m.stream_extract_cache[safe_url] = (
@@ -547,32 +612,28 @@ async def extract_stream(url: str):
         )
         return fast_result
 
-    # ── Stage 2: yt-dlp (slower, higher success on obfuscated pages) ─────────
+    # ── Stage 2: yt-dlp Python API (15-30 s, full quality list + subtitles) ──
     try:
-        direct_url, kind = _extract_stream_url(safe_url)
-        payload = {"url": direct_url, "quality": "Auto", "format": kind}
+        payload = ytdlp_extract_full(safe_url)
         _m.stream_extract_cache[safe_url] = (
             time.time() + _m.STREAM_EXTRACT_CACHE_TTL_SECONDS,
             payload,
         )
         return payload
-    except subprocess.TimeoutExpired:
-        ytdlp_error = "Stream extraction timed out"
     except Exception as exc:
-        ytdlp_error = str(exc) or "No stream found"
+        ytdlp_error = str(exc) or "yt-dlp found no stream"
 
-    # ── Stage 3: Browser/CDP fallback ────────────────────────────────────────
+    # ── Stage 3: Browser/CDP fallback (no-op stub) ───────────────────────────
     browser_result = _extract_stream_url_via_browser(safe_url)
     if browser_result:
         direct_url, kind = browser_result
-        _m.log_event(
-            _m.playback_logger,
-            logging.INFO,
-            event="extract_stream_browser_fallback",
-            message="Browser fallback resolved a stream.",
-            details={"url": safe_url[:180], "format": kind},
-        )
-        payload = {"url": direct_url, "quality": "Auto", "format": kind}
+        payload = {
+            "url": direct_url,
+            "quality": "Auto",
+            "format": kind,
+            "variants": [{"quality": "Auto", "url": direct_url, "bandwidth": 0}],
+            "subtitles": [],
+        }
         _m.stream_extract_cache[safe_url] = (
             time.time() + _m.STREAM_EXTRACT_CACHE_TTL_SECONDS,
             payload,
@@ -583,8 +644,7 @@ async def extract_stream(url: str):
         _m.playback_logger,
         logging.ERROR,
         event="extract_stream_failed",
-        message="Stream extraction failed.",
+        message="Stream extraction failed at all stages.",
         details={"url": safe_url[:180], "error": ytdlp_error},
     )
     raise HTTPException(status_code=422, detail=ytdlp_error)
-

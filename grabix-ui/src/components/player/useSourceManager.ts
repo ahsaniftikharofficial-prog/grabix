@@ -1,5 +1,6 @@
 // player/useSourceManager.ts
-// Source state, failover logic, episode/server switching, stream extraction & preparation.
+// Source state, failover logic, episode/server switching.
+// Stream extraction removed — embed sources play as iframes directly.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BACKEND_API } from "../../lib/api";
@@ -7,9 +8,8 @@ import { inferStreamKind } from "../../lib/streamProviders";
 import type { StreamSource } from "../../lib/streamProviders";
 import { queueVideoDownload } from "../../lib/downloads";
 import {
-  EMBED_CACHE_TTL_MS, EXTRACT_CACHE_TTL_MS,
   canPrepareInternalSource, failureLabel,
-  readPlaybackCache, resolveEmbedUrl, writePlaybackCache,
+  resolveEmbedUrl,
 } from "./helpers";
 import type { Props } from "./types";
 
@@ -26,7 +26,6 @@ interface SourceManagerOptions {
   onSelectSourceOption?: Props["onSelectSourceOption"];
   onDownload?: Props["onDownload"];
   onDownloadSource?: Props["onDownloadSource"];
-  // shared state setters from orchestrator
   setIsLoading: (v: boolean) => void;
   setIsPlaying: (v: boolean) => void;
   setStatusText: (v: string) => void;
@@ -48,20 +47,16 @@ export function useSourceManager({
 
   const embedLoadedRef       = useRef(false);
   const sourceRetryCountsRef = useRef<Record<string, number>>({});
-  const extractedSourcesRef  = useRef<StreamSource[]>([]);
 
-  const [activeSubtitleText, setActiveSubtitleText]   = useState(subtitle ?? "");
-  const [activeSearchTitle, setActiveSearchTitle]     = useState(subtitleSearchTitle ?? title);
-  const [activeEpisode, setActiveEpisode]             = useState<number | null>(currentEpisode ?? null);
-  const [runtimeSources, setRuntimeSources]           = useState<StreamSource[]>(sources ?? []);
-  const [episodeLoading, setEpisodeLoading]           = useState(false);
-  const [extractedSources, setExtractedSources]       = useState<StreamSource[]>([]);
-  const [activeIndex, setActiveIndex]                 = useState(0);
+  const [activeSubtitleText, setActiveSubtitleText] = useState(subtitle ?? "");
+  const [activeSearchTitle, setActiveSearchTitle]   = useState(subtitleSearchTitle ?? title);
+  const [activeEpisode, setActiveEpisode]           = useState<number | null>(currentEpisode ?? null);
+  const [runtimeSources, setRuntimeSources]         = useState<StreamSource[]>(sources ?? []);
+  const [episodeLoading, setEpisodeLoading]         = useState(false);
+  const [activeIndex, setActiveIndex]               = useState(0);
   const [activeSourceOptionId, setActiveSourceOptionId] = useState(sourceOptions?.[0]?.id ?? "");
-  const [resolvedEmbedUrl, setResolvedEmbedUrl]       = useState("");
+  const [resolvedEmbedUrl, setResolvedEmbedUrl]     = useState("");
   const [resolvedPlaybackUrl, setResolvedPlaybackUrl] = useState("");
-  const [extracting, setExtracting]                   = useState(false);
-  const [extractError, setExtractError]               = useState("");
 
   // Sync incoming props → state
   useEffect(() => {
@@ -82,9 +77,7 @@ export function useSourceManager({
         : [],
   [effectiveSources, embedUrl]);
 
-  const allSources = useMemo(() => [...baseSources, ...extractedSources], [baseSources, extractedSources]);
-
-  useEffect(() => { extractedSourcesRef.current = []; setExtractedSources([]); }, [baseSources]);
+  const allSources = baseSources;
 
   const activeSource    = allSources[activeIndex] ?? null;
   const activeSubtitles = activeSource?.subtitles ?? [];
@@ -108,12 +101,10 @@ export function useSourceManager({
   useEffect(() => {
     setIsLoading(true); setIsPlaying(false); setErrorText("");
     setStatusText(activeSource ? `Loading ${activeSource.provider}` : "No source");
-    setResolvedEmbedUrl(""); setResolvedPlaybackUrl(""); setExtractError("");
+    setResolvedEmbedUrl(""); setResolvedPlaybackUrl("");
     embedLoadedRef.current = false;
     if (!activeSource) return;
     if (activeSource.kind === "embed") {
-      // Fallback: if the iframe onLoad never fires (e.g. blocked by browser),
-      // clear the spinner after 8 seconds so the user isn't stuck forever.
       const t = window.setTimeout(() => {
         if (!embedLoadedRef.current) {
           embedLoadedRef.current = true;
@@ -176,107 +167,12 @@ export function useSourceManager({
     sourceRetryCountsRef.current[key] = 0;
   }, [activeIndex]);
 
-  // ── Stream extraction helpers ────────────────────────────────────────────────
-  const extractDirectStreamUrl = useCallback(async (targetUrl: string): Promise<{ url: string; quality?: string; format?: string }> => {
-    const resolved = await resolveEmbedUrl(API, targetUrl);
-    const cacheKey = `extract:${resolved}`;
-    const cached = readPlaybackCache<{ url: string; quality?: string; format?: string }>(cacheKey);
-    if (cached?.url) return cached;
-    const ctrl = new AbortController();
-    const timer = window.setTimeout(() => ctrl.abort(), 8000);
-    const res = await fetch(`${API}/extract-stream?url=${encodeURIComponent(resolved)}`, { signal: ctrl.signal });
-    window.clearTimeout(timer);
-    if (!res.ok) throw new Error(`Server returned ${res.status}`);
-    const data = (await res.json()) as { url?: string; quality?: string; format?: string };
-    if (!data.url) throw new Error("No URL in response");
-    const payload = { url: data.url, quality: data.quality, format: data.format };
-    writePlaybackCache(cacheKey, payload, EXTRACT_CACHE_TTL_MS);
-    return payload;
-  }, [API]);
-
-  const prepareInternalSource = useCallback(async (source: StreamSource, opts?: { labelPrefix?: string; notice?: string }): Promise<number> => {
-    const sourceKey = source.externalUrl || source.url;
-    const existing = extractedSourcesRef.current.findIndex(s => s.externalUrl === sourceKey);
-    if (existing >= 0) return baseSources.length + existing;
-    const data = await extractDirectStreamUrl(sourceKey);
-    if (!data.url) throw new Error("No playable stream was returned.");
-    const extracted: StreamSource = {
-      id: `prepared-${Date.now()}`,
-      label: opts?.labelPrefix ? `${opts.labelPrefix} Direct` : `${source.label} Direct`,
-      provider: source.provider, kind: inferStreamKind(data.url), url: data.url,
-      quality: data.quality ?? source.quality ?? "Auto",
-      description: opts?.notice ?? "Prepared internal stream.",
-      externalUrl: sourceKey, canExtract: false,
-      subtitles: source.subtitles, language: source.language,
-    };
-    extractedSourcesRef.current = [...extractedSourcesRef.current, extracted];
-    setExtractedSources([...extractedSourcesRef.current]);
-    return baseSources.length + extractedSourcesRef.current.length - 1;
-  }, [baseSources.length, extractDirectStreamUrl]);
-
-  // ── Auto-prepare warm fallbacks ──────────────────────────────────────────────
-  useEffect(() => {
-    const candidates = baseSources.filter(canPrepareInternalSource).slice(0, 2);
-    if (!candidates.length) return;
-    let cancelled = false;
-    const warm = async () => {
-      for (const src of candidates) {
-        if (cancelled) return;
-        try { await prepareInternalSource(src, { notice: "Prepared internal failover stream." }); } catch { /* ignore */ }
-      }
-    };
-    void warm();
-    return () => { cancelled = true; };
-  }, [baseSources, prepareInternalSource]);
-
-  // ── Auto-extract direct stream for ALL embed sources (hybrid model) ──────────
-  // Flow: iframe loads immediately → backend fast-extracts m3u8 in background
-  //       → if found, silently switch to our HLS engine (full volume/controls)
-  //       → if not found within timeout, stay on iframe — user never waits
-  useEffect(() => {
-    if (!activeSource || activeSource.kind !== "embed") return;
-    const prov = activeSource.provider.toLowerCase();
-    const sourceKey = activeSource.externalUrl || activeSource.url;
-    if (extractedSourcesRef.current.some(s => s.externalUrl === sourceKey)) return;
-    let cancelled = false;
-    const prepare = async () => {
-      try {
-        const data = await extractDirectStreamUrl(activeSource.externalUrl || activeSource.url);
-        if (!data.url || cancelled) return;
-        const extracted: StreamSource = {
-          id: `auto-extracted-${Date.now()}`, label: `${activeSource.label} Direct`,
-          provider: activeSource.provider, kind: inferStreamKind(data.url), url: data.url,
-          quality: data.quality ?? "Auto", description: "Auto-extracted — full player controls active",
-          externalUrl: sourceKey, canExtract: false,
-          subtitles: activeSource.subtitles, language: activeSource.language,
-        };
-        extractedSourcesRef.current = [...extractedSourcesRef.current, extracted];
-        setExtractedSources([...extractedSourcesRef.current]);
-        setActiveIndex(baseSources.length + extractedSourcesRef.current.length - 1);
-        setFallbackNotice(prov.includes("moviebox")
-          ? "Switched to direct MovieBox stream — full player controls active."
-          : `Switched to direct ${activeSource.provider} stream — full player controls active.`);
-      } catch { /* silent — iframe stays active if extraction fails */ }
-    };
-    void prepare();
-    return () => { cancelled = true; };
-  }, [activeSource, baseSources.length, extractDirectStreamUrl, setFallbackNotice]);
-
-  // ── Volume boost → force internal source for embeds ──────────────────────────
-  useEffect(() => {
-    if (!activeSource || activeSource.kind !== "embed") return;
-    const canPrepare = activeSource.provider.toLowerCase().includes("moviebox") || Boolean(activeSource.canExtract);
-    if (!canPrepare) { setFallbackNotice("Volume boost is unavailable for this embedded source."); setVolumeBoost(100); return; }
-    // This effect is only triggered by the orchestrator passing a changed volumeBoost
-    // Handled in orchestrator to avoid circular dep — see usePlayerState.ts
-  }, [activeSource, setFallbackNotice, setVolumeBoost]);
-
   // ── Handlers ─────────────────────────────────────────────────────────────────
   const handleSourceSwitch = useCallback((index: number) => {
     setIsLoading(true); setIsPlaying(false);
     const next = allSources[index];
     if (next) sourceRetryCountsRef.current[`${index}:${next.externalUrl || next.url}`] = 0;
-    setActiveIndex(index); setErrorText(""); setFallbackNotice("Switching stream..."); setExtractError("");
+    setActiveIndex(index); setErrorText(""); setFallbackNotice("Switching stream...");
     setReloadKey((k) => k + 1);
     showControls();
   }, [allSources, setIsLoading, setIsPlaying, setErrorText, setFallbackNotice, setReloadKey, showControls]);
@@ -295,7 +191,7 @@ export function useSourceManager({
           : undefined;
       if (!next) throw new Error(`Could not load ${episodeLabel.toLowerCase()} ${episode}.`);
       const matchedIndex = next.sources.findIndex(s => s.provider === preferredProvider && s.label === preferredLabel);
-      extractedSourcesRef.current = []; setExtractedSources([]); setRuntimeSources(next.sources);
+      setRuntimeSources(next.sources);
       setActiveSubtitleText(next.subtitle ?? "");
       setActiveSearchTitle(next.subtitleSearchTitle ?? `${title} ${episodeLabel} ${episode}`);
       setActiveEpisode(episode); setActiveIndex(matchedIndex >= 0 ? matchedIndex : 0);
@@ -322,7 +218,7 @@ export function useSourceManager({
       }
       if (!next) throw lastErr ?? new Error("Server switch failed.");
       const matchedIndex = next.sources.findIndex(s => s.provider === activeSource?.provider && s.label === activeSource?.label);
-      extractedSourcesRef.current = []; setExtractedSources([]); setRuntimeSources(next.sources);
+      setRuntimeSources(next.sources);
       setActiveSubtitleText(next.subtitle ?? ""); setActiveSearchTitle(next.subtitleSearchTitle ?? title);
       setActiveIndex(matchedIndex >= 0 ? matchedIndex : 0); setReloadKey((k) => k + 1);
     } catch (err) {
@@ -331,56 +227,16 @@ export function useSourceManager({
   }, [onSelectSourceOption, activeSourceOptionId, activeEpisode, currentEpisode, activeSource, title,
       setIsLoading, setIsPlaying, setErrorText, setFallbackNotice, setReloadKey]);
 
-  const handleExtractStream = useCallback(async () => {
-    if (!activeSource || extracting) return;
-    setExtracting(true); setExtractError("");
-    try {
-      const data = await extractDirectStreamUrl(activeSource.externalUrl || activeSource.url);
-      const extracted: StreamSource = {
-        id: `extracted-${Date.now()}`, label: "Direct (Extracted)",
-        provider: activeSource.provider, kind: inferStreamKind(data.url), url: data.url,
-        quality: data.quality ?? "Auto", description: "Extracted direct stream",
-        externalUrl: data.url, canExtract: false,
-      };
-      extractedSourcesRef.current = [...extractedSourcesRef.current, extracted];
-      const newIndex = baseSources.length + extractedSourcesRef.current.length - 1;
-      setExtractedSources([...extractedSourcesRef.current]); setActiveIndex(newIndex);
-      setReloadKey((k) => k + 1);
-      setFallbackNotice(`Extracted a direct stream from ${activeSource.provider}. Switched to it.`);
-    } catch (err) {
-      setExtractError(`Could not extract a direct stream: ${err instanceof Error ? err.message : "Unknown error"}`);
-    } finally { setExtracting(false); }
-  }, [activeSource, extracting, extractDirectStreamUrl, baseSources.length, setReloadKey, setFallbackNotice]);
-
   const handleDownloadCurrent = useCallback(async () => {
     if (!activeSource) return;
-    if (!onDownload && !onDownloadSource) {
-      const directSrc = allSources.find(s => s.kind === "direct" || s.kind === "hls") || activeSource;
-      try {
-        await queueVideoDownload({ url: directSrc.url, title, headers: directSrc.requestHeaders, forceHls: directSrc.kind === "hls" });
-        setFallbackNotice("Download queued. Open Downloader to track progress.");
-      } catch (err) { setFallbackNotice(err instanceof Error ? err.message : "Could not start download."); }
-      return;
-    }
-    const dlSrc = allSources.find(s => s.kind === "direct" || s.kind === "hls" || s.kind === "local" || Boolean(s.canExtract)) || activeSource;
+    const directSrc = allSources.find(s => s.kind === "direct" || s.kind === "hls") || activeSource;
     try {
-      if (dlSrc !== activeSource) setFallbackNotice(`Using ${dlSrc.provider} ${dlSrc.label} for download.`);
-      if (dlSrc.kind === "direct" || dlSrc.kind === "hls" || dlSrc.kind === "local") {
-        if (onDownloadSource) await onDownloadSource(dlSrc, title);
-        else if (onDownload) await onDownload(dlSrc.url, title);
-        return;
-      }
-      if (dlSrc.kind === "embed") {
-        const data = await extractDirectStreamUrl(dlSrc.externalUrl || dlSrc.url);
-        const extracted: StreamSource = { ...dlSrc, kind: inferStreamKind(data.url), url: data.url, externalUrl: dlSrc.externalUrl || dlSrc.url, canExtract: false };
-        if (onDownloadSource) await onDownloadSource(extracted, title);
-        else if (onDownload) await onDownload(data.url, title);
-      }
+      await queueVideoDownload({ url: directSrc.url, title, headers: directSrc.requestHeaders, forceHls: directSrc.kind === "hls" });
+      setFallbackNotice("Download queued. Open Downloader to track progress.");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Download could not be started.";
-      setFallbackNotice(msg); setExtractError(msg);
+      setFallbackNotice(err instanceof Error ? err.message : "Could not start download.");
     }
-  }, [activeSource, allSources, title, onDownload, onDownloadSource, extractDirectStreamUrl, setFallbackNotice]);
+  }, [activeSource, allSources, title, setFallbackNotice]);
 
   const currentServerLabel = (() => {
     if (sourceOptions && sourceOptions.length > 0)
@@ -388,8 +244,6 @@ export function useSourceManager({
     return activeSource?.label ?? "Auto";
   })();
 
-  // Called from the iframe's onLoad event — clears the GRABIX loading spinner
-  // immediately when the embed page finishes loading (instead of waiting 8s).
   const onEmbedLoaded = useCallback(() => {
     if (!embedLoadedRef.current) {
       embedLoadedRef.current = true;
@@ -406,13 +260,15 @@ export function useSourceManager({
     activeEpisode, activeSearchTitle, activeSubtitleText,
     activeSourceOptionId, setActiveSourceOptionId,
     resolvedEmbedUrl, resolvedPlaybackUrl, setResolvedPlaybackUrl,
-    extracting, extractError,
+    extracting: false, extractError: "",
     episodeLoading,
     hasFallback, isDirectEngine, isEmbedEngine,
     isMovieBoxQualityMode, isAnimeQualityMode,
-    goToNextSource, onSourcePlaying, prepareInternalSource,
+    goToNextSource, onSourcePlaying,
+    prepareInternalSource: async (_s: StreamSource) => 0,
     handleSourceSwitch, handleEpisodeSwitch, handleSourceOptionSwitch,
-    handleExtractStream, handleDownloadCurrent,
+    handleExtractStream: async () => {},
+    handleDownloadCurrent,
     currentServerLabel,
   };
 }
