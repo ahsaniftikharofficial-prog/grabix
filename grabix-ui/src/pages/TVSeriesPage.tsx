@@ -1,7 +1,10 @@
 // grabix-ui/src/pages/TVSeriesPage.tsx — Phase 1 rebuild
 import { useState, useEffect, useRef, useCallback } from "react";
-import { IconSearch, IconPlay, IconDownload, IconX, IconChevronLeft, IconChevronRight } from "../components/Icons";
+import { IconPlay, IconDownload, IconX, IconChevronLeft, IconChevronRight } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
+import { LiveSearch } from "../components/search/LiveSearch";
+import { MoodPills } from "../components/search/MoodPills";
+import { TV_MOODS, type MoodConfig } from "../lib/moodKeywords";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import { PageEmptyState, PageErrorState } from "../components/PageStates";
 import { useFavorites } from "../context/FavoritesContext";
@@ -177,6 +180,7 @@ export default function TVSeriesPage() {
   const [genreHasMore, setGenreHasMore] = useState(true);
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [activeMood, setActiveMood] = useState<MoodConfig | null>(null);
   const [searchResults, setSearchResults] = useState<Show[]>([]);
   const [searchPage, setSearchPage] = useState(1);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -308,6 +312,24 @@ export default function TVSeriesPage() {
   };
   const clearSearch = () => { setSearchInput(""); setSearchQuery(""); setTab("home"); };
 
+  const handleMoodSelect = (mood: MoodConfig | null) => {
+    setActiveMood(mood);
+    if (mood) {
+      setActiveGenre(mood.genreIds[0]);
+      setTab("home");
+      setSearchInput("");
+      setSearchQuery("");
+    } else {
+      setActiveGenre(null);
+    }
+  };
+
+  const handleLiveSearch = (query: string) => {
+    if (!query) { clearSearch(); return; }
+    setSearchQuery(query);
+    setTab("search");
+  };
+
   const filtered = (arr: Show[]) => filterAdultContent(arr, adultContentBlocked);
   const displayGenre = activeGenre !== null ? (genres.find(g => g.id === activeGenre)?.name ?? "Genre") : null;
 
@@ -319,15 +341,13 @@ export default function TVSeriesPage() {
           <div style={{ fontSize: 16, fontWeight: 700 }}>TV Series</div>
           <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 1 }}>Browse · Stream · Download</div>
         </div>
-        <div style={{ display: "flex", gap: 6, flex: 1, minWidth: 200, maxWidth: 380 }}>
-          <div style={{ position: "relative", flex: 1 }}>
-            <IconSearch size={13} color="var(--text-muted)" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }} />
-            <input className="input-base" style={{ paddingLeft: 32, width: "100%", fontSize: 13 }} placeholder="Search TV shows…" value={searchInput}
-              onChange={e => setSearchInput(e.target.value)} onKeyDown={e => e.key === "Enter" && submitSearch()} />
-          </div>
-          <button className="btn btn-primary" style={{ fontSize: 13, whiteSpace: "nowrap" }} onClick={submitSearch}>Search</button>
-          {searchQuery && <button className="btn btn-ghost" style={{ fontSize: 13 }} onClick={clearSearch}><IconX size={13} /> Clear</button>}
-        </div>
+        <LiveSearch
+          value={searchInput}
+          onChange={setSearchInput}
+          onSearch={handleLiveSearch}
+          placeholder="Search TV shows…"
+        />
+        {searchQuery && <button className="btn btn-ghost" style={{ fontSize: 13 }} onClick={clearSearch}><IconX size={13} /> Clear</button>}
         {tab === "home" && activeGenre !== null && (
           <button className={`btn ${showFilters ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12, gap: 5 }} onClick={() => setShowFilters(f => !f)}>
             ⚙ Filters {showFilters ? "▲" : "▼"}
@@ -347,6 +367,12 @@ export default function TVSeriesPage() {
           </button>
         ))}
       </div>
+
+      <MoodPills
+        moods={TV_MOODS}
+        activeMood={activeMood?.label ?? null}
+        onSelect={handleMoodSelect}
+      />
 
       {showFilters && activeGenre !== null && (
         <div style={{ display: "flex", gap: 10, padding: "10px 20px", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", flexWrap: "wrap", flexShrink: 0 }}>

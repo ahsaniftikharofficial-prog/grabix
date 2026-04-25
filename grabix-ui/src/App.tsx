@@ -33,6 +33,9 @@ const LibraryPage = lazy(() => import("./pages/LibraryPage"));
 
 const MangaPage = lazy(() => import("./pages/MangaPage"));
 const MediaPage = lazy(() => import("./pages/MediaPage"));
+const MoviesPage = lazy(() => import("./pages/MoviesPage"));
+const TVSeriesPage = lazy(() => import("./pages/TVSeriesPage"));
+const GenrePage = lazy(() => import("./pages/GenrePage"));
 const MovieBoxPage = lazy(() => import("./pages/MovieBoxPage"));
 const FavoritesPage = lazy(() => import("./pages/FavoritesPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
@@ -46,6 +49,7 @@ function Inner() {
   const offlineState = useOfflineDetection(BACKEND_API);
   const watchdog = useWatchdog();
   const [page, setPage] = useState<Page>("downloader");
+  const [genrePageParams, setGenrePageParams] = useState<{ mediaType: "movie" | "tv"; genreId: number; genreName: string } | null>(null);
   const [_pageRevision, setPageRevision] = useState(0);
   const [runtimeState, setRuntimeState] = useState<RuntimeState>("starting");
   const [bootstrapping, setBootstrapping] = useState(true);
@@ -129,6 +133,14 @@ function Inner() {
       }
     };
 
+    const handleGenreNav = (event: Event) => {
+      const detail = (event as CustomEvent<{ mediaType: "movie" | "tv"; genreId: number; genreName: string }>).detail;
+      if (detail?.genreId) {
+        setGenrePageParams({ mediaType: detail.mediaType, genreId: detail.genreId, genreName: detail.genreName });
+        setPage("genrepage");
+      }
+    };
+
     void bootstrapBackend();
     void fetchStartupDiagnostics().then((payload) => {
       if (!cancelled) {
@@ -143,11 +155,13 @@ function Inner() {
     }, 2500);
 
     window.addEventListener("grabix:navigate", handleNavigate as EventListener);
+    window.addEventListener("grabix:genre-nav", handleGenreNav as EventListener);
 
     return () => {
       cancelled = true;
       window.clearInterval(interval);
       window.removeEventListener("grabix:navigate", handleNavigate as EventListener);
+      window.removeEventListener("grabix:genre-nav", handleGenreNav as EventListener);
     };
   }, []);
 
@@ -220,9 +234,9 @@ function Inner() {
     converter:  <ErrorBoundary section="Converter"><ConverterPage /></ErrorBoundary>,
     library:    <ErrorBoundary section="Library"><LibraryPage /></ErrorBoundary>,
     manga:      <ErrorBoundary section="Manga"><MangaPage /></ErrorBoundary>,
-    movies:     <ErrorBoundary section="Movies"><MediaPage mediaType="movie" /></ErrorBoundary>,
+    movies:     <ErrorBoundary section="Movies"><MoviesPage /></ErrorBoundary>,
     moviebox:   <ErrorBoundary section="MovieBox"><MovieBoxPage /></ErrorBoundary>,
-    series:     <ErrorBoundary section="TV Series"><MediaPage mediaType="tv" /></ErrorBoundary>,
+    series:     <ErrorBoundary section="TV Series"><TVSeriesPage /></ErrorBoundary>,
     favorites:  <ErrorBoundary section="Favorites"><FavoritesPage /></ErrorBoundary>,
     ratings:    <ErrorBoundary section="Ratings"><RatingsPage /></ErrorBoundary>,
     settings:   <ErrorBoundary section="Settings"><SettingsPage /></ErrorBoundary>,
@@ -230,6 +244,14 @@ function Inner() {
     topimdb:          <ErrorBoundary section="Top IMDb"><TopImdbPage /></ErrorBoundary>,
     continuewatching: <ErrorBoundary section="Continue Watching"><ContinueWatchingPage /></ErrorBoundary>,
     recentlyadded:    <ErrorBoundary section="Recently Added"><RecentlyAddedPage /></ErrorBoundary>,
+    genrepage: genrePageParams
+      ? <ErrorBoundary section="Genre"><GenrePage
+          mediaType={genrePageParams.mediaType}
+          genreId={genrePageParams.genreId}
+          genreName={genrePageParams.genreName}
+          onBack={() => navigateToPage(genrePageParams.mediaType === "movie" ? "movies" : "series")}
+        /></ErrorBoundary>
+      : null,
   };
 
   const refreshRuntimeHealth = async () => {

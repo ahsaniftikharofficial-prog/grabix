@@ -66,7 +66,7 @@ const IconClock = ({ size = 16, color = "currentColor" }: { size?: number; color
   </svg>
 );
 
- "downloader" | "converter" | "library" | "manga" | "movies" | "moviebox" | "series" | "favorites" | "ratings" | "settings" | "newandhot" | "topimdb" | "continuewatching" | "recentlyadded";
+ "downloader" | "converter" | "library" | "manga" | "movies" | "moviebox" | "series" | "favorites" | "ratings" | "settings" | "newandhot" | "topimdb" | "continuewatching" | "recentlyadded" | "genrepage";
 
 interface Props {
   page: Page;

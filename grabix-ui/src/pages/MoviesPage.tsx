@@ -1,7 +1,10 @@
 // grabix-ui/src/pages/MoviesPage.tsx — Phase 1 rebuild
 import { useState, useEffect, useRef, useCallback } from "react";
-import { IconSearch, IconPlay, IconDownload, IconX, IconChevronLeft, IconChevronRight } from "../components/Icons";
+import { IconPlay, IconDownload, IconX, IconChevronLeft, IconChevronRight } from "../components/Icons";
 import { IconHeart } from "../components/Icons";
+import { LiveSearch } from "../components/search/LiveSearch";
+import { MoodPills } from "../components/search/MoodPills";
+import { MOVIE_MOODS, type MoodConfig } from "../lib/moodKeywords";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import { PageEmptyState, PageErrorState } from "../components/PageStates";
 import { useFavorites } from "../context/FavoritesContext";
@@ -181,6 +184,7 @@ export default function MoviesPage() {
   const [genreHasMore, setGenreHasMore] = useState(true);
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [activeMood, setActiveMood] = useState<MoodConfig | null>(null);
   const [searchResults, setSearchResults] = useState<Movie[]>([]);
   const [searchPage, setSearchPage] = useState(1);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -322,6 +326,24 @@ export default function MoviesPage() {
     setTab("home");
   };
 
+  const handleMoodSelect = (mood: MoodConfig | null) => {
+    setActiveMood(mood);
+    if (mood) {
+      setActiveGenre(mood.genreIds[0]);
+      setTab("home");
+      setSearchInput("");
+      setSearchQuery("");
+    } else {
+      setActiveGenre(null);
+    }
+  };
+
+  const handleLiveSearch = (query: string) => {
+    if (!query) { clearSearch(); return; }
+    setSearchQuery(query);
+    setTab("search");
+  };
+
   const filtered = (arr: Movie[]) => filterAdultContent(arr, adultContentBlocked);
   const displayGenre = activeGenre !== null
     ? (genres.find(g => g.id === activeGenre)?.name ?? "Genre")
@@ -335,25 +357,17 @@ export default function MoviesPage() {
           <div style={{ fontSize: 16, fontWeight: 700 }}>Movies</div>
           <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 1 }}>Browse · Stream · Download</div>
         </div>
-        <div style={{ display: "flex", gap: 6, flex: 1, minWidth: 200, maxWidth: 380 }}>
-          <div style={{ position: "relative", flex: 1 }}>
-            <IconSearch size={13} color="var(--text-muted)" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }} />
-            <input
-              className="input-base"
-              style={{ paddingLeft: 32, width: "100%", fontSize: 13 }}
-              placeholder="Search movies…"
-              value={searchInput}
-              onChange={e => setSearchInput(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && submitSearch()}
-            />
-          </div>
-          <button className="btn btn-primary" style={{ fontSize: 13, whiteSpace: "nowrap" }} onClick={submitSearch}>Search</button>
+        <LiveSearch
+            value={searchInput}
+            onChange={setSearchInput}
+            onSearch={handleLiveSearch}
+            placeholder="Search movies…"
+          />
           {searchQuery && (
             <button className="btn btn-ghost" style={{ fontSize: 13 }} onClick={clearSearch}>
               <IconX size={13} /> Clear
             </button>
           )}
-        </div>
         {tab === "home" && activeGenre !== null && (
           <button
             className={`btn ${showFilters ? "btn-primary" : "btn-ghost"}`}
@@ -382,6 +396,12 @@ export default function MoviesPage() {
           </button>
         ))}
       </div>
+
+      <MoodPills
+        moods={MOVIE_MOODS}
+        activeMood={activeMood?.label ?? null}
+        onSelect={handleMoodSelect}
+      />
 
       {showFilters && activeGenre !== null && (
         <div style={{ display: "flex", gap: 10, padding: "10px 20px", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)", flexWrap: "wrap", flexShrink: 0 }}>
