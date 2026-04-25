@@ -178,22 +178,9 @@ export interface AnimePlaybackCandidate {
 const EMBED_PROVIDERS: ProviderDef[] = [
   // ── Tier 1: High-reliability, low/no ads — direct-stream auto-extraction attempted on all ──
   {
-    id: "autoembed",
+    id: "autoembed-net",
     label: "Server 1",
     provider: "AutoEmbed",
-    // player.autoembed.cc — primary domain, multi-server (Asia/Hindi, Eco, Orion, etc.)
-    movie: "https://player.autoembed.cc/embed/movie/{id}",
-    tv: "https://player.autoembed.cc/embed/tv/{id}/1/1",
-    episode: "https://player.autoembed.cc/embed/tv/{id}/{season}/{episode}",
-    movieIdType: "tmdb",
-    tvIdType: "tmdb",
-    canExtract: true,
-  },
-  {
-    id: "autoembed-net",
-    label: "Server 2",
-    provider: "AutoEmbed 2",
-    // autoembed.net — mirror/alt domain, same content, good uptime redundancy
     movie: "https://autoembed.net/movie/tmdb/{id}",
     tv: "https://autoembed.net/tv/tmdb/{id}-1-1",
     episode: "https://autoembed.net/tv/tmdb/{id}-{season}-{episode}",
@@ -203,7 +190,7 @@ const EMBED_PROVIDERS: ProviderDef[] = [
   },
   {
     id: "embedsu",
-    label: "Server 3",
+    label: "Server 2",
     provider: "Embed.su",
     movie: "https://embed.su/embed/movie/{id}",
     tv: "https://embed.su/embed/tv/{id}/1/1",
@@ -214,7 +201,7 @@ const EMBED_PROVIDERS: ProviderDef[] = [
   },
   {
     id: "vidbinge",
-    label: "Server 4",
+    label: "Server 3",
     provider: "VidBinge",
     movie: "https://vidbinge.dev/embed/movie/{id}",
     tv: "https://vidbinge.dev/embed/tv/{id}/1/1",
@@ -226,7 +213,7 @@ const EMBED_PROVIDERS: ProviderDef[] = [
   // ── Tier 2: Good quality, occasional ads ─────────────────────────────────
   {
     id: "vidsrc-mov",
-    label: "Server 5",
+    label: "Server 4",
     provider: "VidSrc.mov",
     movie: "https://vidsrc.mov/embed/movie/{id}",
     tv: "https://vidsrc.mov/embed/tv/{id}/1/1",
@@ -237,7 +224,7 @@ const EMBED_PROVIDERS: ProviderDef[] = [
   },
   {
     id: "vidsrc-to",
-    label: "Server 6",
+    label: "Server 5",
     provider: "VidSrc.to",
     movie: "https://vidsrc.to/embed/movie/{id}",
     tv: "https://vidsrc.to/embed/tv/{id}/1/1",
@@ -248,7 +235,7 @@ const EMBED_PROVIDERS: ProviderDef[] = [
   },
   {
     id: "multiembed",
-    label: "Server 7",
+    label: "Server 6",
     provider: "Multiembed",
     movie: "https://multiembed.mov/?video_id={id}&tmdb=1",
     tv: "https://multiembed.mov/?video_id={id}&tmdb=1&s=1&e=1",
@@ -259,7 +246,7 @@ const EMBED_PROVIDERS: ProviderDef[] = [
   },
   {
     id: "vidsrc-me",
-    label: "Server 8",
+    label: "Server 7",
     provider: "VidSrc.me",
     movie: "https://vidsrc.me/embed/movie?imdb={id}",
     tv: "https://vidsrc.me/embed/tv?imdb={id}&season=1&episode=1",
@@ -270,7 +257,7 @@ const EMBED_PROVIDERS: ProviderDef[] = [
   },
   {
     id: "2embed",
-    label: "Server 9",
+    label: "Server 8",
     provider: "2embed",
     movie: "https://www.2embed.cc/embed/{id}",
     tv: "https://www.2embed.cc/embedtv/{id}&s=1&e=1",
