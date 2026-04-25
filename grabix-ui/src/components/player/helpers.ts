@@ -361,7 +361,8 @@ const PLAYER_STYLES = `
   .gx-cue-window.dragging { cursor: grabbing; }
   .gx-cue span { display: inline-block; max-width: min(92vw, 1100px); border-radius: 6px; white-space: pre-line; }
   .gx-controls { position: absolute; inset: 0; z-index: 10; display: flex; flex-direction: column; justify-content: flex-end; pointer-events: none; opacity: 0; transition: opacity var(--player-transition); }
-  .gx-controls.visible { opacity: 1; pointer-events: auto; }
+  .gx-controls.visible { opacity: 1; pointer-events: none; }
+  .gx-controls.visible .gx-bottom, .gx-controls.visible .gx-top { pointer-events: auto; }
   .gx-top { background: var(--player-top-gradient); padding: 16px 20px; display: flex; align-items: center; justify-content: space-between; height: 56px; flex-shrink: 0; }
   .gx-top-right { display: flex; gap: 8px; align-items: center; }
   .gx-bottom { background: var(--player-overlay-gradient); padding: 0 20px 16px; flex-shrink: 0; }
