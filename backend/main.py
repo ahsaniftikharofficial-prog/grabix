@@ -25,6 +25,7 @@ from app.routes.providers import router as providers_router
 from app.routes.settings import router as settings_router
 from app.routes.streaming import router as streaming_router
 from app.routes.subtitles import router as subtitles_router
+from app.routes.adblock import router as adblock_router
 from moviebox import (
     router as moviebox_router,
     start_bg_retry as _moviebox_start_bg_retry,
@@ -270,6 +271,15 @@ async def _grabix_lifespan(app: FastAPI):
     cache_ops.set_event_loop(_app_event_loop)   # allow background cache refresh
     ensure_runtime_bootstrap()
     recover_download_jobs()
+    # Start ad blocker filter list download in background
+    try:
+        from app.services.adblock_service import initialize as _adblock_init
+        from app.services.runtime_config import app_state_root as _app_state_root
+        from pathlib import Path as _Path
+        _adblock_cache = _Path(_app_state_root()) / "adblock-cache"
+        _adblock_init(_adblock_cache)
+    except Exception:
+        pass  # adblock init failure must never crash the backend
     yield
 
 
@@ -290,6 +300,7 @@ app.include_router(providers_router)
 app.include_router(settings_router)
 app.include_router(streaming_router)
 app.include_router(subtitles_router,       prefix="/subtitles")
+app.include_router(adblock_router)
 app.include_router(moviebox_router,        prefix="/moviebox")
 app.include_router(downloads_engine_router)
 # Phase 2: health, cache, diagnostics, providers routes

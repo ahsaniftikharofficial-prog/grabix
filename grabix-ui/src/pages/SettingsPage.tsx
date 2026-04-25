@@ -288,6 +288,16 @@ export default function SettingsPage() {
   // ── Network
   const [httpProxyUrl, setHttpProxyUrl] = useState("");
 
+  // ── Ad Blocker
+  const [adblockEnabled, setAdblockEnabled] = useState(true);
+  const [adblockStatus, setAdblockStatus] = useState<{
+    domain_count: number;
+    last_refreshed_human: string;
+    ready: boolean;
+    last_error: string | null;
+  } | null>(null);
+  const [adblockRefreshing, setAdblockRefreshing] = useState(false);
+
   // ── Save state
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState(false);
@@ -356,6 +366,10 @@ export default function SettingsPage() {
 
         // Network
         if (typeof data.http_proxy_url === "string") setHttpProxyUrl(data.http_proxy_url);
+        if (typeof data.adblock_enabled === "boolean") {
+          setAdblockEnabled(data.adblock_enabled);
+          localStorage.setItem("grabix_adblock", data.adblock_enabled ? "true" : "false");
+        }
       })
       .catch(() => { /* Keep defaults */ });
 
@@ -372,6 +386,16 @@ export default function SettingsPage() {
 
     void fetchStartupDiagnostics().then((p) => setStartupDiagnostics(p));
     void fetchDiagnosticsLogs(12).then((p) => setDiagnosticsLogs(p)).catch(() => setDiagnosticsLogs(null));
+
+    backendJson<{ enabled: boolean; domain_count: number; last_refreshed_human: string; ready: boolean; last_error: string | null }>(
+      `${BACKEND_API}/adblock/status`
+    )
+      .then((d) => {
+        setAdblockEnabled(d.enabled);
+        localStorage.setItem("grabix_adblock", d.enabled ? "true" : "false");
+        setAdblockStatus({ domain_count: d.domain_count, last_refreshed_human: d.last_refreshed_human, ready: d.ready, last_error: d.last_error });
+      })
+      .catch(() => { /* adblock status unavailable */ });
   }, []);
 
   // ─── Save all settings ──────────────────────────────────────────────────────
@@ -416,6 +440,7 @@ export default function SettingsPage() {
         manga_page_layout: mangaPageLayout,
         // Network
         http_proxy_url: httpProxyUrl,
+        adblock_enabled: adblockEnabled,
       }),
     }, { sensitive: true })
       .then(async (response) => {
@@ -518,6 +543,33 @@ export default function SettingsPage() {
     ready?: boolean;
     failed_checks?: Array<{ label?: string; details?: Record<string, unknown> }>;
   } | undefined) || undefined;
+
+  // ─── Ad Blocker helpers ──────────────────────────────────────────────────────
+
+  const toggleAdblock = async (enabled: boolean) => {
+    setAdblockEnabled(enabled);
+    localStorage.setItem("grabix_adblock", enabled ? "true" : "false");
+    try {
+      const result = await backendJson<{ enabled: boolean; domain_count: number; last_refreshed_human: string; ready: boolean; last_error: string | null }>(
+        `${BACKEND_API}/adblock/toggle`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) }
+      );
+      setAdblockStatus({ domain_count: result.domain_count, last_refreshed_human: result.last_refreshed_human, ready: result.ready, last_error: result.last_error });
+    } catch { /* best effort */ }
+  };
+
+  const refreshAdblockList = async () => {
+    setAdblockRefreshing(true);
+    try {
+      const result = await backendJson<{ domain_count: number; last_refreshed_human: string; ready: boolean; last_error: string | null }>(
+        `${BACKEND_API}/adblock/refresh`,
+        { method: "POST" }
+      );
+      setAdblockStatus({ domain_count: result.domain_count, last_refreshed_human: result.last_refreshed_human, ready: result.ready, last_error: result.last_error });
+    } catch { /* best effort */ } finally {
+      setAdblockRefreshing(false);
+    }
+  };
 
   // ─── Select styles helper ────────────────────────────────────────────────────
 
@@ -823,6 +875,62 @@ export default function SettingsPage() {
 
   const renderNetwork = () => (
     <>
+      {/* ── Ad Blocker ── */}
+      <SectionLabel>Ad Blocker</SectionLabel>
+      <div className="card card-padded" style={{ marginBottom: 12 }}>
+        <SettingRow
+          label="Built-in Ad Blocker"
+          sub="Blocks popup ads, overlay ads, and requests to 50,000+ known ad domains using the AdGuard DNS filter list. Takes effect immediately — no restart needed."
+        >
+          <Toggle value={adblockEnabled} onChange={(v) => void toggleAdblock(v)} />
+        </SettingRow>
+
+        {/* Status row */}
+        {adblockStatus && (
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            padding: "10px 0", borderBottom: "1px solid var(--border)",
+          }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{
+                  fontSize: 11, fontWeight: 600, padding: "2px 9px", borderRadius: 99,
+                  background: adblockStatus.ready ? "rgba(34,197,94,0.12)" : "rgba(239,68,68,0.12)",
+                  color: adblockStatus.ready ? "var(--text-success)" : "var(--text-danger)",
+                }}>
+                  {adblockStatus.ready
+                    ? `✓ ${adblockStatus.domain_count.toLocaleString()} domains loaded`
+                    : "✗ Filter list not loaded"}
+                </div>
+              </div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>
+                {adblockStatus.ready
+                  ? `Last updated: ${adblockStatus.last_refreshed_human} · Auto-refreshes every 24 h`
+                  : adblockStatus.last_error
+                  ? `Error: ${adblockStatus.last_error}`
+                  : "Filter list is downloading in the background…"}
+              </div>
+            </div>
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: 12, flexShrink: 0, marginLeft: 12 }}
+              onClick={() => void refreshAdblockList()}
+              disabled={adblockRefreshing}
+            >
+              {adblockRefreshing ? "Updating…" : "Refresh list"}
+            </button>
+          </div>
+        )}
+
+        {/* Info note */}
+        <div style={{ paddingTop: 10, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
+          <strong style={{ color: "var(--text-secondary)" }}>How it works:</strong> Three layers of protection —
+          popup windows are blocked before they open, ad overlay elements are removed from the page,
+          and requests to known ad networks are cancelled. Works inside streaming iframes too.
+        </div>
+      </div>
+
+      {/* ── Proxy ── */}
       <SectionLabel>Proxy</SectionLabel>
       <div className="card card-padded">
         <div style={{ padding: "14px 0" }}>

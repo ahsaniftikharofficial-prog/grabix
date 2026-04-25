@@ -264,6 +264,7 @@ DEFAULT_SETTINGS: dict = {
     "media_cache_days": 7,
     "adult_content_enabled": False,
     "adult_content_password_hash": "",
+    "adblock_enabled": True,
 }
 
 

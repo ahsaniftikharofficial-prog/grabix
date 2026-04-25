@@ -1161,12 +1161,127 @@ fn initial_diagnostics(app: &AppHandle) -> StartupDiagnostics {
     }
 }
 
+// ── Ad-block JavaScript injection ─────────────────────────────────────────────
+//
+// This script is injected into every page the WebView loads (including inside
+// iframes where possible). It activates only when the user has ad blocking
+// enabled (checked via localStorage key "grabix_adblock" !== "false").
+//
+// Three layers of protection:
+//   1. window.open() blocker — kills popup/redirect ads before they open
+//   2. MutationObserver — removes ad overlay DOM elements continuously
+//   3. fetch / XHR intercept — cancels requests to known ad network domains
+//
+// The domain blocklist here is a hardcoded fast-path (~30 worst offenders).
+// The full 50k-domain list lives in the Python backend service.
+
+const AD_BLOCK_SCRIPT: &str = r#"
+(function() {
+  try {
+    // ── Check if ad blocker is enabled (toggle stored in localStorage) ──
+    if (localStorage.getItem('grabix_adblock') === 'false') return;
+
+    // ── 1. Block all popup windows ──────────────────────────────────────
+    window.open = function() { return null; };
+
+    // ── 2. Known ad network domains (fast hardcoded list) ───────────────
+    var AD_DOMAINS = [
+      'doubleclick.net','googlesyndication.com','googletagmanager.com',
+      'adnxs.com','juicyads.com','exoclick.com','trafficjunky.com',
+      'popads.net','popcash.net','tsyndicate.com','adskeeper.com',
+      'propellerads.com','monetizer101.com','adtelligent.com',
+      'revcontent.com','mgid.com','fuckingfast.net','hilltopads.net',
+      'adsterra.com','yllix.com','clickadu.com','bidvertiser.com',
+      'mopub.com','admob.com','inmobi.com','smartadserver.com',
+      'criteo.com','outbrain.com','taboola.com','pub.network',
+      'adsafeprotected.com','advertising.com','appnexus.com',
+    ];
+
+    function isAdUrl(url) {
+      try {
+        var host = new URL(url).hostname.toLowerCase();
+        for (var i = 0; i < AD_DOMAINS.length; i++) {
+          if (host === AD_DOMAINS[i] || host.endsWith('.' + AD_DOMAINS[i])) {
+            return true;
+          }
+        }
+      } catch(e) {}
+      return false;
+    }
+
+    // ── 3. Intercept fetch ───────────────────────────────────────────────
+    var _origFetch = window.fetch;
+    window.fetch = function(input, init) {
+      var url = (typeof input === 'string') ? input : (input && input.url) || '';
+      if (isAdUrl(url)) return new Promise(function() {});
+      return _origFetch.apply(this, arguments);
+    };
+
+    // ── 4. Intercept XMLHttpRequest ──────────────────────────────────────
+    var _origOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {
+      if (isAdUrl(url)) {
+        this._blocked = true;
+        return;
+      }
+      return _origOpen.apply(this, arguments);
+    };
+    var _origSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function() {
+      if (this._blocked) return;
+      return _origSend.apply(this, arguments);
+    };
+
+    // ── 5. DOM cleanup: remove ad overlay elements ───────────────────────
+    var AD_SELECTORS = [
+      '[class*="popup"]','[id*="popup"]',
+      '[class*="overlay"]:not(video):not(canvas)',
+      '[id*="overlay"]:not(video)',
+      '[class*="ad-banner"]','[class*="ad-container"]',
+      '[id*="ad-container"]','[id*="banner-ad"]',
+      'iframe[src*="doubleclick"]','iframe[src*="googlesyndication"]',
+      'iframe[src*="exoclick"]','iframe[src*="juicyads"]',
+      'iframe[src*="adsterra"]','iframe[src*="propellerads"]',
+      '[style*="z-index: 9999"][style*="position: fixed"]',
+      '[style*="z-index:9999"][style*="position:fixed"]',
+    ].join(',');
+
+    function cleanAds() {
+      try {
+        var els = document.querySelectorAll(AD_SELECTORS);
+        for (var i = 0; i < els.length; i++) {
+          var el = els[i];
+          // Don't remove the video player itself
+          if (el.tagName === 'VIDEO' || el.querySelector('video')) continue;
+          el.remove();
+        }
+      } catch(e) {}
+    }
+
+    // Run immediately and on every DOM change
+    cleanAds();
+    var observer = new MutationObserver(cleanAds);
+    observer.observe(document.documentElement || document.body, {
+      childList: true,
+      subtree: true,
+    });
+
+  } catch(e) {}
+})();
+"#;
+
 // ── Tauri app entry point ─────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .on_page_load(|webview, payload| {
+            use tauri::webview::PageLoadEvent;
+            if payload.event() == PageLoadEvent::Finished {
+                let _ = webview.eval(AD_BLOCK_SCRIPT);
+            }
+        })
         .manage(StartupState {
             snapshot: Mutex::new(StartupDiagnostics::default()),
         })

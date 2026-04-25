@@ -140,6 +140,7 @@ export function usePlayerState(props: Props) {
     previewVideoRef: hlsEngine.previewVideoRef,
     previewCanvasRef: hlsEngine.previewCanvasRef,
     embedLoadedRef: sourceManager.embedLoadedRef,
+    onEmbedLoaded: sourceManager.onEmbedLoaded,
     progressBarRef: controls.progressBarRef,
     progressBarWidthRef: controls.progressBarWidthRef,
     fillRef: hlsEngine.fillRef,

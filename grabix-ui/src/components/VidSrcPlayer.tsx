@@ -139,7 +139,7 @@ export default function VidSrcPlayer(rawProps: ExtendedProps) {
 
       {/* Video / Iframe */}
       {p.activeSource && p.isEmbedEngine && (
-        <iframe key={`${p.activeSource.id}-${p.reloadKey}`} src={p.resolvedEmbedUrl || p.activeSource.url} allowFullScreen allow="autoplay; fullscreen; picture-in-picture; encrypted-media" referrerPolicy="unsafe-url" title={`${title} - ${p.activeSource.provider}`} onLoad={() => { p.embedLoadedRef.current = true; }} />
+        <iframe key={`${p.activeSource.id}-${p.reloadKey}`} src={p.resolvedEmbedUrl || p.activeSource.url} allowFullScreen allow="autoplay; fullscreen; picture-in-picture; encrypted-media" referrerPolicy="unsafe-url" title={`${title} - ${p.activeSource.provider}`} onLoad={() => { p.onEmbedLoaded?.(); }} />
       )}
       {p.activeSource && p.isDirectEngine && (
         <video key={`${p.activeSource.id}-${p.reloadKey}`} ref={p.videoRef} crossOrigin="anonymous" playsInline preload="auto" poster={props.poster} onClick={(e) => { e.stopPropagation(); p.setShowSubtitlePanel(false); p.setSettingsOpen(false); p.togglePlayback(); }} />

@@ -112,13 +112,15 @@ export function useSourceManager({
     embedLoadedRef.current = false;
     if (!activeSource) return;
     if (activeSource.kind === "embed") {
+      // Fallback: if the iframe onLoad never fires (e.g. blocked by browser),
+      // clear the spinner after 8 seconds so the user isn't stuck forever.
       const t = window.setTimeout(() => {
         if (!embedLoadedRef.current) {
           embedLoadedRef.current = true;
           setFallbackNotice("Stream is taking a while. Use the server picker to switch if needed.");
           setIsLoading(false);
         }
-      }, 45_000);
+      }, 8_000);
       return () => window.clearTimeout(t);
     }
   }, [activeSource]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -384,9 +386,20 @@ export function useSourceManager({
     return activeSource?.label ?? "Auto";
   })();
 
+  // Called from the iframe's onLoad event — clears the GRABIX loading spinner
+  // immediately when the embed page finishes loading (instead of waiting 8s).
+  const onEmbedLoaded = useCallback(() => {
+    if (!embedLoadedRef.current) {
+      embedLoadedRef.current = true;
+      setIsLoading(false);
+      setStatusText("");
+    }
+  }, [setIsLoading, setStatusText]);
+
   return {
     API,
     embedLoadedRef,
+    onEmbedLoaded,
     baseSources, allSources, activeSource, activeSubtitles, activeIndex, setActiveIndex,
     activeEpisode, activeSearchTitle, activeSubtitleText,
     activeSourceOptionId, setActiveSourceOptionId,
