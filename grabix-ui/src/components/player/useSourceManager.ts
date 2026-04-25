@@ -101,7 +101,15 @@ export function useSourceManager({
   useEffect(() => {
     setIsLoading(true); setIsPlaying(false); setErrorText("");
     setStatusText(activeSource ? `Loading ${activeSource.provider}` : "No source");
-    setResolvedEmbedUrl(""); setResolvedPlaybackUrl("");
+    // FIX: For embed sources, seed resolvedEmbedUrl with the raw URL immediately
+    // instead of "". This prevents the iframe from rendering with an empty src
+    // and then re-navigating when resolution completes (which caused black screens).
+    if (activeSource?.kind === "embed") {
+      setResolvedEmbedUrl(activeSource.url);
+    } else {
+      setResolvedEmbedUrl("");
+    }
+    setResolvedPlaybackUrl("");
     embedLoadedRef.current = false;
     if (!activeSource) return;
     if (activeSource.kind === "embed") {
@@ -121,8 +129,12 @@ export function useSourceManager({
     if (!activeSource || activeSource.kind !== "embed") return;
     let canceled = false;
     resolveEmbedUrl(API, activeSource.url)
-      .then((url) => { if (!canceled) setResolvedEmbedUrl(url || activeSource.url); })
-      .catch(() => { if (!canceled) setResolvedEmbedUrl(activeSource.url); });
+      .then((url) => {
+        // Only update if resolution returned a URL that differs from the raw one.
+        // Avoids a second unnecessary iframe navigation.
+        if (!canceled && url && url !== activeSource.url) setResolvedEmbedUrl(url);
+      })
+      .catch(() => { /* already set to activeSource.url in the setup effect */ });
     return () => { canceled = true; };
   }, [API, activeSource]);
 
