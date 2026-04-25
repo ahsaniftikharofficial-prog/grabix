@@ -183,7 +183,7 @@ export function useSourceManager({
     const cached = readPlaybackCache<{ url: string; quality?: string; format?: string }>(cacheKey);
     if (cached?.url) return cached;
     const ctrl = new AbortController();
-    const timer = window.setTimeout(() => ctrl.abort(), 25000);
+    const timer = window.setTimeout(() => ctrl.abort(), 8000);
     const res = await fetch(`${API}/extract-stream?url=${encodeURIComponent(resolved)}`, { signal: ctrl.signal });
     window.clearTimeout(timer);
     if (!res.ok) throw new Error(`Server returned ${res.status}`);
@@ -229,11 +229,13 @@ export function useSourceManager({
     return () => { cancelled = true; };
   }, [baseSources, prepareInternalSource]);
 
-  // ── Auto-prepare for MovieBox / canExtract embed sources ─────────────────────
+  // ── Auto-extract direct stream for ALL embed sources (hybrid model) ──────────
+  // Flow: iframe loads immediately → backend fast-extracts m3u8 in background
+  //       → if found, silently switch to our HLS engine (full volume/controls)
+  //       → if not found within timeout, stay on iframe — user never waits
   useEffect(() => {
     if (!activeSource || activeSource.kind !== "embed") return;
     const prov = activeSource.provider.toLowerCase();
-    if (!prov.includes("moviebox") && !activeSource.canExtract) return;
     const sourceKey = activeSource.externalUrl || activeSource.url;
     if (extractedSourcesRef.current.some(s => s.externalUrl === sourceKey)) return;
     let cancelled = false;
@@ -244,7 +246,7 @@ export function useSourceManager({
         const extracted: StreamSource = {
           id: `auto-extracted-${Date.now()}`, label: `${activeSource.label} Direct`,
           provider: activeSource.provider, kind: inferStreamKind(data.url), url: data.url,
-          quality: data.quality ?? "Auto", description: "Auto-prepared direct stream",
+          quality: data.quality ?? "Auto", description: "Auto-extracted — full player controls active",
           externalUrl: sourceKey, canExtract: false,
           subtitles: activeSource.subtitles, language: activeSource.language,
         };
@@ -252,9 +254,9 @@ export function useSourceManager({
         setExtractedSources([...extractedSourcesRef.current]);
         setActiveIndex(baseSources.length + extractedSourcesRef.current.length - 1);
         setFallbackNotice(prov.includes("moviebox")
-          ? "Prepared an internal MovieBox stream for reliable playback."
-          : `Prepared an internal ${activeSource.provider} stream to bypass iframe restrictions.`);
-      } catch { /* silent */ }
+          ? "Switched to direct MovieBox stream — full player controls active."
+          : `Switched to direct ${activeSource.provider} stream — full player controls active.`);
+      } catch { /* silent — iframe stays active if extraction fails */ }
     };
     void prepare();
     return () => { cancelled = true; };
