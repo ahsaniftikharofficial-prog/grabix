@@ -1,14 +1,53 @@
 // VidSrcPlayer.tsx — JSX-only root. All logic in player/usePlayerState.ts.
+import { useEffect, useState } from "react";
 import type { Props } from "./player/types";
 import { usePlayerState } from "./player/usePlayerState";
 import { formatTime } from "./player/helpers";
 import SubtitlePanel from "./SubtitlePanel";
 import { IconAlert, IconArrowLeft, IconDownload, IconExpand, IconInfo, IconList, IconPause, IconPlay, IconSettings, IconSubtitle } from "./Icons";
 import "./player/helpers"; // side-effect: injects CSS once
+import { SkipButton } from "./player/SkipButton";
+import { NextEpisodeCountdown } from "./player/NextEpisodeCountdown";
+import { SpeedSelector } from "./player/SpeedSelector";
 
-export default function VidSrcPlayer(props: Props) {
+// Extended props — extra Phase 4 additions on top of the base Props type
+type ExtendedProps = Props & {
+  /** Seconds at which Skip Intro button appears (default: disabled if 0) */
+  introShowAt?: number;
+  /** Seconds to seek to when Skip Intro is clicked */
+  introSkipTo?: number;
+  /** Seconds at which Skip Recap button appears (default: disabled if 0) */
+  recapShowAt?: number;
+  /** Seconds to seek to when Skip Recap is clicked */
+  recapSkipTo?: number;
+  /** Called when auto-play next episode countdown completes or user clicks Play Next */
+  onNextEpisode?: () => void;
+  /** Label for the next episode in the countdown widget */
+  nextEpisodeLabel?: string;
+  /** Storage key for persisting skip points (usually show ID or movie ID) */
+  skipStorageKey?: string;
+};
+
+export default function VidSrcPlayer(rawProps: ExtendedProps) {
+  const {
+    introShowAt = 0, introSkipTo = 0,
+    recapShowAt = 0, recapSkipTo = 0,
+    onNextEpisode, nextEpisodeLabel = "Next Episode",
+    skipStorageKey,
+  } = rawProps;
+  const props = rawProps as Props;
   const p = usePlayerState(props);
   const { title, episodeLabel = "Episode", episodeOptions, sourceOptions, onClose, onDownload, onDownloadSource, disableSubtitleSearch, mediaType } = props;
+
+  // Reactive currentTime for SkipButton + NextEpisodeCountdown (direct engine only)
+  const [currentTime, setCurrentTime] = useState(0);
+  useEffect(() => {
+    const video = p.videoRef?.current;
+    if (!video) return;
+    const onTime = () => setCurrentTime(video.currentTime);
+    video.addEventListener("timeupdate", onTime);
+    return () => video.removeEventListener("timeupdate", onTime);
+  });
 
   return (
     <div ref={p.rootRef} className={`gx-player${p.showChrome ? " controls-visible" : ""}`} onMouseMove={p.showControls} onClick={p.handleShellClick}>
@@ -75,6 +114,26 @@ export default function VidSrcPlayer(props: Props) {
         <IconArrowLeft size={18} color="currentColor" />
       </button>
 
+      {/* ── Skip Intro / Recap buttons (direct engine only) ── */}
+      {p.isDirectEngine && introShowAt > 0 && (
+        <SkipButton kind="intro" currentTime={currentTime} duration={p.duration}
+          showAt={introShowAt} skipTo={introSkipTo}
+          onSkip={(to) => { if (p.videoRef?.current) p.videoRef.current.currentTime = to; }}
+          storageKey={skipStorageKey} />
+      )}
+      {p.isDirectEngine && recapShowAt > 0 && (
+        <SkipButton kind="recap" currentTime={currentTime} duration={p.duration}
+          showAt={recapShowAt} skipTo={recapSkipTo}
+          onSkip={(to) => { if (p.videoRef?.current) p.videoRef.current.currentTime = to; }}
+          storageKey={skipStorageKey} />
+      )}
+
+      {/* ── Next Episode Countdown (TV, direct engine only) ── */}
+      {p.isDirectEngine && onNextEpisode && (
+        <NextEpisodeCountdown currentTime={currentTime} duration={p.duration}
+          nextEpisodeLabel={nextEpisodeLabel} onNext={onNextEpisode} />
+      )}
+
       {/* ── Controls Overlay ── */}
       <div className={`gx-controls${p.showChrome ? " visible" : ""}`}>
         <div className="gx-bottom">
@@ -137,6 +196,9 @@ export default function VidSrcPlayer(props: Props) {
             {/* Right */}
             <div className="gx-ctrl-right">
               <button className={`gx-btn${p.subtitlesEnabled ? "" : " dim"}`} title={p.subtitlesEnabled ? "CC On" : "CC Off"} onClick={p.toggleSubtitles}><IconSubtitle size={20} color="currentColor" /></button>
+
+              {/* Speed pill — always-visible shortcut; full list also in Settings › Speed */}
+              <SpeedSelector value={p.playbackSpeed} onChange={p.setPlaybackSpeed} enabled={p.isDirectEngine} />
 
               {episodeOptions && episodeOptions.length > 0 && (
                 <div className="gx-ep-wrap">

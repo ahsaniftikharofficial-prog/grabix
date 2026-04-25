@@ -8,6 +8,7 @@ import { useFavorites } from "../context/FavoritesContext";
 import { useContentFilter } from "../context/ContentFilterContext";
 import { filterAdultContent } from "../lib/contentFilter";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
+import { TrailerBackground } from "../components/hero/TrailerBackground";
 import {
   TMDB_BACKDROP_BASE as IMG_LG,
   TMDB_IMAGE_BASE as IMG_BASE,
@@ -105,10 +106,13 @@ function HeroBanner({ movies, idx, onSelect, onPlay, onPrev, onNext }: {
 
   return (
     <div style={{ position: "relative", height: 400, overflow: "hidden", flexShrink: 0 }}>
+      {/* Static backdrop — always rendered as fallback */}
       {backdrop && (
         <img src={backdrop} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
       )}
-      <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to right, rgba(0,0,0,0.82) 30%, rgba(0,0,0,0.2) 80%), linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 60%)" }} />
+      {/* Muted YouTube trailer — fades in over backdrop when ready */}
+      <TrailerBackground mediaType="movie" tmdbId={m.id} active={true} />
+      <div style={{ position: "absolute", inset: 0, zIndex: 1, background: "linear-gradient(to right, rgba(0,0,0,0.82) 30%, rgba(0,0,0,0.2) 80%), linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 60%)" }} />
       <div style={{ position: "absolute", bottom: 40, left: 28, maxWidth: 480, zIndex: 2 }}>
         <div style={{ fontSize: 26, fontWeight: 800, color: "#fff", marginBottom: 8, lineHeight: 1.2, textShadow: "0 2px 8px rgba(0,0,0,0.6)" }}>{m.title}</div>
         <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
@@ -143,7 +147,7 @@ function HeroBanner({ movies, idx, onSelect, onPlay, onPrev, onNext }: {
       <button onClick={onNext} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.5)", border: "none", borderRadius: "50%", width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#fff", zIndex: 3 }}>
         <IconChevronRight size={18} />
       </button>
-      <div style={{ position: "absolute", bottom: 12, right: 20, display: "flex", gap: 6 }}>
+      <div style={{ position: "absolute", bottom: 12, right: 20, display: "flex", gap: 6, zIndex: 3 }}>
         {movies.map((_, i) => (
           <div key={i} style={{ width: i === idx ? 20 : 6, height: 6, borderRadius: 3, background: i === idx ? "var(--accent)" : "rgba(255,255,255,0.4)", transition: "width 0.3s" }} />
         ))}

@@ -8,6 +8,7 @@ import { useFavorites } from "../context/FavoritesContext";
 import { useContentFilter } from "../context/ContentFilterContext";
 import { filterAdultContent } from "../lib/contentFilter";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
+import { TrailerBackground } from "../components/hero/TrailerBackground";
 import {
   TMDB_BACKDROP_BASE as IMG_LG,
   TMDB_IMAGE_BASE as IMG_BASE,
@@ -122,8 +123,11 @@ function HeroBanner({ shows, idx, onSelect, onPlay, onPrev, onNext }: {
 
   return (
     <div style={{ position: "relative", height: 400, overflow: "hidden", flexShrink: 0 }}>
+      {/* Static backdrop — always rendered as fallback */}
       {backdrop && <img src={backdrop} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />}
-      <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to right, rgba(0,0,0,0.82) 30%, rgba(0,0,0,0.2) 80%), linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 60%)" }} />
+      {/* Muted YouTube trailer — fades in over backdrop when ready */}
+      <TrailerBackground mediaType="tv" tmdbId={s.id} active={true} />
+      <div style={{ position: "absolute", inset: 0, zIndex: 1, background: "linear-gradient(to right, rgba(0,0,0,0.82) 30%, rgba(0,0,0,0.2) 80%), linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 60%)" }} />
       <div style={{ position: "absolute", bottom: 40, left: 28, maxWidth: 480, zIndex: 2 }}>
         <div style={{ fontSize: 26, fontWeight: 800, color: "#fff", marginBottom: 8, lineHeight: 1.2, textShadow: "0 2px 8px rgba(0,0,0,0.6)" }}>{s.name}</div>
         <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
@@ -138,7 +142,7 @@ function HeroBanner({ shows, idx, onSelect, onPlay, onPrev, onNext }: {
       </div>
       <button onClick={onPrev} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.5)", border: "none", borderRadius: "50%", width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#fff", zIndex: 3 }}><IconChevronLeft size={18} /></button>
       <button onClick={onNext} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.5)", border: "none", borderRadius: "50%", width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#fff", zIndex: 3 }}><IconChevronRight size={18} /></button>
-      <div style={{ position: "absolute", bottom: 12, right: 20, display: "flex", gap: 6 }}>
+      <div style={{ position: "absolute", bottom: 12, right: 20, display: "flex", gap: 6, zIndex: 3 }}>
         {shows.map((_, i) => (
           <div key={i} style={{ width: i === idx ? 20 : 6, height: 6, borderRadius: 3, background: i === idx ? "var(--accent)" : "rgba(255,255,255,0.4)", transition: "width 0.3s" }} />
         ))}
@@ -461,6 +465,9 @@ function ShowDetailModal({ show, onClose, onPlay }: {
   const [downloadQuality, setDownloadQuality] = useState("");
   const [downloadLoading, setDownloadLoading] = useState(false);
   const [downloadError, setDownloadError]     = useState("");
+  // Bulk season download state
+  const [bulkDownloading, setBulkDownloading] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState({ done: 0, total: 0 });
 
   const d = full ?? show;
   const poster   = IMG(d.poster_path);
@@ -540,6 +547,30 @@ function ShowDetailModal({ show, onClose, onPlay }: {
     finally { setDownloadLoading(false); }
   };
 
+  // Queues every episode in the current season one by one via the existing download system
+  const handleBulkSeasonDownload = async (seasonNumber: number) => {
+    const seasonMeta = seasons.find(s => s.season_number === seasonNumber);
+    const episodeCount = seasonMeta?.episode_count ?? 0;
+    if (episodeCount === 0) return;
+    setBulkDownloading(true);
+    setBulkProgress({ done: 0, total: episodeCount });
+    for (let ep = 1; ep <= episodeCount; ep++) {
+      try {
+        const sources = await fetchMovieBoxSources({ title: d.name, mediaType: "tv", season: seasonNumber, episode: ep }).catch(() => []);
+        const opts = await resolveSourceDownloadOptions(sources).catch(() => []);
+        const best = opts[0];
+        if (best) {
+          await queueVideoDownload({
+            url: best.url,
+            title: `${d.name} — S${String(seasonNumber).padStart(2, "0")}E${String(ep).padStart(2, "0")} — ${best.label}`,
+          });
+        }
+      } catch { /* skip failed episodes silently */ }
+      setBulkProgress({ done: ep, total: episodeCount });
+    }
+    setBulkDownloading(false);
+  };
+
   const DETAIL_TABS = [
     { id: "overview", label: "Overview" },
     { id: "episodes", label: `Episodes${seasons.length > 0 ? ` (${seasons.length}S)` : ""}` },
@@ -581,6 +612,18 @@ function ShowDetailModal({ show, onClose, onPlay }: {
             <button className="btn btn-primary" style={{ gap: 7, flex: "1 1 120px", justifyContent: "center" }} onClick={() => handlePlayEpisode(1, 1)}><IconPlay size={14} /> Play S1E1</button>
             {trailerKey && <button className="btn btn-ghost" style={{ gap: 7, flex: "1 1 90px", justifyContent: "center" }} onClick={() => setShowTrailer(true)}>▶ Trailer</button>}
             <button className="btn btn-ghost" style={{ gap: 7, flex: "1 1 90px", justifyContent: "center" }} onClick={openDownload}><IconDownload size={14} /> Download</button>
+            <button
+              className="btn btn-ghost"
+              style={{ gap: 7, flex: "1 1 120px", justifyContent: "center", opacity: bulkDownloading ? 0.6 : 1 }}
+              disabled={bulkDownloading}
+              onClick={() => void handleBulkSeasonDownload(selectedSeason || 1)}
+              title={`Queue all episodes of Season ${selectedSeason || 1} for download`}
+            >
+              <IconDownload size={14} />
+              {bulkDownloading
+                ? `${bulkProgress.done}/${bulkProgress.total} queued…`
+                : `Season ${selectedSeason || 1} ↓`}
+            </button>
             <button className="btn btn-ghost" style={{ gap: 7, flex: "1 1 70px", justifyContent: "center", color: fav ? "var(--text-danger)" : undefined }}
               onClick={() => toggle({ id: `tv-${show.id}`, title: d.name, poster, type: "tv", tmdbId: show.id })}>
               <IconHeart size={14} color={fav ? "var(--text-danger)" : "currentColor"} filled={fav} />

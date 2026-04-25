@@ -8,6 +8,7 @@ import { ThemeProvider } from "./context/ThemeContext";
 import { FavoritesProvider } from "./context/FavoritesContext";
 import { ContentFilterProvider } from "./context/ContentFilterContext";
 import { RuntimeHealthProvider } from "./context/RuntimeHealthContext";
+import { MiniPlayerProvider } from "./hooks/useMiniPlayer";
 import Sidebar, { type Page } from "./components/Sidebar";
 import {
   BACKEND_API,
@@ -306,7 +307,9 @@ export default function App() {
     <ThemeProvider>
       <ContentFilterProvider>
         <FavoritesProvider>
-          <Inner />
+          <MiniPlayerProvider>
+            <Inner />
+          </MiniPlayerProvider>
         </FavoritesProvider>
       </ContentFilterProvider>
     </ThemeProvider>
