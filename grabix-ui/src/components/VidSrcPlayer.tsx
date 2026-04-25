@@ -9,6 +9,88 @@ import "./player/helpers"; // side-effect: injects CSS once
 import { SkipButton } from "./player/SkipButton";
 import { NextEpisodeCountdown } from "./player/NextEpisodeCountdown";
 import { SpeedSelector } from "./player/SpeedSelector";
+import type { StreamSource } from "../lib/streamProviders";
+
+// ── Floating server switcher — always visible, works with iframes ─────────────
+function ServerSwitcher({
+  sources,
+  activeIndex,
+  onSwitch,
+}: {
+  sources: StreamSource[];
+  activeIndex: number;
+  onSwitch: (i: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (sources.length < 2) return null;
+
+  const active = sources[activeIndex];
+
+  return (
+    <div
+      style={{
+        position: "absolute", top: 12, right: 12, zIndex: 200,
+        display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6,
+      }}
+      onClick={e => e.stopPropagation()}
+    >
+      {/* Toggle button — always visible */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: "flex", alignItems: "center", gap: 6,
+          padding: "5px 10px", borderRadius: 20,
+          background: "rgba(0,0,0,0.72)", border: "1px solid rgba(255,255,255,0.18)",
+          color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer",
+          backdropFilter: "blur(6px)", letterSpacing: "0.03em",
+          transition: "background 0.15s",
+        }}
+        title="Switch Server"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M5 12H19M5 12l4-4M5 12l4 4M19 12l-4-4M19 12l-4 4" />
+        </svg>
+        {active?.label ?? "Server"}
+        <span style={{ opacity: 0.5, fontSize: 10 }}>{open ? "▲" : "▼"}</span>
+      </button>
+
+      {/* Dropdown */}
+      {open && (
+        <div
+          style={{
+            background: "rgba(18,18,18,0.96)", border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: 10, overflow: "hidden", minWidth: 180,
+            boxShadow: "0 12px 40px rgba(0,0,0,0.8)",
+            backdropFilter: "blur(12px)",
+          }}
+        >
+          <div style={{ padding: "8px 12px 6px", fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.4)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+            Choose Server
+          </div>
+          {sources.map((src, i) => (
+            <div
+              key={src.id}
+              onClick={() => { onSwitch(i); setOpen(false); }}
+              style={{
+                padding: "9px 14px", cursor: "pointer", fontSize: 12,
+                display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+                background: i === activeIndex ? "rgba(255,255,255,0.1)" : "transparent",
+                color: i === activeIndex ? "#fff" : "rgba(255,255,255,0.7)",
+                borderLeft: i === activeIndex ? "3px solid var(--accent, #e50914)" : "3px solid transparent",
+                transition: "background 0.1s",
+              }}
+              onMouseEnter={e => { if (i !== activeIndex) (e.currentTarget as HTMLDivElement).style.background = "rgba(255,255,255,0.06)"; }}
+              onMouseLeave={e => { if (i !== activeIndex) (e.currentTarget as HTMLDivElement).style.background = "transparent"; }}
+            >
+              <span style={{ fontWeight: i === activeIndex ? 700 : 400 }}>{src.label}</span>
+              <span style={{ fontSize: 10, color: "rgba(255,255,255,0.35)" }}>{src.provider}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Extended props — extra Phase 4 additions on top of the base Props type
 type ExtendedProps = Props & {
@@ -84,6 +166,13 @@ export default function VidSrcPlayer(rawProps: ExtendedProps) {
       {p.isLoading && (
         <div className="gx-spinner-wrap"><div className="gx-spinner-panel"><div className="gx-spinner" /><div className="gx-spinner-label">{p.statusText || "Loading"}</div></div></div>
       )}
+
+      {/* ── Always-visible floating server switcher ── */}
+      <ServerSwitcher
+        sources={p.allSources}
+        activeIndex={p.activeIndex}
+        onSwitch={(i) => { p.handleSourceSwitch(i); }}
+      />
 
       {/* Error / No-source */}
       {p.errorText && !p.hasFallback && !p.isLoading && (

@@ -24,7 +24,8 @@ interface Coords {
   width: number;
 }
 
-const LEAVE_DELAY_MS = 120; // ms to wait before closing — gives cursor time to reach portal
+const ENTER_DELAY_MS = 260; // ms to wait before opening — prevents flicker on fast mouse sweeps
+const LEAVE_DELAY_MS = 160; // ms to wait before closing — gives cursor time to reach portal
 
 export function HoverCard({
   title,
@@ -40,23 +41,32 @@ export function HoverCard({
   const [coords, setCoords]   = useState<Coords>({ top: 0, left: 0, width: 0 });
   const wrapRef               = useRef<HTMLDivElement>(null);
   const leaveTimer            = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const enterTimer            = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearLeave = () => {
     if (leaveTimer.current) clearTimeout(leaveTimer.current);
   };
 
+  const clearEnter = () => {
+    if (enterTimer.current) clearTimeout(enterTimer.current);
+  };
+
   const scheduleClose = useCallback(() => {
+    clearEnter();
     clearLeave();
     leaveTimer.current = setTimeout(() => setOpen(false), LEAVE_DELAY_MS);
   }, []);
 
   const handleWrapEnter = () => {
     clearLeave();
-    if (wrapRef.current) {
-      const r = wrapRef.current.getBoundingClientRect();
-      setCoords({ top: r.top, left: r.left, width: r.width });
-    }
-    setOpen(true);
+    clearEnter();
+    enterTimer.current = setTimeout(() => {
+      if (wrapRef.current) {
+        const r = wrapRef.current.getBoundingClientRect();
+        setCoords({ top: r.top, left: r.left, width: r.width });
+      }
+      setOpen(true);
+    }, ENTER_DELAY_MS);
   };
 
   // Compute where to show the portal so it stays inside the viewport.

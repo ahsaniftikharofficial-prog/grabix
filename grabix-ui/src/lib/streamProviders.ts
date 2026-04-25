@@ -231,6 +231,40 @@ const EMBED_PROVIDERS: ProviderDef[] = [
     tvIdType: "tmdb",
     canExtract: false,
   },
+  // ── Low-ad / high-reliability servers ────────────────────────────────────
+  {
+    id: "autoembed",
+    label: "AutoEmbed ✨",
+    provider: "AutoEmbed",
+    movie: "https://player.autoembed.cc/embed/movie/{id}",
+    tv: "https://player.autoembed.cc/embed/tv/{id}/1/1",
+    episode: "https://player.autoembed.cc/embed/tv/{id}/{season}/{episode}",
+    movieIdType: "tmdb",
+    tvIdType: "tmdb",
+    canExtract: false,
+  },
+  {
+    id: "embedsu",
+    label: "Embed.su ✨",
+    provider: "Embed.su",
+    movie: "https://embed.su/embed/movie/{id}",
+    tv: "https://embed.su/embed/tv/{id}/1/1",
+    episode: "https://embed.su/embed/tv/{id}/{season}/{episode}",
+    movieIdType: "tmdb",
+    tvIdType: "tmdb",
+    canExtract: false,
+  },
+  {
+    id: "vidbinge",
+    label: "VidBinge ✨",
+    provider: "VidBinge",
+    movie: "https://vidbinge.dev/embed/movie/{id}",
+    tv: "https://vidbinge.dev/embed/tv/{id}/1/1",
+    episode: "https://vidbinge.dev/embed/tv/{id}/{season}/{episode}",
+    movieIdType: "tmdb",
+    tvIdType: "tmdb",
+    canExtract: false,
+  },
 ];
 
 function makeSource(source: StreamSource): StreamSource {
