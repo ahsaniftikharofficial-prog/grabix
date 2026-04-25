@@ -8,6 +8,7 @@ import { MOVIE_MOODS, type MoodConfig } from "../lib/moodKeywords";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import { PageEmptyState, PageErrorState } from "../components/PageStates";
 import { useFavorites } from "../context/FavoritesContext";
+import { RatingButtons } from "../components/shared/RatingButtons";
 import { useContentFilter } from "../context/ContentFilterContext";
 import { filterAdultContent } from "../lib/contentFilter";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
@@ -628,7 +629,7 @@ function MovieDetailModal({ movie, onClose, onPlay }: {
             <button className="btn-icon" style={{ alignSelf: "flex-start", marginTop: backdrop ? 65 : 0, flexShrink: 0 }} onClick={onClose}><IconX size={15} /></button>
           </div>
           {d.overview && <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.75, margin: "16px 0" }}>{d.overview}</div>}
-          <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
             <button className="btn btn-primary" style={{ gap: 7, flex: "1 1 120px", justifyContent: "center", minWidth: 0 }} onClick={handlePlay} disabled={loadingPlay}>
               <IconPlay size={14} /> {loadingPlay ? "Loading…" : "Play"}
             </button>
@@ -639,6 +640,9 @@ function MovieDetailModal({ movie, onClose, onPlay }: {
               <IconHeart size={14} color={fav ? "var(--text-danger)" : "currentColor"} filled={fav} />
               {fav ? "Saved" : "Save"}
             </button>
+          </div>
+          <div style={{ marginBottom: 18 }}>
+            <RatingButtons id={`movie-${movie.id}`} kind="movie" title={d.title} poster={poster} />
           </div>
           {streamProviders.length > 0 && (
             <div style={{ marginBottom: 20 }}>

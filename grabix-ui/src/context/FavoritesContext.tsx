@@ -31,6 +31,7 @@ import {
   type ReactNode,
 } from "react";
 import { readJsonStorage, versionedStorageKey, writeJsonStorage } from "../lib/persistentState";
+import { useProfile } from "./ProfileContext";
 
 export interface FavItem {
   id:                  string;
@@ -55,21 +56,29 @@ interface FavCtx {
   remove:    (id: string) => void;
 }
 
-const STORAGE_KEY      = versionedStorageKey("grabix-favorites", "v2");
+const BASE_KEY         = versionedStorageKey("grabix-favorites", "v2");
 const FavoritesContext = createContext<FavCtx | null>(null);
 
-function loadFavorites(): FavItem[] {
-  const value = readJsonStorage<unknown>("local", STORAGE_KEY, []);
+function loadFavorites(storageKey: string): FavItem[] {
+  const value = readJsonStorage<unknown>("local", storageKey, []);
   return Array.isArray(value) ? (value as FavItem[]) : [];
 }
 
 export function FavoritesProvider({ children }: { children: ReactNode }) {
-  const [favorites, setFavorites] = useState<FavItem[]>(loadFavorites);
+  const { storageKey } = useProfile();
+  const key = storageKey(BASE_KEY);
+
+  const [favorites, setFavorites] = useState<FavItem[]>(() => loadFavorites(key));
+
+  // Reload when profile switches (key changes)
+  useEffect(() => {
+    setFavorites(loadFavorites(key));
+  }, [key]);
 
   // Persist to localStorage whenever the list changes.
   useEffect(() => {
-    writeJsonStorage("local", STORAGE_KEY, favorites);
-  }, [favorites]);
+    writeJsonStorage("local", key, favorites);
+  }, [key, favorites]);
 
   // ── OPTIMISED: O(1) id lookup via Set ────────────────────────────────────
   const favoriteIdSet = useMemo(

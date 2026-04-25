@@ -8,6 +8,7 @@ import { ThemeProvider } from "./context/ThemeContext";
 import { FavoritesProvider } from "./context/FavoritesContext";
 import { ContentFilterProvider } from "./context/ContentFilterContext";
 import { RuntimeHealthProvider } from "./context/RuntimeHealthContext";
+import { ProfileProvider } from "./context/ProfileContext";
 import { MiniPlayerProvider } from "./hooks/useMiniPlayer";
 import Sidebar, { type Page } from "./components/Sidebar";
 import {
@@ -44,6 +45,7 @@ const NewAndHotPage       = lazy(() => import("./pages/NewAndHotPage"));
 const TopImdbPage         = lazy(() => import("./pages/TopImdbPage"));
 const ContinueWatchingPage = lazy(() => import("./pages/ContinueWatchingPage"));
 const RecentlyAddedPage   = lazy(() => import("./pages/RecentlyAddedPage"));
+const WatchHistoryPage    = lazy(() => import("./pages/WatchHistoryPage"));
 
 function Inner() {
   const offlineState = useOfflineDetection(BACKEND_API);
@@ -244,6 +246,7 @@ function Inner() {
     topimdb:          <ErrorBoundary section="Top IMDb"><TopImdbPage /></ErrorBoundary>,
     continuewatching: <ErrorBoundary section="Continue Watching"><ContinueWatchingPage /></ErrorBoundary>,
     recentlyadded:    <ErrorBoundary section="Recently Added"><RecentlyAddedPage /></ErrorBoundary>,
+    watchhistory:     <ErrorBoundary section="Watch History"><WatchHistoryPage /></ErrorBoundary>,
     genrepage: genrePageParams
       ? <ErrorBoundary section="Genre"><GenrePage
           mediaType={genrePageParams.mediaType}
@@ -328,11 +331,13 @@ export default function App() {
   return (
     <ThemeProvider>
       <ContentFilterProvider>
-        <FavoritesProvider>
-          <MiniPlayerProvider>
-            <Inner />
-          </MiniPlayerProvider>
-        </FavoritesProvider>
+        <ProfileProvider>
+          <FavoritesProvider>
+            <MiniPlayerProvider>
+              <Inner />
+            </MiniPlayerProvider>
+          </FavoritesProvider>
+        </ProfileProvider>
       </ContentFilterProvider>
     </ThemeProvider>
   );

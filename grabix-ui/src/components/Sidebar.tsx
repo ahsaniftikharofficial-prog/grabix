@@ -1,6 +1,8 @@
 import { useTheme } from "../context/ThemeContext";
 import { IconBrowse, IconConvert, IconDownload, IconLibrary, IconSettings, IconSun, IconMoon, IconHeart } from "./Icons";
 import type { RuntimeHealthPayload, RuntimeState } from "../lib/api";
+import { ProfileSwitcher } from "./profile/ProfileSwitcher";
+import { NotificationBell } from "./shared/NotificationBell";
 
 const IconFilm = ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -66,7 +68,8 @@ const IconClock = ({ size = 16, color = "currentColor" }: { size?: number; color
   </svg>
 );
 
- "downloader" | "converter" | "library" | "manga" | "movies" | "moviebox" | "series" | "favorites" | "ratings" | "settings" | "newandhot" | "topimdb" | "continuewatching" | "recentlyadded" | "genrepage";
+export type Page =
+  "downloader" | "converter" | "library" | "manga" | "movies" | "moviebox" | "series" | "favorites" | "ratings" | "settings" | "newandhot" | "topimdb" | "continuewatching" | "recentlyadded" | "genrepage" | "watchhistory";
 
 interface Props {
   page: Page;
@@ -98,6 +101,7 @@ const GROUPS = [
       { id: "topimdb"          as Page, label: "Top IMDb",          Icon: IconStar },
       { id: "continuewatching" as Page, label: "Continue Watching", Icon: IconPlay },
       { id: "recentlyadded"    as Page, label: "Recently Added",    Icon: IconClock },
+      { id: "watchhistory"     as Page, label: "Watch History",     Icon: IconPlay },
     ],
   },
   {
@@ -151,6 +155,7 @@ export default function Sidebar({ page, setPage, activeDownloads, runtimeState }
       </nav>
 
       <div style={{ padding: "10px 8px", borderTop: "1px solid var(--border)" }}>
+        <NotificationBell />
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", marginBottom: 4 }}>
           <span
             className={`status-dot ${
@@ -169,6 +174,7 @@ export default function Sidebar({ page, setPage, activeDownloads, runtimeState }
           {theme === "dark" ? <IconSun size={16} /> : <IconMoon size={16} />}
           {theme === "dark" ? "Light mode" : "Dark mode"}
         </div>
+        <ProfileSwitcher />
       </div>
     </aside>
   );

@@ -8,6 +8,7 @@ import { TV_MOODS, type MoodConfig } from "../lib/moodKeywords";
 import DownloadOptionsModal from "../components/DownloadOptionsModal";
 import { PageEmptyState, PageErrorState } from "../components/PageStates";
 import { useFavorites } from "../context/FavoritesContext";
+import { RatingButtons } from "../components/shared/RatingButtons";
 import { useContentFilter } from "../context/ContentFilterContext";
 import { filterAdultContent } from "../lib/contentFilter";
 import { queueVideoDownload, resolveSourceDownloadOptions, type DownloadQualityOption } from "../lib/downloads";
@@ -655,6 +656,9 @@ function ShowDetailModal({ show, onClose, onPlay }: {
               <IconHeart size={14} color={fav ? "var(--text-danger)" : "currentColor"} filled={fav} />
               {fav ? "Saved" : "Save"}
             </button>
+          </div>
+          <div style={{ marginBottom: 14 }}>
+            <RatingButtons id={`tv-${show.id}`} kind="tv" title={d.name} poster={poster} />
           </div>
 
           {streamProviders.length > 0 && (
