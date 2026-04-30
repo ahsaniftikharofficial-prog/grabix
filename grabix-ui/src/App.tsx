@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState, type ReactNode } from "react";
+import { Suspense, lazy, useEffect, useState, useMemo, useRef, type ReactNode } from "react";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { WatchdogBanner } from "./components/WatchdogBanner";
@@ -57,6 +57,18 @@ function Inner() {
   const [activeDownloads, setActiveDownloads] = useState(0);
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealthPayload | null>(null);
   const [startupDiagnostics, setStartupDiagnostics] = useState<StartupDiagnosticsPayload | null>(null);
+
+  // FIX (removeChild crash): stable ref for onDownloadStarting.
+  // useWatchdog returns a new notifyDownloadStarting function on every render
+  // (it is not wrapped in useCallback). If we pass it directly into the memoized
+  // pages object below, it would invalidate the memo on every render, defeating
+  // the whole point. Using a ref keeps the identity stable while always calling
+  // the latest version.
+  const onDownloadStartingRef = useRef(watchdog.notifyDownloadStarting);
+  useEffect(() => {
+    onDownloadStartingRef.current = watchdog.notifyDownloadStarting;
+  });
+  const stableOnDownloadStarting = useMemo(() => () => onDownloadStartingRef.current(), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -232,8 +244,57 @@ function Inner() {
     return () => window.clearTimeout(timeoutId);
   }, [runtimeHealth]);
 
-  const pages: Record<Page, ReactNode> = {
-    downloader: <ErrorBoundary section="Downloader"><DownloaderPage onDownloadStarting={watchdog.notifyDownloadStarting} /></ErrorBoundary>,
+  // ── FIX (removeChild crash): memoize every page node. ──────────────────────
+  //
+  // Root cause: the `pages` object used to be declared as a plain const inside
+  // Inner's render body. On every state change (health polls fire every 2.5 s,
+  // download polls every 4 s) React received BRAND-NEW JSX elements for every
+  // page. React 18's concurrent Suspense engine maintains an internal
+  // work-in-progress fiber tree. When the parent re-renders and hands it new
+  // JSX, Suspense tries to reconcile the tree while the old fibers are still
+  // mid-flight. For lazy-loaded pages this produces:
+  //
+  //   "Failed to execute 'removeChild' on 'Node': The node to be removed
+  //    is not a child of this node."
+  //
+  // Wrapping in useMemo guarantees the same JSX element references survive
+  // across re-renders unless the relevant dependency actually changes.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  const navigateToPage = (nextPage: Page, options?: { refresh?: boolean }) => {
+    setPage((current) => {
+      if (current === nextPage || options?.refresh) {
+        setPageRevision((value) => value + 1);
+      }
+      return nextPage;
+    });
+  };
+
+  // genrepage is memoized separately because it depends on genrePageParams.
+  const genrePageNode = useMemo<ReactNode>(() => {
+    if (!genrePageParams) return null;
+    const { mediaType, genreId, genreName } = genrePageParams;
+    return (
+      <ErrorBoundary section="Genre">
+        <GenrePage
+          mediaType={mediaType}
+          genreId={genreId}
+          genreName={genreName}
+          onBack={() => navigateToPage(mediaType === "movie" ? "movies" : "series")}
+        />
+      </ErrorBoundary>
+    );
+    // navigateToPage is defined in the same render scope – intentionally omitted
+    // from deps because adding it would recreate genrePageNode on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [genrePageParams]);
+
+  const pages = useMemo<Record<Page, ReactNode>>(() => ({
+    downloader: (
+      <ErrorBoundary section="Downloader">
+        <DownloaderPage onDownloadStarting={stableOnDownloadStarting} />
+      </ErrorBoundary>
+    ),
     converter:  <ErrorBoundary section="Converter"><ConverterPage /></ErrorBoundary>,
     library:    <ErrorBoundary section="Library"><LibraryPage /></ErrorBoundary>,
     manga:      <ErrorBoundary section="Manga"><MangaPage /></ErrorBoundary>,
@@ -247,15 +308,8 @@ function Inner() {
     continuewatching: <ErrorBoundary section="Continue Watching"><ContinueWatchingPage /></ErrorBoundary>,
     recentlyadded:    <ErrorBoundary section="Recently Added"><RecentlyAddedPage /></ErrorBoundary>,
     watchhistory:     <ErrorBoundary section="Watch History"><WatchHistoryPage /></ErrorBoundary>,
-    genrepage: genrePageParams
-      ? <ErrorBoundary section="Genre"><GenrePage
-          mediaType={genrePageParams.mediaType}
-          genreId={genrePageParams.genreId}
-          genreName={genrePageParams.genreName}
-          onBack={() => navigateToPage(genrePageParams.mediaType === "movie" ? "movies" : "series")}
-        /></ErrorBoundary>
-      : null,
-  };
+    genrepage: genrePageNode,
+  }), [genrePageNode, stableOnDownloadStarting]);
 
   const refreshRuntimeHealth = async () => {
     try {
@@ -268,14 +322,6 @@ function Inner() {
     }
   };
 
-  const navigateToPage = (nextPage: Page, options?: { refresh?: boolean }) => {
-    setPage((current) => {
-      if (current === nextPage || options?.refresh) {
-        setPageRevision((value) => value + 1);
-      }
-      return nextPage;
-    });
-  };
   return (
     <div style={{ display: "flex", height: "100vh", width: "100vw", overflow: "hidden" }}>
       <OfflineBanner offlineState={bootstrapping ? { isOffline: false, reason: null, since: null } : offlineState} />

@@ -52,26 +52,55 @@ export function useDownloaderQueue() {
       });
     };
 
+    // FIX (downloads stuck "Queued"): SSE onerror previously fetched once and
+    // never reconnected. Any hiccup in the packaged app — WebView2 buffering,
+    // Python startup latency, OS network quirks — would permanently kill live
+    // updates. Now we: (1) close the dead connection, (2) do one fallback REST
+    // fetch, then (3) schedule a full SSE reconnect. This loop runs indefinitely
+    // while the component is mounted, matching the resilience expected of a
+    // desktop app that may stay open for hours.
     const connectSSE = () => {
       if (!active) return;
+
+      // Close any lingering connection before opening a new one.
+      if (es) {
+        try { es.close(); } catch { /* ignore */ }
+        es = null;
+      }
+
       es = new EventSource(`${API}/downloads/stream`);
+
       es.onmessage = (e) => {
-        try { applyServerData(JSON.parse(e.data) as any[]); } catch {}
+        try { applyServerData(JSON.parse(e.data) as any[]); } catch { /* ignore malformed frames */ }
       };
+
       es.onerror = () => {
+        // Close the broken connection immediately.
+        try { es?.close(); } catch { /* ignore */ }
+        es = null;
+
+        if (!active) return;
+
+        // 1. Fetch current state right away so the UI doesn't go stale.
+        void fetch(`${API}/downloads`)
+          .then((r) => r.ok ? r.json() : null)
+          .then((data) => { if (data && active) applyServerData(data as any[]); })
+          .catch(() => undefined);
+
+        // 2. Reconnect the SSE stream after a short back-off (3 s).
+        if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(() => {
-          fetch(`${API}/downloads`)
-            .then((r) => r.ok ? r.json() : null)
-            .then((data) => { if (data) applyServerData(data as any[]); })
-            .catch(() => undefined);
+          reconnectTimer = null;
+          if (active) connectSSE();
         }, 3000);
       };
     };
 
     connectSSE();
+
     return () => {
       active = false;
-      es?.close();
+      try { es?.close(); } catch { /* ignore */ }
       if (reconnectTimer) clearTimeout(reconnectTimer);
       pollingRef.current.forEach((t) => clearInterval(t));
       pollingRef.current.clear();
@@ -83,10 +112,21 @@ export function useDownloaderQueue() {
 
   // ── Per-task polling helper ───────────────────────────────────────────────────
   function _pollTask(serverTaskId: string) {
+    // FIX (downloads stuck "Queued"): previously `catch { clearInterval(interval) }`
+    // meant a single transient network error would permanently stop polling for
+    // that task. Now we allow up to MAX_CONSECUTIVE_ERRORS failures before giving
+    // up, so short backend hiccups (PyO3 GIL pause, yt-dlp startup, etc.) are
+    // transparent to the user.
+    const MAX_CONSECUTIVE_ERRORS = 8;
+    let consecutiveErrors = 0;
+
     const interval = setInterval(async () => {
       try {
         const pr  = await fetch(`${API}/download-status/${serverTaskId}`);
+        if (!pr.ok) throw new Error(`status ${pr.status}`);
         const pd  = await pr.json();
+        consecutiveErrors = 0; // reset on success
+
         const isDone = ["done", "failed", "canceled", "error"].includes(pd.status);
         setQueue((prev) =>
           prev.map((q) =>
@@ -114,7 +154,15 @@ export function useDownloaderQueue() {
           )
         );
         if (isDone) { clearInterval(interval); pollingRef.current.delete(serverTaskId); }
-      } catch { clearInterval(interval); }
+      } catch {
+        consecutiveErrors++;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          // Backend unreachable for too long — stop polling to avoid spam.
+          clearInterval(interval);
+          pollingRef.current.delete(serverTaskId);
+        }
+        // Otherwise swallow the error and try again next tick.
+      }
     }, 1000);
     pollingRef.current.set(serverTaskId, interval);
   }
