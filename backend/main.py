@@ -230,6 +230,9 @@ def refresh_runtime_tools() -> None:
             os.environ["PATH"] = f"{normalized}{os.pathsep}{existing}" if existing else normalized
 
 
+refresh_runtime_tools()
+
+
 # ── aria2 cleanup on exit ─────────────────────────────────────────────────────
 
 def _terminate_all_aria2_processes() -> None:

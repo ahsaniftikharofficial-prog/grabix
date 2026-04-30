@@ -457,7 +457,20 @@ fn find_backend_dir(app: &AppHandle) -> Option<PathBuf> {
             }
         }
     }
-    candidates.into_iter().find(|p| p.exists())
+    candidates
+        .into_iter()
+        .find(|p| p.join("main.py").exists())
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_python_path(path: &Path) -> String {
+    let raw = path.display().to_string();
+    raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_string()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn normalize_python_path(path: &Path) -> String {
+    path.display().to_string()
 }
 
 fn find_packaged_runtime_config(app: &AppHandle) -> Option<PathBuf> {
@@ -582,6 +595,8 @@ fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathB
     thread::Builder::new()
         .name(String::from("pyo3-backend"))
         .spawn(move || {
+            let python_home_for_python = normalize_python_path(&python_home);
+            let backend_dir_for_python = normalize_python_path(&backend_dir);
             log_sidecar(
                 &app,
                 &format!(
@@ -601,8 +616,8 @@ fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathB
             // CRITICAL: Set PYTHONHOME before interpreter initializes.
             // PYTHONHOME tells Python where its stdlib and site-packages live.
             // PYTHONPATH adds our backend/ source directory to the import path.
-            std::env::set_var("PYTHONHOME", &python_home);
-            std::env::set_var("PYTHONPATH", backend_dir.to_str().unwrap_or(""));
+            std::env::set_var("PYTHONHOME", &python_home_for_python);
+            std::env::set_var("PYTHONPATH", &backend_dir_for_python);
             std::env::set_var("PYTHONDONTWRITEBYTECODE", "1");
             std::env::set_var("PYTHONUNBUFFERED", "1");
 
@@ -630,7 +645,7 @@ fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathB
                 // Put backend_dir at front of sys.path so `import main` works.
                 let sys = py.import_bound("sys")?;
                 let path = sys.getattr("path")?;
-                path.call_method1("insert", (0, backend_dir.to_str().unwrap_or("")))?;
+                path.call_method1("insert", (0, &backend_dir_for_python))?;
 
                 // WINDOWS (release only): redirect Python's sys.stdout / sys.stderr
                 // to the NUL device so that the embedded interpreter does not call

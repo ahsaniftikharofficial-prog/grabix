@@ -147,19 +147,22 @@ function Inner() {
         setStartupDiagnostics(payload);
       }
     });
-    const interval = window.setInterval(() => {
+    const healthInterval = window.setInterval(() => {
       void syncRuntimeHealth();
+    }, 2500);
+    const diagnosticsInterval = window.setInterval(() => {
       void fetchStartupDiagnostics().then((payload) => {
         if (!cancelled && payload) setStartupDiagnostics(payload);
       });
-    }, 2500);
+    }, 10000);
 
     window.addEventListener("grabix:navigate", handleNavigate as EventListener);
     window.addEventListener("grabix:genre-nav", handleGenreNav as EventListener);
 
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      window.clearInterval(healthInterval);
+      window.clearInterval(diagnosticsInterval);
       window.removeEventListener("grabix:navigate", handleNavigate as EventListener);
       window.removeEventListener("grabix:genre-nav", handleGenreNav as EventListener);
     };
