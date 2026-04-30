@@ -7,7 +7,12 @@
 import {
   createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode,
 } from "react";
-import { readJsonStorage, writeJsonStorage } from "../lib/persistentState";
+import {
+  readJsonStorage,
+  readStringStorage,
+  writeJsonStorage,
+  writeStringStorage,
+} from "../lib/persistentState";
 
 export interface Profile {
   id: string;
@@ -56,7 +61,7 @@ function loadProfiles(): Profile[] {
 }
 
 function loadActiveId(profiles: Profile[]): string {
-  const stored = localStorage.getItem(ACTIVE_KEY);
+  const stored = readStringStorage("local", ACTIVE_KEY);
   if (stored && profiles.some(p => p.id === stored)) return stored;
   return "default";
 }
@@ -90,7 +95,7 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
 
   const switchProfile = useCallback((id: string) => {
     setActiveId(id);
-    localStorage.setItem(ACTIVE_KEY, id);
+    writeStringStorage("local", ACTIVE_KEY, id);
   }, []);
 
   const addProfile = useCallback((name: string, color: string, isKids = false): Profile | null => {
@@ -110,7 +115,7 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
     if (id === "default") return; // cannot remove default
     setProfiles(prev => prev.filter(p => p.id !== id));
     setActiveId(curr => curr === id ? "default" : curr);
-    localStorage.setItem(ACTIVE_KEY, "default");
+    writeStringStorage("local", ACTIVE_KEY, "default");
   }, []);
 
   const updateProfile = useCallback((id: string, updates: Partial<Omit<Profile, "id" | "createdAt">>) => {

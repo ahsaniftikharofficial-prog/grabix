@@ -609,6 +609,23 @@ fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathB
             // Initialize Python interpreter (must happen before with_gil).
             pyo3::prepare_freethreaded_python();
 
+            // WINDOWS (release only): Free any console that PyO3 allocated.
+            // prepare_freethreaded_python() calls AllocConsole() internally to
+            // give Python's stdio a handle, even though this exe is built with
+            // windows_subsystem = "windows".  Calling FreeConsole() immediately
+            // afterwards detaches that console before Windows draws the CMD window.
+            // The sys.stdout / sys.stderr redirect below is kept as a second layer
+            // so Python never tries to write to a console handle again.
+            #[cfg(all(target_os = "windows", not(debug_assertions)))]
+            {
+                extern "system" {
+                    fn FreeConsole() -> i32;
+                }
+                unsafe {
+                    FreeConsole();
+                }
+            }
+
             let result = Python::with_gil(|py| -> PyResult<()> {
                 // Put backend_dir at front of sys.path so `import main` works.
                 let sys = py.import_bound("sys")?;
@@ -849,11 +866,12 @@ fn start_consumet_sidecar(app: &AppHandle) -> ConsumetLaunchState {
         .arg("https://aniwatchtv.to")
         .env("PORT", PACKAGED_CONSUMET_PORT.to_string())
         .env("HIANIME_SITE_BASE", "https://aniwatchtv.to")
+        .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_log))
         .stderr(Stdio::from(stderr_log));
 
     #[cfg(target_os = "windows")]
-    command.creation_flags(0x08000000);
+    command.creation_flags(0x08000008);
 
     let child = match command.spawn() {
         Ok(child) => child,

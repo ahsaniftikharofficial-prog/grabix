@@ -1,5 +1,5 @@
 /**
- * useNotifications.ts — Phase 6
+ * useNotifications.ts - Phase 6
  * Checks TMDB for new episodes on shows the user has favorited.
  * Runs once on mount and stores the last-seen episode per show.
  */
@@ -20,19 +20,24 @@ export interface Notification {
   createdAt: string;
 }
 
-const BASE_KEY       = "grabix:notifications:v1";
-const LAST_EP_KEY    = "grabix:last_ep:v1";
-const TMDB_API_KEY   = "5a4f47781c8ab7c9f52d69a24d6f7f0b";
-const TMDB_BASE      = "https://api.themoviedb.org/3";
+const BASE_KEY = "grabix:notifications:v1";
+const LAST_EP_KEY = "grabix:last_ep:v1";
+const TMDB_API_KEY = "5a4f47781c8ab7c9f52d69a24d6f7f0b";
+const TMDB_BASE = "https://api.themoviedb.org/3";
 
 async function fetchLatestEpisode(tmdbId: number): Promise<{ season: number; episode: number; name: string; air_date: string } | null> {
   try {
-    const r = await fetch(`${TMDB_BASE}/tv/${tmdbId}?api_key=${TMDB_API_KEY}&language=en-US`);
-    if (!r.ok) return null;
-    const d = await r.json();
-    const ep = d.last_episode_to_air;
-    if (!ep) return null;
-    return { season: ep.season_number, episode: ep.episode_number, name: ep.name, air_date: ep.air_date };
+    const response = await fetch(`${TMDB_BASE}/tv/${tmdbId}?api_key=${TMDB_API_KEY}&language=en-US`);
+    if (!response.ok) return null;
+    const data = await response.json();
+    const episode = data.last_episode_to_air;
+    if (!episode) return null;
+    return {
+      season: episode.season_number,
+      episode: episode.episode_number,
+      name: episode.name,
+      air_date: episode.air_date,
+    };
   } catch {
     return null;
   }
@@ -42,7 +47,7 @@ export function useNotifications() {
   const { favorites } = useFavorites();
   const { storageKey } = useProfile();
 
-  const notifKey  = storageKey(BASE_KEY);
+  const notifKey = storageKey(BASE_KEY);
   const lastEpKey = storageKey(LAST_EP_KEY);
 
   const [notifications, setNotifications] = useState<Notification[]>(() =>
@@ -50,12 +55,14 @@ export function useNotifications() {
   );
   const [checking, setChecking] = useState(false);
 
-  const unreadCount = notifications.filter(n => !n.seenAt).length;
+  const unreadCount = notifications.filter((notification) => !notification.seenAt).length;
 
   const markAllRead = useCallback(() => {
     const now = new Date().toISOString();
-    setNotifications(prev => {
-      const next = prev.map(n => n.seenAt ? n : { ...n, seenAt: now });
+    setNotifications((prev) => {
+      const next = prev.map((notification) =>
+        notification.seenAt ? notification : { ...notification, seenAt: now }
+      );
       writeJsonStorage("local", notifKey, next);
       return next;
     });
@@ -68,61 +75,70 @@ export function useNotifications() {
 
   const checkForNewEpisodes = useCallback(async () => {
     if (checking) return;
-    const tvShows = favorites.filter(f => f.type === "series" && f.tmdbId);
+
+    const tvShows = favorites.filter((favorite) => favorite.type === "series" && favorite.tmdbId);
     if (tvShows.length === 0) return;
 
     setChecking(true);
-    const lastEps = readJsonStorage<Record<string, { season: number; episode: number }>>("local", lastEpKey, {});
-    const newNotifs: Notification[] = [];
 
-    for (const show of tvShows.slice(0, 20)) {
-      // Rate limit: don't hammer TMDB
-      await new Promise(r => setTimeout(r, 120));
-      const latest = await fetchLatestEpisode(show.tmdbId!);
-      if (!latest) continue;
+    try {
+      const lastEpisodes = readJsonStorage<Record<string, { season: number; episode: number }>>("local", lastEpKey, {});
+      const newNotifications: Notification[] = [];
 
-      const key = String(show.tmdbId!);
-      const seen = lastEps[key];
+      for (const show of tvShows.slice(0, 20)) {
+        await new Promise((resolve) => setTimeout(resolve, 120));
 
-      if (!seen) {
-        // First time we see this show — just record, no notif
-        lastEps[key] = { season: latest.season, episode: latest.episode };
-      } else if (latest.season > seen.season || (latest.season === seen.season && latest.episode > seen.episode)) {
-        // New episode(s) since last check
-        newNotifs.push({
+        const latest = await fetchLatestEpisode(show.tmdbId!);
+        if (!latest) continue;
+
+        const key = String(show.tmdbId!);
+        const seen = lastEpisodes[key];
+
+        if (!seen) {
+          lastEpisodes[key] = { season: latest.season, episode: latest.episode };
+          continue;
+        }
+
+        const hasNewEpisode =
+          latest.season > seen.season ||
+          (latest.season === seen.season && latest.episode > seen.episode);
+
+        if (!hasNewEpisode) continue;
+
+        newNotifications.push({
           id: `${show.tmdbId}-s${latest.season}e${latest.episode}`,
           showId: show.tmdbId!,
           showTitle: show.title,
           poster: show.poster || null,
-          message: `S${latest.season}E${latest.episode} — "${latest.name}" is now available`,
+          message: `S${latest.season}E${latest.episode} - "${latest.name}" is now available`,
           createdAt: new Date().toISOString(),
         });
-        lastEps[key] = { season: latest.season, episode: latest.episode };
+        lastEpisodes[key] = { season: latest.season, episode: latest.episode };
       }
+
+      writeJsonStorage("local", lastEpKey, lastEpisodes);
+
+      if (newNotifications.length > 0) {
+        setNotifications((prev) => {
+          const existingIds = new Set(prev.map((notification) => notification.id));
+          const fresh = newNotifications.filter((notification) => !existingIds.has(notification.id));
+          const next = [...fresh, ...prev].slice(0, 50);
+          writeJsonStorage("local", notifKey, next);
+          return next;
+        });
+      }
+    } finally {
+      setChecking(false);
     }
-
-    writeJsonStorage("local", lastEpKey, lastEps);
-
-    if (newNotifs.length > 0) {
-      setNotifications(prev => {
-        // Deduplicate by id
-        const existingIds = new Set(prev.map(n => n.id));
-        const fresh = newNotifs.filter(n => !existingIds.has(n.id));
-        const next = [...fresh, ...prev].slice(0, 50);
-        writeJsonStorage("local", notifKey, next);
-        return next;
-      });
-    }
-
-    setChecking(false);
   }, [checking, favorites, notifKey, lastEpKey]);
 
-  // Check on mount (after a small delay so app settles)
   useEffect(() => {
-    const t = window.setTimeout(() => void checkForNewEpisodes(), 3000);
-    return () => window.clearTimeout(t);
-  // Only run on mount
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    const timer = window.setTimeout(() => {
+      void checkForNewEpisodes();
+    }, 3000);
+    return () => window.clearTimeout(timer);
+    // Only run on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return { notifications, unreadCount, markAllRead, clearAll, checking, checkForNewEpisodes };

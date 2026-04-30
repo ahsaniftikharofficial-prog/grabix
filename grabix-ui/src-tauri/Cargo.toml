@@ -26,4 +26,4 @@ arboard = "3"
 rand = "0.8"
 # PyO3: embeds the Python interpreter directly inside the Rust binary.
 # No child process — Python lives inside grabix.exe. Backend crash is impossible.
-pyo3 = { version = "0.22", features = ["auto-initialize"] }
+pyo3 = { version = "0.22", features = ["auto-initialize", "abi3-py311"] }

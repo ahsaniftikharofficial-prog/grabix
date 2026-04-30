@@ -1,10 +1,6 @@
-# PyO3 on Windows: python311.dll is hard-linked (not delay-loaded).
-# Windows requires python311.dll next to grabix.exe at launch.
-# The NSIS POSTINSTALL hook in installer-hooks.nsh handles this automatically.
-
-# FIX: Python 3.14 is newer than PyO3 0.22's max supported version (3.13).
-# ABI3 forward compatibility lets PyO3 build with any Python >= 3.13 using
-# the stable ABI — no need to downgrade Python or upgrade PyO3.
+# GRABIX ships a bundled Python 3.11 runtime.
+# We build PyO3 against the Python 3.11 stable ABI in Cargo.toml, so this
+# release build must not float to a newer machine-local Python ABI.
 [env]
 PYO3_USE_ABI3_FORWARD_COMPATIBILITY = "1"
 
