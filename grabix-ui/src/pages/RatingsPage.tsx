@@ -309,26 +309,6 @@ function mergePosterBackedItems<T extends { id?: string | number; title?: string
   return merged;
 }
 
-const CSS = `
-@keyframes rat-fadeUp { from{opacity:0;transform:translateY(14px)} to{opacity:1;transform:translateY(0)} }
-@keyframes rat-fadeIn { from{opacity:0} to{opacity:1} }
-@keyframes rat-shimmer { 0%{background-position:-600px 0} 100%{background-position:600px 0} }
-@keyframes rat-spin { to{transform:rotate(360deg)} }
-.rat-card { animation:rat-fadeUp 0.35s ease both; transition:transform 0.18s ease,box-shadow 0.18s ease,border-color 0.18s ease; cursor:pointer; }
-.rat-card:hover { transform:translateY(-5px) scale(1.015); box-shadow:var(--shadow-lg); border-color:var(--accent) !important; }
-.rat-search-wrap input:focus { border-color:var(--border-focus) !important; box-shadow:0 0 0 3px rgba(138,180,248,0.15) !important; outline:none; }
-.rat-tab { transition:color 0.15s,border-color 0.15s; cursor:pointer; border-bottom:2px solid transparent; }
-.rat-tab:hover { color:var(--text-primary) !important; }
-.rat-tab.active { color:var(--accent) !important; border-bottom-color:var(--accent) !important; }
-.rat-skeleton { background:linear-gradient(90deg,var(--bg-surface) 25%,var(--bg-surface2) 50%,var(--bg-surface) 75%); background-size:600px 100%; animation:rat-shimmer 1.4s infinite linear; }
-.rat-ep { transition:transform 0.1s,box-shadow 0.1s; cursor:pointer; }
-.rat-ep:hover { transform:scale(1.16); box-shadow:0 4px 14px rgba(0,0,0,0.5); }
-.rat-sug-row { transition:background 0.1s; cursor:pointer; }
-.rat-sug-row:hover { background:var(--bg-hover) !important; }
-.rat-detail { animation:rat-fadeIn 0.3s ease; }
-.rat-grid { animation:rat-fadeUp 0.25s ease; }
-`;
-
 export default function RatingsPage() {
   const [query, setQuery]             = useState("");
   const [suggestions, setSuggestions] = useState<SearchResult[]>([]);
