@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useRuntimeHealth } from "../context/RuntimeHealthContext";
 import {
   fetchMovieBoxDetails,
   fetchMovieBoxDiscover,
@@ -56,6 +57,8 @@ function toServerOption(option: DownloadQualityOption) {
 
 export default function MovieBoxPage() {
   const { adultContentBlocked } = useContentFilter();
+  const { runtimeState } = useRuntimeHealth();
+  const backendReady = runtimeState === "ready" || runtimeState === "degraded";
   const [discover, setDiscover] = useState<MovieBoxSection[]>([]);
   const [popularSearches, setPopularSearches] = useState<string[]>([]);
   const [results, setResults] = useState<MovieBoxItem[]>([]);
@@ -124,13 +127,23 @@ export default function MovieBoxPage() {
   };
 
   useEffect(() => {
+    // Wait for the Python backend to finish starting up before fetching.
+    // Without this guard the page shows "Movie Box discover could not be loaded"
+    // immediately because the server hasn't started yet.
+    if (!backendReady) {
+      if (runtimeState !== "starting" && runtimeState !== "recovering") {
+        setLoading(false);
+        setPageError("GRABIX backend is offline. Restart the app and try again.");
+      }
+      return;
+    }
     setPage(1);
     if (isSearchMode) {
       void runSearch(query, 1);
       return;
     }
     void loadDiscover();
-  }, [query, filter]);
+  }, [query, filter, backendReady, runtimeState]);
 
   const loadMore = () => {
     const nextPage = page + 1;

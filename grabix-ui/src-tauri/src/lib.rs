@@ -1282,6 +1282,24 @@ pub fn run() {
                 let _ = webview.eval(AD_BLOCK_SCRIPT);
             }
         })
+        // ── Fix: WebView2 white screen on Windows after minimize/restore ──────
+        // WebView2 sometimes stops painting when the window is unfocused and
+        // then focused again (e.g. after minimise → restore).  Nudging the
+        // body opacity by a fraction forces the compositor to issue a new
+        // draw command without any visible flash to the user.
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Focused(true)) {
+                for webview in window.webviews() {
+                    let _ = webview.eval(
+                        "if(document.body){\
+                            var s=document.body.style;\
+                            s.opacity='0.99';\
+                            requestAnimationFrame(function(){s.opacity='';});\
+                        }",
+                    );
+                }
+            }
+        })
         .manage(StartupState {
             snapshot: Mutex::new(StartupDiagnostics::default()),
         })

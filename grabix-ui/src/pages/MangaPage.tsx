@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRuntimeHealth } from "../context/RuntimeHealthContext";
 import {
   fetchConsumetMangaChapters,
   fetchConsumetMangaRead,
@@ -229,6 +230,8 @@ function MangaCard({
 
 export default function MangaPage() {
   const { adultContentBlocked } = useContentFilter();
+  const { runtimeState } = useRuntimeHealth();
+  const backendReady = runtimeState === "ready" || runtimeState === "degraded";
   const [searchText, setSearchText] = useState("");
   const [query, setQuery] = useState("");
   const [browseTab, setBrowseTab] = useState<MangaBrowseTab>("trending");
@@ -602,10 +605,21 @@ export default function MangaPage() {
 
   useEffect(() => {
     if (query.trim() || selectedItem || reader) return;
+    // Wait for the Python backend to finish starting up before fetching.
+    // Without this guard, the page fires API calls before the server is ready
+    // and immediately shows "Manga home is unavailable right now".
+    if (!backendReady) {
+      if (runtimeState !== "starting" && runtimeState !== "recovering") {
+        // Backend definitively failed — stop spinner and show error.
+        setHomeLoading(false);
+        setHomeError("GRABIX backend is offline. Restart the app and try again.");
+      }
+      return;
+    }
     setBrowsePage(1);
     setBrowseHasMore(true);
     void loadDiscover(browseTab, 1);
-  }, [browseTab, query, selectedItem, reader]);
+  }, [browseTab, query, selectedItem, reader, backendReady, runtimeState]);
 
   useEffect(() => {
     void hydrateOfflineFlags();
