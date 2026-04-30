@@ -109,6 +109,8 @@ export function triggerFileDownload(blob: Blob, filename: string): void {
   a.download = filename;
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
+  if (a.parentNode === document.body) {
+    document.body.removeChild(a);
+  }
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }

@@ -1218,6 +1218,14 @@ fn initial_diagnostics(app: &AppHandle) -> StartupDiagnostics {
 const AD_BLOCK_SCRIPT: &str = r#"
 (function() {
   try {
+    var protocol = String(location.protocol || '').toLowerCase();
+    var host = String(location.hostname || '').toLowerCase();
+    if (
+      protocol === 'tauri:' ||
+      protocol === 'asset:' ||
+      host === 'localhost' ||
+      host === '127.0.0.1'
+    ) return;
     // ── Check if ad blocker is enabled (toggle stored in localStorage) ──
     if (localStorage.getItem('grabix_adblock') === 'false') return;
 
@@ -1293,7 +1301,7 @@ const AD_BLOCK_SCRIPT: &str = r#"
           var el = els[i];
           // Don't remove the video player itself
           if (el.tagName === 'VIDEO' || el.querySelector('video')) continue;
-          el.remove();
+          if (el && el.parentNode) el.parentNode.removeChild(el);
         }
       } catch(e) {}
     }
