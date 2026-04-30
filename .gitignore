@@ -54,8 +54,30 @@ release-gate-report*.json
 *.spec.bak
 
 # ─── Downloaded Media (never commit user content) ────────────
-backend/downloads/*
-!backend/downloads/*.py
+# Only ignore actual media files — NOT the Python engine source code.
+# The downloads/ package (__init__.py, engine.py) must remain tracked.
+backend/downloads/*.mp4
+backend/downloads/*.mkv
+backend/downloads/*.webm
+backend/downloads/*.m4v
+backend/downloads/*.avi
+backend/downloads/*.mov
+backend/downloads/*.flv
+backend/downloads/*.ts
+backend/downloads/*.mp3
+backend/downloads/*.aac
+backend/downloads/*.flac
+backend/downloads/*.opus
+backend/downloads/*.m4a
+backend/downloads/*.jpg
+backend/downloads/*.jpeg
+backend/downloads/*.png
+backend/downloads/*.webp
+backend/downloads/*.srt
+backend/downloads/*.vtt
+backend/downloads/*.ass
+# If you store user downloads in a subdirectory, ignore the whole folder:
+backend/downloads/media/
 
 # ─── Secrets & Environment ──────────────────────────────────
 .env

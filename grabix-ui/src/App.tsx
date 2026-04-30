@@ -294,23 +294,23 @@ function Inner() {
         }}
       >
         <RuntimeHealthProvider value={{ health: runtimeHealth, runtimeState, refreshHealth: refreshRuntimeHealth }}>
-          <Suspense fallback={<PageLoadingState page={page} />}>
-            {(Object.keys(pages) as Page[]).map((p) => (
-              <div
-                key={p}
-                style={{
-                  display: page === p ? "flex" : "none",
-                  flexDirection: "column",
-                  flex: 1,
-                  width: "100%",
-                  minWidth: 0,
-                  minHeight: 0,
-                }}
-              >
-                {pages[p]}
-              </div>
-            ))}
-          </Suspense>
+          {(Object.keys(pages) as Page[]).map((p) => (
+            <div
+              key={p}
+              style={{
+                display: page === p ? "flex" : "none",
+                flexDirection: "column",
+                flex: 1,
+                width: "100%",
+                minWidth: 0,
+                minHeight: 0,
+              }}
+            >
+              <Suspense fallback={page === p ? <PageLoadingState page={p as Page} /> : null}>
+                {pages[p as Page]}
+              </Suspense>
+            </div>
+          ))}
         </RuntimeHealthProvider>
       </main>
     </div>
