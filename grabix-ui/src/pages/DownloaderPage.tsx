@@ -104,10 +104,13 @@ export default function DownloaderPage({ onDownloadStarting }: { onDownloadStart
   }, []);
 
   // ── Clipboard helpers ─────────────────────────────────────────────────────────
-  const handlePaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
-    const text = e.clipboardData.getData("text");
-    setUrl(text); fetchInfo(text);
-  };
+ const handlePaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    e.preventDefault();                          // stop browser default insert
+    const text = e.clipboardData.getData("text").trim();
+    if (!text) return;
+    setUrl(text);
+    fetchInfo(text);
+};
 
   const readClipboard = async () => {
     try { return await navigator.clipboard.readText(); }
