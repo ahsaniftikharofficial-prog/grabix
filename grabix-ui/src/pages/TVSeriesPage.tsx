@@ -28,6 +28,7 @@ import {
   fetchTmdbVideos,
   fetchTmdbAiringToday,
   fetchTmdbWatchProviders,
+  fetchTmdbCustomDiscover,
 } from "../lib/tmdb";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import {
@@ -171,10 +172,11 @@ export default function TVSeriesPage() {
   const [heroItems, setHeroItems] = useState<Show[]>([]);
   const [heroIdx, setHeroIdx] = useState(0);
   const [trending, setTrending] = useState<Show[]>([]);
-  const [popular, setPopular] = useState<Show[]>([]);
+  const [completedSeries, setCompletedSeries] = useState<Show[]>([]);
   const [topRated, setTopRated] = useState<Show[]>([]);
   const [onTheAir, setOnTheAir] = useState<Show[]>([]);
   const [airingToday, setAiringToday] = useState<Show[]>([]);
+  const [hiddenGems, setHiddenGems] = useState<Show[]>([]);
   const [genreResults, setGenreResults] = useState<Show[]>([]);
   const [genrePage, setGenrePage] = useState(1);
   const [genreLoading, setGenreLoading] = useState(false);
@@ -210,18 +212,20 @@ export default function TVSeriesPage() {
     setHomeLoading(true); setHomeError("");
     Promise.all([
       discoverTmdbMedia("tv", "trending",   1),
-      discoverTmdbMedia("tv", "popular",    1),
       discoverTmdbMedia("tv", "top_rated",  1),
       discoverTmdbMedia("tv", "on_the_air", 1),
       fetchTmdbAiringToday(1),
-    ]).then(([tr, po, tp, oa, at]) => {
+      fetchTmdbCustomDiscover("tv", { sort_by: "vote_average.desc", "vote_count.gte": 200, with_status: 3 }, "completed-series"),
+      fetchTmdbCustomDiscover("tv", { sort_by: "vote_average.desc", "vote_count.gte": 200, "popularity.lte": 15 }, "hidden-gems"),
+    ]).then(([tr, tp, oa, at, cs, hg]) => {
       const trR = tr?.results ?? [];
       setHeroItems(trR.filter((s: Show) => s.backdrop_path).slice(0, 6));
       setTrending(trR);
-      setPopular(po?.results ?? []);
       setTopRated(tp?.results ?? []);
       setOnTheAir(oa?.results ?? []);
       setAiringToday(at?.results ?? []);
+      setCompletedSeries(cs?.results ?? []);
+      setHiddenGems(hg?.results ?? []);
     }).catch(() => {
       setHomeError("Could not load TV shows. Check your internet connection.");
     }).finally(() => setHomeLoading(false));
@@ -332,6 +336,34 @@ export default function TVSeriesPage() {
   };
 
   const filtered = (arr: Show[]) => filterAdultContent(arr, adultContentBlocked);
+
+  // Dedup: each show appears in at most one row (first row wins)
+  const dedupeRows = <T extends { id: number }>(rows: T[][]): T[][] => {
+    const seen = new Set<number>();
+    return rows.map(row =>
+      row.filter(item => {
+        if (seen.has(item.id)) return false;
+        seen.add(item.id);
+        return true;
+      })
+    );
+  };
+
+  const [
+    dedupedAiringToday,
+    dedupedOnTheAir,
+    dedupedTrending,
+    dedupedCompleted,
+    dedupedTopRated,
+    dedupedHiddenGems,
+  ] = dedupeRows([
+    filtered(airingToday),
+    filtered(onTheAir),
+    filtered(trending),
+    filtered(completedSeries),
+    filtered(topRated),
+    filtered(hiddenGems),
+  ]);
   const displayGenre = activeGenre !== null ? (genres.find(g => g.id === activeGenre)?.name ?? "Genre") : null;
 
   return (
@@ -443,11 +475,12 @@ export default function TVSeriesPage() {
                   />
                 )}
                 <div style={{ padding: "20px 20px", display: "flex", flexDirection: "column", gap: 28 }}>
-                  <TVRow title="🔥 Trending This Week"  shows={filtered(trending)}    onSelect={setDetail} />
-                  <TVRow title="📺 Airing Today"        shows={filtered(airingToday)} onSelect={setDetail} />
-                  <TVRow title="▶ Currently On Air"     shows={filtered(onTheAir)}   onSelect={setDetail} />
-                  <TVRow title="⭐ Popular Right Now"    shows={filtered(popular)}    onSelect={setDetail} />
-                  <TVRow title="🏆 All-Time Top Rated"  shows={filtered(topRated)}   onSelect={setDetail} />
+                  <TVRow title="📺 New Episodes Today"    shows={dedupedAiringToday} onSelect={setDetail} />
+                  <TVRow title="📡 Currently On Air"      shows={dedupedOnTheAir}    onSelect={setDetail} />
+                  <TVRow title="🔥 Trending This Week"    shows={dedupedTrending}    onSelect={setDetail} />
+                  <TVRow title="✅ Completed Series"       shows={dedupedCompleted}   onSelect={setDetail} />
+                  <TVRow title="🏆 All-Time Best"         shows={dedupedTopRated}    onSelect={setDetail} />
+                  <TVRow title="💎 Hidden Gems"           shows={dedupedHiddenGems}  onSelect={setDetail} />
                 </div>
               </>
             )}

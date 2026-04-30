@@ -264,6 +264,20 @@ export async function fetchTmdbAiringToday(page = 1): Promise<any> {
   return tmdb("/tv/airing_today", { page }, `airing-today?page=${page}`);
 }
 
+// Generic discover with arbitrary params — used for Hidden Gems, Completed Series, etc.
+export async function fetchTmdbCustomDiscover(
+  mediaType: "movie" | "tv",
+  params: Record<string, string | number>,
+  cacheKey: string,
+  page = 1
+): Promise<any> {
+  return tmdb(
+    `/discover/${mediaType}`,
+    { ...params, page },
+    `custom-discover:${mediaType}:${cacheKey}:p${page}`
+  );
+}
+
 export async function fetchTmdbWatchProviders(
   mediaType: "movie" | "tv",
   id: number

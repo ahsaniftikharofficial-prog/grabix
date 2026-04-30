@@ -28,6 +28,7 @@ import {
   fetchTmdbNowPlaying,
   fetchTmdbUpcoming,
   fetchTmdbWatchProviders,
+  fetchTmdbCustomDiscover,
 } from "../lib/tmdb";
 import VidSrcPlayer from "../components/VidSrcPlayer";
 import {
@@ -175,10 +176,11 @@ export default function MoviesPage() {
   const [heroItems, setHeroItems] = useState<Movie[]>([]);
   const [heroIdx, setHeroIdx] = useState(0);
   const [trending, setTrending] = useState<Movie[]>([]);
-  const [popular, setPopular] = useState<Movie[]>([]);
+  const [recentlyAdded, setRecentlyAdded] = useState<Movie[]>([]);
   const [topRated, setTopRated] = useState<Movie[]>([]);
   const [nowPlaying, setNowPlaying] = useState<Movie[]>([]);
   const [upcoming, setUpcoming] = useState<Movie[]>([]);
+  const [hiddenGems, setHiddenGems] = useState<Movie[]>([]);
   const [genreResults, setGenreResults] = useState<Movie[]>([]);
   const [genrePage, setGenrePage] = useState(1);
   const [genreLoading, setGenreLoading] = useState(false);
@@ -216,18 +218,20 @@ export default function MoviesPage() {
     setHomeError("");
     Promise.all([
       discoverTmdbMedia("movie", "trending", 1),
-      discoverTmdbMedia("movie", "popular",  1),
+      fetchTmdbCustomDiscover("movie", { sort_by: "release_date.desc", "vote_count.gte": 50 }, "recently-added"),
       discoverTmdbMedia("movie", "top_rated", 1),
       fetchTmdbNowPlaying(1),
       fetchTmdbUpcoming(1),
-    ]).then(([tr, po, tp, np, up]) => {
+      fetchTmdbCustomDiscover("movie", { sort_by: "vote_average.desc", "vote_count.gte": 1000, "popularity.lte": 20 }, "hidden-gems"),
+    ]).then(([tr, ra, tp, np, up, hg]) => {
       const trR = tr?.results ?? [];
       setHeroItems(trR.filter((m: Movie) => m.backdrop_path).slice(0, 6));
       setTrending(trR);
-      setPopular(po?.results ?? []);
+      setRecentlyAdded(ra?.results ?? []);
       setTopRated(tp?.results ?? []);
       setNowPlaying(np?.results ?? []);
       setUpcoming(up?.results ?? []);
+      setHiddenGems(hg?.results ?? []);
     }).catch(() => {
       setHomeError("Could not load movies. Check your internet connection.");
     }).finally(() => setHomeLoading(false));
@@ -346,6 +350,34 @@ export default function MoviesPage() {
   };
 
   const filtered = (arr: Movie[]) => filterAdultContent(arr, adultContentBlocked);
+
+  // Dedup: each movie appears in at most one row (first row wins)
+  const dedupeRows = <T extends { id: number }>(rows: T[][]): T[][] => {
+    const seen = new Set<number>();
+    return rows.map(row =>
+      row.filter(item => {
+        if (seen.has(item.id)) return false;
+        seen.add(item.id);
+        return true;
+      })
+    );
+  };
+
+  const [
+    dedupedNowPlaying,
+    dedupedRecentlyAdded,
+    dedupedTrending,
+    dedupedUpcoming,
+    dedupedTopRated,
+    dedupedHiddenGems,
+  ] = dedupeRows([
+    filtered(nowPlaying),
+    filtered(recentlyAdded),
+    filtered(trending),
+    filtered(upcoming),
+    filtered(topRated),
+    filtered(hiddenGems),
+  ]);
   const displayGenre = activeGenre !== null
     ? (genres.find(g => g.id === activeGenre)?.name ?? "Genre")
     : null;
@@ -473,11 +505,12 @@ export default function MoviesPage() {
                   />
                 )}
                 <div style={{ padding: "20px 20px", display: "flex", flexDirection: "column", gap: 28 }}>
-                  <MovieRow title="🔥 Trending This Week" movies={filtered(trending)}   onSelect={setDetail} />
-                  <MovieRow title="🎬 Now in Theaters"    movies={filtered(nowPlaying)} onSelect={setDetail} />
-                  <MovieRow title="⭐ Popular Right Now"   movies={filtered(popular)}   onSelect={setDetail} />
-                  <MovieRow title="🗓 Coming Soon"         movies={filtered(upcoming)}  onSelect={setDetail} />
-                  <MovieRow title="🏆 All-Time Top Rated"  movies={filtered(topRated)}  onSelect={setDetail} />
+                  <MovieRow title="🎬 In Theatres Now"     movies={dedupedNowPlaying}    onSelect={setDetail} />
+                  <MovieRow title="🆕 Recently Added"       movies={dedupedRecentlyAdded} onSelect={setDetail} />
+                  <MovieRow title="🔥 Trending This Week"   movies={dedupedTrending}      onSelect={setDetail} />
+                  <MovieRow title="📅 Coming Soon"          movies={dedupedUpcoming}      onSelect={setDetail} />
+                  <MovieRow title="⭐ All-Time Top Rated"   movies={dedupedTopRated}      onSelect={setDetail} />
+                  <MovieRow title="💎 Hidden Gems"          movies={dedupedHiddenGems}    onSelect={setDetail} />
                 </div>
               </>
             )}
