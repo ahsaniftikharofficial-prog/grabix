@@ -615,6 +615,28 @@ fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathB
                 let path = sys.getattr("path")?;
                 path.call_method1("insert", (0, backend_dir.to_str().unwrap_or("")))?;
 
+                // WINDOWS (release only): redirect Python's sys.stdout / sys.stderr
+                // to the NUL device so that the embedded interpreter does not call
+                // AllocConsole() looking for a console handle.  Without this, a
+                // "Console Window Host" subprocess appears in Task Manager and a
+                // blank CMD window flashes on startup.  The backend uses the
+                // `logging` module (→ log file) for all its output, so no useful
+                // output is lost.
+                #[cfg(not(debug_assertions))]
+                {
+                    py.run_bound(
+                        "import sys\n\
+                         try:\n\
+                         \x20\x20nul = open('nul', 'w')\n\
+                         \x20\x20sys.stdout = nul\n\
+                         \x20\x20sys.stderr = nul\n\
+                         except Exception:\n\
+                         \x20\x20pass\n",
+                        None,
+                        None,
+                    )?;
+                }
+
                 log_sidecar(&app, "PyO3: Importing backend main module...");
                 let main_mod = py.import_bound("main")?;
 
@@ -1288,16 +1310,21 @@ pub fn run() {
         // body opacity by a fraction forces the compositor to issue a new
         // draw command without any visible flash to the user.
         .on_window_event(|window, event| {
-            if matches!(event, tauri::WindowEvent::Focused(true)) {
-                for webview in window.webviews() {
-                    let _ = webview.eval(
-                        "if(document.body){\
-                            var s=document.body.style;\
-                            s.opacity='0.99';\
-                            requestAnimationFrame(function(){s.opacity='';});\
-                        }",
-                    );
+            match event {
+                // Fire on focus regain (minimize → restore) AND on any resize,
+                // which also fires when Windows restores from a minimised state.
+                tauri::WindowEvent::Focused(true) | tauri::WindowEvent::Resized(_) => {
+                    for webview in window.webviews() {
+                        let _ = webview.eval(
+                            "if(document.body){\
+                                var s=document.body.style;\
+                                s.opacity='0.99';\
+                                requestAnimationFrame(function(){s.opacity='';});\
+                            }",
+                        );
+                    }
                 }
+                _ => {}
             }
         })
         .manage(StartupState {
