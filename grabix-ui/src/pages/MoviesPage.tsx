@@ -318,13 +318,6 @@ export default function MoviesPage() {
   }, [tab, searchQuery, searchPage, searchLoading, searchHasMore,
       activeGenre, genrePage, genreLoading, genreHasMore]);
 
-  const submitSearch = () => {
-    const q = searchInput.trim();
-    if (!q) return;
-    setSearchQuery(q);
-    setTab("search");
-  };
-
   const clearSearch = () => {
     setSearchInput("");
     setSearchQuery("");

@@ -103,11 +103,11 @@ function mergeChapterSets(...sets: MangaChapter[][]): MangaChapter[] {
 
 function mapConsumetMangaToDiscovery(item: ConsumetMediaSummary): MangaDiscoveryItem {
   return {
-    anilist_id: item.anilist_id,
-    mal_id: item.mal_id,
+    anilist_id: item.anilist_id !== undefined ? Number(item.anilist_id) : undefined,
+    mal_id: item.mal_id !== undefined ? Number(item.mal_id) : undefined,
     mangadex_id: item.mangadex_id || item.id,
-    title: item.title,
-    cover_image: item.image || coverFallback(item.title),
+    title: item.title ?? "",
+    cover_image: item.image || coverFallback(item.title ?? ""),
     score: item.rating ?? 0,
     genres: item.genres ?? [],
     status: item.status || "Unknown",
@@ -119,7 +119,7 @@ function mapConsumetMangaToDiscovery(item: ConsumetMediaSummary): MangaDiscovery
 function mapConsumetChapter(chapter: ConsumetChapter): MangaChapter {
   return {
     chapter_id: chapter.id,
-    chapter_number: chapter.number,
+    chapter_number: chapter.number !== undefined ? String(chapter.number) : "",
     title: chapter.title,
     language: chapter.language || "en",
     pages: 0,

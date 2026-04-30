@@ -310,11 +310,6 @@ export default function TVSeriesPage() {
   }, [tab, searchQuery, searchPage, searchLoading, searchHasMore,
       activeGenre, genrePage, genreLoading, genreHasMore]);
 
-  const submitSearch = () => {
-    const q = searchInput.trim();
-    if (!q) return;
-    setSearchQuery(q); setTab("search");
-  };
   const clearSearch = () => { setSearchInput(""); setSearchQuery(""); setTab("home"); };
 
   const handleMoodSelect = (mood: MoodConfig | null) => {
@@ -579,7 +574,7 @@ function ShowDetailModal({ show, onClose, onPlay }: {
   const loadDownloadOpts = async (s: number, e: number) => {
     setDownloadLoading(true); setDownloadError("");
     try {
-      const sources = await fetchMovieBoxSources({ title: d.name, mediaType: "tv", season: s, episode: e });
+      const sources = await fetchMovieBoxSources({ title: d.name, mediaType: "series", season: s, episode: e });
       const opts = await resolveSourceDownloadOptions(sources);
       setDownloadOpts(opts); setDownloadQuality(opts[0]?.id ?? "");
       if (opts.length === 0) setDownloadError("No download source found for this episode.");
@@ -616,7 +611,7 @@ function ShowDetailModal({ show, onClose, onPlay }: {
     setBulkProgress({ done: 0, total: episodeCount });
     for (let ep = 1; ep <= episodeCount; ep++) {
       try {
-        const sources = await fetchMovieBoxSources({ title: d.name, mediaType: "tv", season: seasonNumber, episode: ep }).catch(() => []);
+        const sources = await fetchMovieBoxSources({ title: d.name, mediaType: "series", season: seasonNumber, episode: ep }).catch(() => []);
         const opts = await resolveSourceDownloadOptions(sources).catch(() => []);
         const best = opts[0];
         if (best) {
@@ -685,7 +680,7 @@ function ShowDetailModal({ show, onClose, onPlay }: {
                 : `Season ${selectedSeason || 1} ↓`}
             </button>
             <button className="btn btn-ghost" style={{ gap: 7, flex: "1 1 70px", justifyContent: "center", color: fav ? "var(--text-danger)" : undefined }}
-              onClick={() => toggle({ id: `tv-${show.id}`, title: d.name, poster, type: "tv", tmdbId: show.id })}>
+              onClick={() => toggle({ id: `tv-${show.id}`, title: d.name, poster, type: "series", tmdbId: show.id })}>
               <IconHeart size={14} color={fav ? "var(--text-danger)" : "currentColor"} filled={fav} />
               {fav ? "Saved" : "Save"}
             </button>

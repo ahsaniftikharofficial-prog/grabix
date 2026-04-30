@@ -4,10 +4,8 @@
 import { useState, useEffect } from "react";
 import {
   TMDB_IMAGE_BASE as IMG_BASE,
-  TMDB_BACKDROP_BASE as IMG_LG,
   discoverTmdbMedia,
   fetchTmdbUpcoming,
-  fetchTmdbAiringToday,
 } from "../lib/tmdb";
 import { useRemindMe } from "../hooks/useRemindMe";
 

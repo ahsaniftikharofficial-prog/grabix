@@ -4,7 +4,6 @@
 // and passes the result straight to JSX / sub-components.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { BACKEND_API } from "../../lib/api";
 import type { Props, SettingsScreen } from "./types";
 import { useHlsEngine }       from "./useHlsEngine";
 import { useSubtitleEngine }  from "./useSubtitleEngine";
@@ -53,7 +52,7 @@ export function usePlayerState(props: Props) {
   });
 
   const {
-    API, baseSources, allSources, activeSource, activeSubtitles, activeIndex,
+    API, baseSources, allSources, activeSource, activeSubtitles, activeIndex: _activeIndex,
     isDirectEngine, isEmbedEngine, resolvedPlaybackUrl,
     goToNextSource, onSourcePlaying,
   } = sourceManager;

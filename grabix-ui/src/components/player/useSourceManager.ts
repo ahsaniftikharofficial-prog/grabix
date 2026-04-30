@@ -4,11 +4,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BACKEND_API } from "../../lib/api";
-import { inferStreamKind } from "../../lib/streamProviders";
 import type { StreamSource } from "../../lib/streamProviders";
 import { queueVideoDownload } from "../../lib/downloads";
 import {
-  canPrepareInternalSource, failureLabel,
+  failureLabel,
   resolveEmbedUrl,
 } from "./helpers";
 import type { Props } from "./types";
@@ -39,9 +38,9 @@ interface SourceManagerOptions {
 export function useSourceManager({
   embedUrl, sources, sourceOptions, currentEpisode, episodeLabel, title,
   subtitle, subtitleSearchTitle, onSelectEpisode, onSelectSourceOption,
-  onDownload, onDownloadSource,
+  onDownload: _onDownload, onDownloadSource: _onDownloadSource,
   setIsLoading, setIsPlaying, setStatusText, setErrorText,
-  setFallbackNotice, setReloadKey, setVolumeBoost, showControls,
+  setFallbackNotice, setReloadKey, setVolumeBoost: _setVolumeBoost, showControls,
 }: SourceManagerOptions) {
   const API = BACKEND_API;
 

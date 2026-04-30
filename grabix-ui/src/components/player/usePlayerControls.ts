@@ -33,7 +33,7 @@ interface PlayerControlsOptions {
 
 export function usePlayerControls({
   videoRef, isDirectEngine, duration, durationRef,
-  fillRef, thumbRef, rangeRef, timeDisplayRef,
+  fillRef, thumbRef, rangeRef: _rangeRef, timeDisplayRef,
   previewVideoRef, previewCanvasRef, previewThrottleRef, previewSeekedCleanupRef,
   isPlaying, errorText, settingsOpen, setSettingsOpen, setSettingsScreen,
   episodeMenuOpen, setEpisodeMenuOpen, showSubtitlePanel, setShowSubtitlePanel,

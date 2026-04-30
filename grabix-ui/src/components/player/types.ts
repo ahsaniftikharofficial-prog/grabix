@@ -1,7 +1,7 @@
 // player/types.ts
 // All TypeScript types shared across the player sub-modules.
 
-import type { StreamSource } from "../lib/streamProviders";
+import type { StreamSource } from "../../lib/streamProviders";
 
 // ---------------------------------------------------------------------------
 // Public component props

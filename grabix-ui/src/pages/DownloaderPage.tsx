@@ -21,7 +21,7 @@ import { QueueCard } from "./QueueCard";
 const API = BACKEND_API;
 
 export default function DownloaderPage({ onDownloadStarting }: { onDownloadStarting?: () => void }) {
-  const { runtimeState } = useRuntimeHealth();
+  useRuntimeHealth();
 
   // ── UI state ─────────────────────────────────────────────────────────────────
   const [url,             setUrl]             = useState("");

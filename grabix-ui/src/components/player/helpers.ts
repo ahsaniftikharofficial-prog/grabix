@@ -9,7 +9,7 @@ import type {
   SubtitlePosition,
   PlaybackCacheRecord,
 } from "./types";
-import type { StreamSource } from "../lib/streamProviders";
+import type { StreamSource } from "../../lib/streamProviders";
 
 // ---------------------------------------------------------------------------
 // Constants

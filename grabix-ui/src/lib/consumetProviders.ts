@@ -17,6 +17,16 @@ export interface ConsumetMediaSummary {
   alt_title?: string;
   image?: string;
   provider?: string;
+  // Extended fields from legacy Consumet API responses
+  anilist_id?: number | string;
+  mal_id?: number | string;
+  mangadex_id?: string;
+  rating?: number;
+  genres?: string[];
+  status?: string;
+  description?: string;
+  year?: number;
+  url?: string;
 }
 
 export interface ConsumetChapter {
@@ -24,12 +34,17 @@ export interface ConsumetChapter {
   chapter_number?: string;
   title?: string;
   provider?: string;
+  // Extended fields from legacy Consumet API responses
+  number?: string | number;
+  language?: string;
+  released_at?: string;
 }
 
 export interface ConsumetMediaDetail extends ConsumetMediaSummary {
   description?: string;
   chapters?: ConsumetChapter[];
   pages?: string[];
+  domain?: string;
 }
 
 export interface ConsumetNewsItem {
@@ -41,11 +56,14 @@ export interface ConsumetNewsItem {
   views?: number;
   uploadedAt?: string;
   topics?: string[];
+  published_at?: string;
+  description?: string;
 }
 
 export interface ConsumetNewsArticle extends ConsumetNewsItem {
   content?: string;
   intro?: string;
+  description?: string;
 }
 
 export type ConsumetDomain = "manga" | "light-novels" | "books" | "comics";

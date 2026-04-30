@@ -6,7 +6,7 @@ import {
   IconRefresh, IconPlay, IconPause, IconStop, IconFolder, IconInfo,
   IconX, IconCheck, IconAlert, IconClock,
 } from "../components/Icons";
-import { QueueItem, formatDisplaySpeed, parseDisplayedBytes, secs } from "./downloader.types";
+import { QueueItem, formatDisplaySpeed, parseDisplayedBytes } from "./downloader.types";
 
 export function QueueCard({
   item, onRemove, onAction, onReveal,

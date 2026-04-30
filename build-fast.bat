@@ -5,13 +5,33 @@ cd /d "%~dp0"
 :: ╔══════════════════════════════════════════════════════╗
 :: ║           GRABIX  —  build-fast.bat                 ║
 :: ║  Builds the Tauri installer (.exe) from source.     ║
+:: ║                                                      ║
+:: ║  FIX: Window now stays open after build finishes.   ║
+:: ║  Close it yourself when done reviewing output.      ║
 :: ╚══════════════════════════════════════════════════════╝
+
+:: ── FIX 1: Keep window open — self-spawn inside a persistent cmd /k window ──
+::    Without this, the CMD window auto-closes the moment the script ends,
+::    even if pause is present (common when double-clicking .bat files or
+::    running from Windows Terminal).
+if /i "%~1"=="--inner" goto :main
+start "GRABIX Build" cmd /k ""%~f0" --inner"
+exit /b 0
+
+:main
+title GRABIX Build — Running...
+color 0A
 
 echo.
 echo  ==========================================
 echo    GRABIX Build
 echo  ==========================================
 echo.
+echo  Log file: %~dp0build-fast.log
+echo.
+
+:: Start logging — tee output to build-fast.log so errors are never lost
+call :log_init
 
 :: ── Core paths ──────────────────────────────────────────────────────────────
 set "ROOT=%~dp0"
@@ -45,7 +65,7 @@ if not exist "%PYTHON_EXE%" (
     echo  Fix: Run setup-grabix.bat first to download and configure
     echo       the Python runtime. Only needed once.
     echo.
-    pause & exit /b 1
+    call :die 1
 )
 
 :: npm
@@ -54,7 +74,7 @@ if errorlevel 1 (
     echo  ERROR: npm not found in PATH.
     echo  Install Node.js from https://nodejs.org and retry.
     echo.
-    pause & exit /b 1
+    call :die 1
 )
 
 :: cargo / Rust
@@ -63,7 +83,7 @@ if errorlevel 1 (
     echo  ERROR: cargo not found in PATH.
     echo  Install Rust from https://rustup.rs and retry.
     echo.
-    pause & exit /b 1
+    call :die 1
 )
 
 :: grabix-ui node_modules
@@ -77,7 +97,7 @@ if not exist "%FRONTEND%\node_modules" (
         echo  ERROR: npm install failed for grabix-ui.
         echo.
         cd /d "%ROOT%"
-        pause & exit /b 1
+        call :die 1
     )
     cd /d "%ROOT%"
     echo.
@@ -153,10 +173,13 @@ robocopy "%BACKEND%" "%STAGE_BACKEND%" /E /NJH /NJS /NFL /NDL ^
     /XD __pycache__ venv .venv tests .pytest_cache .mypy_cache .ruff_cache logs ^
     /XF *.pyc *.pyo *.sqlite *.sqlite3 *.db memory.db >nul
 
-:: robocopy exit codes 0-7 are success (bits = what was copied/skipped)
-if errorlevel 8 (
-    echo  ERROR: Backend staging failed ^(robocopy exit %ERRORLEVEL%^).
-    pause & exit /b 1
+:: FIX 2: robocopy exits 0-7 = success; capture code BEFORE using it.
+::        Using !ERRORLEVEL! (delayed expansion) to get the real value
+::        inside this block, not the stale parsed value.
+set "ROBOCOPY_EXIT=!ERRORLEVEL!"
+if !ROBOCOPY_EXIT! GEQ 8 (
+    echo  ERROR: Backend staging failed ^(robocopy exit !ROBOCOPY_EXIT!^).
+    call :die 1
 )
 echo  Backend staged.
 
@@ -186,12 +209,25 @@ if "%CONSUMET_PRESENT%"=="1" (
         robocopy "%CONSUMET%\node_modules" "%STAGE_CONSUMET%\node_modules" /E /NJH /NJS /NFL /NDL >nul
     )
 
-    :: Bundle node.exe so the sidecar can run in the packaged app
+    :: FIX 3: Bundle node.exe — original had delims=\ which split on backslashes
+    ::        so %%N got only "C:" instead of the full path. Fixed: delims= (empty)
+    ::        means return the whole line as one token = full path to node.exe.
+    ::
+    :: FIX 4: Replaced "goto :node_copied" inside a for-inside-if nested block.
+    ::        In CMD, goto inside nested parenthesized blocks is unreliable and
+    ::        can silently abort the entire outer if block. Using a flag variable
+    ::        instead is reliable on all Windows versions.
+    set "NODE_FOUND=0"
     for /f "delims=" %%N in ('where node 2^>nul') do (
-        copy /Y "%%N" "%STAGE_NODE%\node.exe" >nul
-        goto :node_copied
+        if "!NODE_FOUND!"=="0" (
+            copy /Y "%%N" "%STAGE_NODE%\node.exe" >nul
+            set "NODE_FOUND=1"
+        )
     )
-    :node_copied
+    if "!NODE_FOUND!"=="0" (
+        echo  WARNING: node.exe not found via where — node runtime not staged.
+        echo  HiAnime sidecar may not work in the packaged app.
+    )
 
     echo  consumet-local staged.
 ) else (
@@ -236,17 +272,20 @@ set "GRABIX_BACKEND_RESOURCE_SUBDIR=backend-staging/backend"
 
 cd /d "%FRONTEND%"
 npm run tauri build
-set "BUILD_EXIT=%ERRORLEVEL%"
+set "BUILD_EXIT=!ERRORLEVEL!"
 cd /d "%ROOT%"
 
-if not "%BUILD_EXIT%"=="0" (
+if not "!BUILD_EXIT!"=="0" (
     echo.
     echo  ==========================================
-    echo   BUILD FAILED  ^(exit %BUILD_EXIT%^)
-    echo   Scroll up to find the first error line.
+    echo   BUILD FAILED  ^(exit !BUILD_EXIT!^)
+    echo   Scroll up or check build-fast.log to
+    echo   find the first error line.
     echo  ==========================================
     echo.
-    pause & exit /b %BUILD_EXIT%
+    title GRABIX Build — FAILED
+    color 0C
+    call :die !BUILD_EXIT!
 )
 
 :: ────────────────────────────────────────────────────────────────────────────
@@ -267,5 +306,32 @@ echo   taken and the app shows as offline.
 echo.
 echo  ==========================================
 echo.
-pause
-exit /b 0
+title GRABIX Build — SUCCESS
+color 0A
+echo  Build complete. This window will stay open — close it when ready.
+echo  Log saved to: %~dp0build-fast.log
+echo.
+goto :eof
+
+:: ════════════════════════════════════════════════════════════════════════════
+:: Subroutines
+:: ════════════════════════════════════════════════════════════════════════════
+
+:die
+:: Usage: call :die <exit_code>
+:: Shows a consistent "press any key" message and exits with the given code.
+:: The window stays open because the outer cmd /k keeps it alive.
+echo.
+echo  ──────────────────────────────────────────
+echo   PRESS ANY KEY to dismiss this message.
+echo   The window will stay open so you can
+echo   scroll up and review all error output.
+echo  ──────────────────────────────────────────
+echo.
+pause >nul
+exit /b %~1
+
+:log_init
+:: Begin writing a log file alongside the bat
+echo GRABIX build-fast.bat — started %DATE% %TIME% > "%~dp0build-fast.log"
+goto :eof

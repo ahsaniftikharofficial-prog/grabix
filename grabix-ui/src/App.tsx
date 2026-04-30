@@ -33,7 +33,6 @@ const ConverterPage = lazy(() => import("./pages/ConverterPage"));
 const LibraryPage = lazy(() => import("./pages/LibraryPage"));
 
 const MangaPage = lazy(() => import("./pages/MangaPage"));
-const MediaPage = lazy(() => import("./pages/MediaPage"));
 const MoviesPage = lazy(() => import("./pages/MoviesPage"));
 const TVSeriesPage = lazy(() => import("./pages/TVSeriesPage"));
 const GenrePage = lazy(() => import("./pages/GenrePage"));

@@ -178,9 +178,9 @@ export default function ExplorePage() {
       setSelectedMedia(await fetchConsumetDomainInfo(tab as ConsumetDomain, item.id, item.provider || provider));
     } catch {
       setSelectedMedia({
+        ...item,
         domain: tab,
         provider: item.provider || provider,
-        item,
       });
     }
   };
@@ -191,7 +191,7 @@ export default function ExplorePage() {
     try {
       const nextContent = await fetchConsumetGenericRead(
         tab as Exclude<ConsumetDomain, "anime" | "manga">,
-        selectedMedia.item.id,
+        selectedMedia.id,
         selectedMedia.provider || provider
       );
       setReadingContent(nextContent);
@@ -268,7 +268,7 @@ export default function ExplorePage() {
                   {item.image ? <img src={toConsumetProxyUrl(item.image)} alt={item.title} referrerPolicy="no-referrer" style={{ width: "100%", height: 160, objectFit: "cover" }} /> : <div style={{ width: "100%", height: 160, background: "var(--bg-surface2)" }} />}
                   <div style={{ padding: "12px 14px" }}>
                     <div style={{ fontSize: 14, fontWeight: 700, lineHeight: 1.35 }}>{item.title}</div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 8 }}>{item.published_at || "Latest feed"}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 8 }}>{item.published_at ?? "Latest feed"}</div>
                   </div>
                 </button>
               ))}
@@ -291,7 +291,7 @@ export default function ExplorePage() {
                 {item.image ? <img src={item.image} alt={item.title} style={{ width: "100%", height: 220, objectFit: "cover" }} /> : <div style={{ width: "100%", height: 220, background: "var(--bg-surface2)" }} />}
                 <div style={{ padding: "10px 12px" }}>
                   <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.35 }}>{item.title}</div>
-                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>{item.provider.toUpperCase()}</div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>{(item.provider ?? "").toUpperCase()}</div>
                 </div>
               </button>
             ))}
@@ -300,28 +300,28 @@ export default function ExplorePage() {
       </div>
 
       {selectedNews && (
-        <Modal onClose={() => setSelectedNews(null)} title={selectedNews.title}>
-          <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>{selectedNews.published_at || "Latest feed"}</div>
-          <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7, whiteSpace: "pre-wrap" }}>{selectedNews.content || selectedNews.description || "No article body was returned."}</div>
+        <Modal onClose={() => setSelectedNews(null)} title={selectedNews.title ?? ""}>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>{selectedNews.published_at ?? "Latest feed"}</div>
+          <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7, whiteSpace: "pre-wrap" }}>{selectedNews.content ?? selectedNews.description ?? "No article body was returned."}</div>
           {selectedNews.url ? <button className="btn btn-ghost" style={{ marginTop: 16 }} onClick={() => window.open(selectedNews.url, "_blank")}><IconDownload size={14} /> Open Source</button> : null}
         </Modal>
       )}
 
       {selectedMedia && (
-        <Modal onClose={() => { setSelectedMedia(null); setReadingContent(null); }} title={selectedMedia.item.title}>
+        <Modal onClose={() => { setSelectedMedia(null); setReadingContent(null); }} title={selectedMedia.title ?? ""}>
           <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: 14 }}>
-            {selectedMedia.item.image ? <img src={selectedMedia.item.image} alt={selectedMedia.item.title} style={{ width: 120, height: 170, objectFit: "cover", borderRadius: 12, border: "1px solid var(--border)" }} /> : <div style={{ width: 120, height: 170, borderRadius: 12, background: "var(--bg-surface2)" }} />}
+            {selectedMedia.image ? <img src={selectedMedia.image} alt={selectedMedia.title} style={{ width: 120, height: 170, objectFit: "cover", borderRadius: 12, border: "1px solid var(--border)" }} /> : <div style={{ width: 120, height: 170, borderRadius: 12, background: "var(--bg-surface2)" }} />}
             <div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-                {selectedMedia.item.year ? <span style={{ background: "var(--bg-surface2)", padding: "3px 9px", borderRadius: 20, fontSize: 12 }}>{selectedMedia.item.year}</span> : null}
-                <span style={{ background: "var(--bg-surface2)", padding: "3px 9px", borderRadius: 20, fontSize: 12 }}>{selectedMedia.provider.toUpperCase()}</span>
+                {selectedMedia.year ? <span style={{ background: "var(--bg-surface2)", padding: "3px 9px", borderRadius: 20, fontSize: 12 }}>{selectedMedia.year}</span> : null}
+                <span style={{ background: "var(--bg-surface2)", padding: "3px 9px", borderRadius: 20, fontSize: 12 }}>{(selectedMedia.provider ?? "").toUpperCase()}</span>
               </div>
-              <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7 }}>{selectedMedia.item.description || "No description was returned for this item."}</div>
+              <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7 }}>{selectedMedia.description || "No description was returned for this item."}</div>
               <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
                 <button className="btn btn-primary" onClick={() => void openRead()} disabled={readingLoading}>
                   <IconDownload size={14} /> {readingLoading ? "Opening..." : tab === "books" ? "Load Preview" : "Open Content"}
                 </button>
-                {selectedMedia.item.url ? <button className="btn btn-ghost" onClick={() => window.open(selectedMedia.item.url, "_blank")}>Open Source</button> : null}
+                {selectedMedia.url ? <button className="btn btn-ghost" onClick={() => window.open(selectedMedia.url, "_blank")}>Open Source</button> : null}
               </div>
               {readingContent !== null && (readUrl || downloadLinks.length > 0) ? (
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
