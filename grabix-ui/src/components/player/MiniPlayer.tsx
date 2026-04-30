@@ -140,12 +140,6 @@ export function MiniPlayer({ onRestore }: Props) {
         </span>
       </div>
 
-      <style>{`
-        @keyframes gx-miniplayer-in {
-          from { transform: scale(0.85) translateY(20px); opacity: 0; }
-          to   { transform: scale(1) translateY(0); opacity: 1; }
-        }
-      `}</style>
     </div>
   );
 }

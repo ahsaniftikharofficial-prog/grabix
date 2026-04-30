@@ -80,9 +80,6 @@ export function MoodPills({ moods, activeMood, onSelect }: Props) {
         );
       })}
 
-      <style>{`
-        .gx-mood-row::-webkit-scrollbar { display: none; }
-      `}</style>
     </div>
   );
 }

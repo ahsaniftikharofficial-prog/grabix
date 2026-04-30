@@ -59,14 +59,6 @@ export function WatchdogBanner({ status, isBannerVisible }: WatchdogBannerProps)
 
   return (
     <>
-      {cfg.pulse && (
-        <style>{`
-          @keyframes grabix-watchdog-pulse {
-            0%, 100% { opacity: 1; }
-            50%       { opacity: 0.65; }
-          }
-        `}</style>
-      )}
       <div
         role="status"
         aria-live="assertive"

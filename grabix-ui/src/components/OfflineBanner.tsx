@@ -32,16 +32,6 @@ export function OfflineBanner({ offlineState }: Props) {
 
   return (
     <>
-      <style>{`
-        @keyframes grabix-pill-in {
-          from { opacity: 0; transform: translateY(12px) scale(0.95); }
-          to   { opacity: 1; transform: translateY(0)   scale(1); }
-        }
-        @keyframes grabix-pill-out {
-          from { opacity: 1; transform: translateY(0)   scale(1); }
-          to   { opacity: 0; transform: translateY(12px) scale(0.95); }
-        }
-      `}</style>
       <div
         role="status"
         aria-live="polite"

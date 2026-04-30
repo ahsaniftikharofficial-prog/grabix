@@ -142,11 +142,6 @@ export function LiveSearch({
         </button>
       )}
 
-      <style>{`
-        @keyframes gx-spin {
-          to { transform: rotate(360deg); }
-        }
-      `}</style>
     </div>
   );
 }

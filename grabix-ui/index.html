@@ -11,6 +11,11 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- portal-root: HoverCard and other portals target this div instead of
+         document.body. React 18 concurrent mode + WebView2 crashes when portals
+         are attached directly to document.body; a dedicated sibling element
+         isolates portal lifecycle from the main React tree. -->
+    <div id="portal-root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -671,7 +671,6 @@ export default function RatingsPage() {
 
   return (
     <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", background:"var(--bg-app)", color:"var(--text-primary)", fontFamily:"var(--font)" }}>
-      <style>{CSS}</style>
 
       {/* Header */}
       <div style={{ padding:"12px 20px", borderBottom:"1px solid var(--border)", flexShrink:0, display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>

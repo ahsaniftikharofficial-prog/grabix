@@ -101,16 +101,20 @@ export function HoverCard({
     };
   }
 
-  const portal = open
+  // FIX (removeChild crash): use a dedicated #portal-root element instead of
+  // document.body. React 18 concurrent mode + WebView2 crashes when portals
+  // are mounted on document.body because the compositor races with React's
+  // fiber commit. A sibling div that React owns entirely avoids the race.
+  // The @keyframes animation has been moved to index.css so we no longer
+  // inject/destroy a <style> node on every hover (that was a second trigger).
+  const portalRoot =
+    typeof document !== "undefined"
+      ? (document.getElementById("portal-root") ?? document.body)
+      : null;
+
+  const portal = open && portalRoot
     ? createPortal(
         <>
-          {/* Inject keyframe once — safe if injected multiple times */}
-          <style>{`
-            @keyframes hoverCardIn {
-              from { opacity: 0; transform: scale(0.93) translateY(6px); }
-              to   { opacity: 1; transform: scale(1)    translateY(0);    }
-            }
-          `}</style>
           <div
             style={getPortalStyle()}
             onMouseEnter={clearLeave}
@@ -205,7 +209,7 @@ export function HoverCard({
             </div>
           </div>
         </>,
-        document.body
+        portalRoot
       )
     : null;
 

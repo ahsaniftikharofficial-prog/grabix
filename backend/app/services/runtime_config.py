@@ -50,13 +50,67 @@ def runtime_config_path() -> Path:
 
 @lru_cache(maxsize=1)
 def load_runtime_config() -> dict[str, Any]:
-    path = runtime_config_path()
-    if not path.exists():
-        return {}
+    # Primary location: explicit env var or app_state_root
+    primary = runtime_config_path()
+    if primary.exists():
+        try:
+            return json.loads(primary.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    # FIX (movies not loading in packaged exe): runtime-config.json lives in
+    # the backend/ source directory during development. In a packaged Tauri exe
+    # the backend runs from a Tauri resource directory, NOT from the project
+    # source tree. app_state_root() resolves to ~/Downloads/GRABIX/ which is
+    # correct for databases/logs but the runtime-config.json is never copied
+    # there on first install, so has_tmdb_token() always returns False and all
+    # TMDB-backed pages (Movies, TV Series, Ratings) show nothing.
+    #
+    # We now fall back to searching three additional locations in order:
+    #   1. GRABIX_RESOURCE_DIR env var  — set by Tauri for bundled resources
+    #   2. Directory of the running script / frozen executable
+    #   3. Parent of that directory     — common layout for pyinstaller bundles
+    import sys
+
+    candidate_dirs: list[Path] = []
+
+    resource_dir = os.getenv("GRABIX_RESOURCE_DIR", "").strip()
+    if resource_dir:
+        candidate_dirs.append(Path(resource_dir))
+
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        # sys.executable in a packaged exe is the exe itself; its parent dir
+        # usually contains the bundled backend resources.
+        exe_dir = Path(sys.executable).resolve().parent
+        candidate_dirs.append(exe_dir)
+        candidate_dirs.append(exe_dir.parent)
     except Exception:
-        return {}
+        pass
+
+    try:
+        script_dir = Path(sys.argv[0]).resolve().parent
+        if script_dir not in candidate_dirs:
+            candidate_dirs.append(script_dir)
+    except Exception:
+        pass
+
+    for directory in candidate_dirs:
+        candidate = directory / "runtime-config.json"
+        if candidate.exists():
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+                # Copy to the canonical location so future calls (and cache
+                # invalidation scenarios) find it without searching again.
+                try:
+                    primary.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(candidate, primary)
+                except Exception:
+                    pass
+                return data
+            except Exception:
+                continue
+
+    return {}
 
 
 def _copy_file_if_missing(source: Path, destination: Path) -> bool:

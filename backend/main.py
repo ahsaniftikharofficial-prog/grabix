@@ -25,7 +25,6 @@ from app.routes.providers import router as providers_router
 from app.routes.settings import router as settings_router
 from app.routes.streaming import router as streaming_router
 from app.routes.subtitles import router as subtitles_router
-from app.routes.adblock import router as adblock_router
 from moviebox import (
     router as moviebox_router,
     start_bg_retry as _moviebox_start_bg_retry,
@@ -40,6 +39,13 @@ from downloads.engine import (
     _persist_download_record,
     _start_download_thread,
 )
+
+# FIX (Bug 2 — Problem B): Import the engine MODULE, not just the function.
+# `from downloads.engine import _start_download_thread` captures the value at
+# import time, which may be None if _register_download_handlers() hasn't run
+# yet. Using the module reference lets the lambda below dereference it at
+# call-time, always getting the live post-registration function.
+import downloads.engine as _downloads_engine
 
 # ── Service imports ───────────────────────────────────────────────────────────
 from app.services.errors import json_error_response
@@ -78,6 +84,12 @@ from db_helpers import (
     _guess_dl_type_from_path, has_ffmpeg, has_aria2, init_db,
 )
 from library_helpers import migrate_db, _build_library_index, _reconcile_library_state
+from streaming_helpers import (
+    _extract_iframe_src, _fetch_json, _normalize_request_headers,
+    _rewrite_hls_playlist, _extract_hls_variants, _looks_like_playable_media_url,
+    _extract_stream_url, _resolve_embed_target, resolve_embed, stream_proxy,
+    stream_variants, _extract_stream_url_via_browser, extract_stream,
+)
 
 # ── Phase 2 core split ────────────────────────────────────────────────────────
 from core import cache_ops, network_monitor, download_helpers
@@ -99,28 +111,6 @@ from core.download_helpers import (
     _start_auto_retry_failed_worker,
 )
 from core.network_monitor import _start_network_monitor
-
-# ── Re-export helpers that submodules look up via `import main` ───────────────
-# library_helpers and moviebox do `import main as _m; _m._sqlite_cache_get(...)`
-# The implementations live in core/ but must be reachable as main.<name>.
-from core.cache_ops import (
-    _sqlite_cache_get,
-    _sqlite_cache_set,
-    _cache_trigger_bg_refresh,
-)
-
-def _is_internal_managed_file(path) -> bool:
-    """Return True if *path* lives inside RUNTIME_TOOLS_DIR.
-
-    library_helpers calls this to skip internal tool binaries when building
-    the user-facing library index.
-    """
-    from pathlib import Path as _Path
-    try:
-        rtd = runtime_tools_dir()
-        return _Path(path).resolve().is_relative_to(rtd.resolve())
-    except Exception:
-        return False
 
 try:
     import bcrypt
@@ -159,12 +149,11 @@ download_helpers.init(
     downloads, download_controls,
     db_update_status=db_update_status,
     persist_download_record=_persist_download_record,
-    start_download_thread=_start_download_thread,
+    # FIX (Bug 2 — Problem B): lambda defers lookup to call-time so we always
+    # get the live function even if _register_download_handlers() reassigns
+    # _downloads_engine._start_download_thread after this module is imported.
+    start_download_thread=lambda dl_id: _downloads_engine._start_download_thread(dl_id),
 )
-# Wire the downloads engine to the same shared dicts so all modules
-# read/write the same in-memory state.
-import downloads.engine as _dl_engine
-_dl_engine.init(downloads, download_controls)
 
 # ── Loggers ───────────────────────────────────────────────────────────────────
 backend_logger = get_logger("backend")
@@ -230,9 +219,6 @@ def refresh_runtime_tools() -> None:
             os.environ["PATH"] = f"{normalized}{os.pathsep}{existing}" if existing else normalized
 
 
-refresh_runtime_tools()
-
-
 # ── aria2 cleanup on exit ─────────────────────────────────────────────────────
 
 def _terminate_all_aria2_processes() -> None:
@@ -274,15 +260,7 @@ async def _grabix_lifespan(app: FastAPI):
     cache_ops.set_event_loop(_app_event_loop)   # allow background cache refresh
     ensure_runtime_bootstrap()
     recover_download_jobs()
-    # Start ad blocker filter list download in background
-    try:
-        from app.services.adblock_service import initialize as _adblock_init
-        from app.services.runtime_config import app_state_root as _app_state_root
-        from pathlib import Path as _Path
-        _adblock_cache = _Path(_app_state_root()) / "adblock-cache"
-        _adblock_init(_adblock_cache)
-    except Exception:
-        pass  # adblock init failure must never crash the backend
+    asyncio.create_task(run_key_health_worker(interval_seconds=1200.0))
     yield
 
 
@@ -303,7 +281,6 @@ app.include_router(providers_router)
 app.include_router(settings_router)
 app.include_router(streaming_router)
 app.include_router(subtitles_router,       prefix="/subtitles")
-app.include_router(adblock_router)
 app.include_router(moviebox_router,        prefix="/moviebox")
 app.include_router(downloads_engine_router)
 # Phase 2: health, cache, diagnostics, providers routes
@@ -554,8 +531,19 @@ def run_server() -> None:
     import sys as _sys
 
     _register_download_handlers()
-    ensure_runtime_bootstrap()
-    recover_download_jobs()
+
+    # FIX (Bug 2 — Problem A): Removed the two premature calls that were here:
+    #   ensure_runtime_bootstrap()
+    #   recover_download_jobs()
+    #
+    # Both functions are now called exclusively inside _grabix_lifespan, where
+    # the asyncio event loop is already running. Calling them here — before
+    # loop.run_until_complete() — meant the event loop didn't exist yet, so any
+    # coroutines or asyncio.create_task() calls inside them were silently
+    # dropped. Download threads started by that broken first call were orphaned,
+    # and when the lifespan called the same functions a second time it couldn't
+    # tell recovered jobs from new ones. Net result: every download stayed
+    # permanently "queued" with no thread ever pulling it.
 
     port = backend_port()
 
