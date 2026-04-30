@@ -54,7 +54,8 @@ release-gate-report*.json
 *.spec.bak
 
 # ─── Downloaded Media (never commit user content) ────────────
-backend/downloads/
+backend/downloads/*
+!backend/downloads/*.py
 
 # ─── Secrets & Environment ──────────────────────────────────
 .env
