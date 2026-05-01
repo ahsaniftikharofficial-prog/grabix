@@ -621,7 +621,10 @@ fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathB
             std::env::set_var("PYTHONDONTWRITEBYTECODE", "1");
             std::env::set_var("PYTHONUNBUFFERED", "1");
 
-            // Initialize Python interpreter (must happen before with_gil).
+            // FIX (RC1): prepare_freethreaded_python() MUST be called exactly once —
+            // before any with_gil() call — and must NOT be inside the restart loop.
+            // Calling it more than once is a no-op but calling it after the interpreter
+            // is already running causes undefined behaviour.
             pyo3::prepare_freethreaded_python();
 
             // WINDOWS (release only): Free any console that PyO3 allocated.
@@ -641,59 +644,128 @@ fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathB
                 }
             }
 
-            let result = Python::with_gil(|py| -> PyResult<()> {
-                // Put backend_dir at front of sys.path so `import main` works.
-                let sys = py.import_bound("sys")?;
-                let path = sys.getattr("path")?;
-                path.call_method1("insert", (0, &backend_dir_for_python))?;
+            // FIX (RC1): Wrap the backend run in a restart loop.
+            // Previously the thread exited on any failure and the backend stayed dead
+            // forever. Now it retries up to MAX_RESTARTS times, sleeping between
+            // attempts. Port-conflict errors (RC2) get a longer sleep so the OS has
+            // time to release the port after a crash/hard-restart.
+            const MAX_RESTARTS: u32 = 10;
+            let mut attempt: u32 = 0;
+            let mut is_first_run = true;
 
-                // WINDOWS (release only): redirect Python's sys.stdout / sys.stderr
-                // to the NUL device so that the embedded interpreter does not call
-                // AllocConsole() looking for a console handle.  Without this, a
-                // "Console Window Host" subprocess appears in Task Manager and a
-                // blank CMD window flashes on startup.  The backend uses the
-                // `logging` module (→ log file) for all its output, so no useful
-                // output is lost.
-                #[cfg(not(debug_assertions))]
-                {
-                    py.run_bound(
-                        "import sys\n\
-                         try:\n\
-                         \x20\x20nul = open('nul', 'w')\n\
-                         \x20\x20sys.stdout = nul\n\
-                         \x20\x20sys.stderr = nul\n\
-                         except Exception:\n\
-                         \x20\x20pass\n",
-                        None,
-                        None,
-                    )?;
+            loop {
+                attempt += 1;
+                if attempt > MAX_RESTARTS {
+                    let msg = format!(
+                        "Embedded Python backend failed {} consecutive times — giving up. Check startup log for details.",
+                        MAX_RESTARTS
+                    );
+                    log_sidecar(&app, &format!("PyO3: {}", msg));
+                    update_backend_status(&app, "failed", &msg, false, "max_restarts_exceeded");
+                    break;
                 }
 
-                log_sidecar(&app, "PyO3: Importing backend main module...");
-                let main_mod = py.import_bound("main")?;
-
-                log_sidecar(
-                    &app,
-                    "PyO3: Calling main.run_server() — uvicorn starting...",
-                );
-                // run_server() blocks here forever (uvicorn event loop).
-                // When the Rust process exits, this thread exits, Python exits.
-                main_mod.call_method0("run_server")?;
-
-                Ok(())
-            });
-
-            match result {
-                Ok(_) => {
-                    let msg = "Embedded Python backend exited before startup completed.";
-                    log_sidecar(&app, "PyO3: Python backend exited cleanly.");
-                    update_backend_status(&app, "failed", msg, false, "python_backend_exited");
+                if !is_first_run {
+                    log_sidecar(
+                        &app,
+                        &format!("PyO3: Restart attempt {}/{}...", attempt, MAX_RESTARTS),
+                    );
+                    update_backend_status(
+                        &app,
+                        "starting",
+                        &format!(
+                            "Restarting embedded Python backend (attempt {}/{})...",
+                            attempt, MAX_RESTARTS
+                        ),
+                        false,
+                        "",
+                    );
                 }
-                Err(e) => {
-                    let msg = format!("Embedded Python backend bootstrap failed: {}", e);
-                    log_sidecar(&app, &format!("PyO3: Python backend error: {}", e));
-                    update_backend_status(&app, "failed", &msg, false, "python_bootstrap_failed");
-                }
+                is_first_run = false;
+
+                let result = Python::with_gil(|py| -> PyResult<()> {
+                    // Put backend_dir at front of sys.path so `import main` works.
+                    // On restarts sys.path already has this entry — inserting again
+                    // is harmless (Python uses the first match).
+                    let sys = py.import_bound("sys")?;
+                    let path = sys.getattr("path")?;
+                    path.call_method1("insert", (0, &backend_dir_for_python))?;
+
+                    // WINDOWS (release only): redirect Python's sys.stdout / sys.stderr
+                    // to the NUL device so that the embedded interpreter does not call
+                    // AllocConsole() looking for a console handle.  Without this, a
+                    // "Console Window Host" subprocess appears in Task Manager and a
+                    // blank CMD window flashes on startup.  The backend uses the
+                    // `logging` module (→ log file) for all its output, so no useful
+                    // output is lost.  Only redirect on the first run — on restarts
+                    // the handles are already pointing at NUL.
+                    #[cfg(not(debug_assertions))]
+                    if attempt == 1 {
+                        py.run_bound(
+                            "import sys\n\
+                             try:\n\
+                             \x20\x20nul = open('nul', 'w')\n\
+                             \x20\x20sys.stdout = nul\n\
+                             \x20\x20sys.stderr = nul\n\
+                             except Exception:\n\
+                             \x20\x20pass\n",
+                            None,
+                            None,
+                        )?;
+                    }
+
+                    if attempt == 1 {
+                        log_sidecar(&app, "PyO3: Importing backend main module...");
+                    }
+                    // On restarts, import_bound returns the cached module from
+                    // sys.modules — no re-execution, which is what we want.
+                    let main_mod = py.import_bound("main")?;
+
+                    if attempt == 1 {
+                        log_sidecar(&app, "PyO3: Calling main.run_server() — uvicorn starting...");
+                    } else {
+                        log_sidecar(
+                            &app,
+                            &format!("PyO3: Calling main.run_server() (restart {})...", attempt),
+                        );
+                    }
+                    // run_server() blocks here for the lifetime of the uvicorn server.
+                    // It returns/raises when the server exits for any reason.
+                    main_mod.call_method0("run_server")?;
+
+                    Ok(())
+                });
+
+                // Determine if this was a port-in-use failure (RC2 interop).
+                // backend/main.py raises RuntimeError("port_in_use: ...") instead of
+                // sys.exit(1) so we can detect it here and wait longer.
+                let error_str = match &result {
+                    Err(e) => e.to_string(),
+                    Ok(_) => String::new(),
+                };
+                let is_port_conflict = error_str.contains("port_in_use");
+                let sleep_secs: u64 = if is_port_conflict { 8 } else { 3 };
+
+                let reason_msg = if is_port_conflict {
+                    format!(
+                        "Port conflict on attempt {}. Waiting {}s for the OS to release the port...",
+                        attempt, sleep_secs
+                    )
+                } else if result.is_ok() {
+                    format!(
+                        "Backend exited cleanly on attempt {}. Restarting in {}s...",
+                        attempt, sleep_secs
+                    )
+                } else {
+                    format!(
+                        "Backend crashed on attempt {}: {}. Restarting in {}s...",
+                        attempt, error_str, sleep_secs
+                    )
+                };
+
+                log_sidecar(&app, &format!("PyO3: {}", reason_msg));
+                update_backend_status(&app, "restarting", &reason_msg, false, "restarting");
+                thread::sleep(Duration::from_secs(sleep_secs));
             }
         })
         .expect("Failed to spawn pyo3-backend thread");
@@ -1064,10 +1136,15 @@ fn start_python_backend_async(app: AppHandle) {
             );
 
             if !is_port_available(8000) {
-                let msg = "Backend port 8000 is already in use. Close the other process and relaunch GRABIX.";
+                // FIX (RC1 + RC2): Previously this returned early, permanently killing
+                // the backend with no retry. Now we log it and continue — the restart
+                // loop inside start_python_backend will detect the port_in_use error
+                // (raised as RuntimeError by backend/main.py instead of sys.exit) and
+                // wait 8 seconds for the OS to release the port before retrying.
+                let msg = "Backend port 8000 is occupied at startup. The restart loop will wait for it to free up and retry automatically.";
                 log_sidecar(&app, &format!("PyO3: {}", msg));
-                update_backend_status(&app, "port_in_use", msg, false, "port_in_use");
-                return;
+                update_backend_status(&app, "restarting", msg, false, "port_in_use_retry");
+                // ← intentionally NOT returning; fall through to start_python_backend()
             }
 
             update_backend_status(
@@ -1235,11 +1312,20 @@ const AD_BLOCK_SCRIPT: &str = r#"
   try {
     var protocol = String(location.protocol || '').toLowerCase();
     var host = String(location.hostname || '').toLowerCase();
+    // FIX: Tauri v2 serves the app shell on http://tauri.localhost — NOT tauri://
+    // or plain localhost. The old guard only checked 'localhost' (exact) so it
+    // missed 'tauri.localhost', meaning the MutationObserver below was running
+    // INSIDE the React app and removing React-managed DOM nodes (anything whose
+    // class contains "overlay", "popup", etc.) on every DOM mutation.
+    // React's fiber tree still referenced those removed nodes, so every
+    // reconciliation threw "removeChild: node is not a child of this node".
+    // The fix: exclude any *.localhost hostname, not just bare localhost.
     if (
       protocol === 'tauri:' ||
       protocol === 'asset:' ||
       host === 'localhost' ||
-      host === '127.0.0.1'
+      host === '127.0.0.1' ||
+      host.endsWith('.localhost')
     ) return;
     // ── Check if ad blocker is enabled (toggle stored in localStorage) ──
     if (localStorage.getItem('grabix_adblock') === 'false') return;

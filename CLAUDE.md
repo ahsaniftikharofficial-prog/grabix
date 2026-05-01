@@ -517,4 +517,4 @@ For multi-step tasks, state a brief plan:
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
 Fix the code and give me the fixed files and tell me where to paste them 
-also if you make any change in code create or remove or edit or any thing you do with code alway update this files for next claude account also update it if you only make changes in the code ok 
+also if you make any change in code create or remove or edit or any thing you do with code alway update this files for next claude account also update it if you only make changes in the code ok
