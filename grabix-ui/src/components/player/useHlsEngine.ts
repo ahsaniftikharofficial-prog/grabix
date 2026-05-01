@@ -159,7 +159,19 @@ export function useHlsEngine({
         });
         hlsRef.current = hls;
         hls.attachMedia(video);
-        hls.on(Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(playbackUrl));
+        hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+          // FIX (RC6): Guard against a race where hls.destroy() was called between
+          // MEDIA_ATTACHED firing and this callback running (e.g. rapid source switch).
+          // Calling loadSource on a destroyed or detached instance throws internally,
+          // React doesn't catch it (it's an event handler), and the player goes blank.
+          try {
+            if (!hlsRef.current || hlsRef.current.media === null) return;
+            hls.loadSource(playbackUrl);
+          } catch (_e) {
+            // Instance was destroyed mid-attach — next effect run will create a
+            // fresh one. Nothing to do here.
+          }
+        });
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           if (hls.levels.length > 0) {
             setHlsLevels(hls.levels.map(l => ({ height: l.height || 0, bitrate: l.bitrate || 0 })));

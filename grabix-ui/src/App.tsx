@@ -340,23 +340,41 @@ function Inner() {
         }}
       >
         <RuntimeHealthProvider value={{ health: runtimeHealth, runtimeState, refreshHealth: refreshRuntimeHealth }}>
-          {(Object.keys(pages) as Page[]).map((p) => (
-            <div
-              key={p}
-              style={{
-                display: page === p ? "flex" : "none",
-                flexDirection: "column",
-                flex: 1,
-                width: "100%",
-                minWidth: 0,
-                minHeight: 0,
-              }}
-            >
-              <Suspense fallback={page === p ? <PageLoadingState page={p as Page} /> : null}>
-                {pages[p as Page]}
-              </Suspense>
-            </div>
-          ))}
+          {(Object.keys(pages) as Page[]).map((p) => {
+            // FIX (RC3): Replace display:none (all pages mounted) with conditional
+            // rendering (only the active page mounted). This stops the 20-40+
+            // simultaneous API requests that fired on every startup — one per page —
+            // which was collapsing the backend and triggering false "offline" states.
+            // Inactive pages unmount cleanly, releasing their memory and state.
+            //
+            // Exception: DownloaderPage stays always-mounted because it manages
+            // in-flight download UI state that should not be lost on page switch.
+            const isActive = page === p;
+            const isDownloader = p === "downloader";
+
+            if (!isActive && !isDownloader) {
+              // Not active and not a persistent page — unmount entirely.
+              return null;
+            }
+
+            return (
+              <div
+                key={p}
+                style={{
+                  display: isActive ? "flex" : "none",
+                  flexDirection: "column",
+                  flex: 1,
+                  width: "100%",
+                  minWidth: 0,
+                  minHeight: 0,
+                }}
+              >
+                <Suspense fallback={isActive ? <PageLoadingState page={p as Page} /> : null}>
+                  {pages[p as Page]}
+                </Suspense>
+              </div>
+            );
+          })}
         </RuntimeHealthProvider>
       </main>
     </div>

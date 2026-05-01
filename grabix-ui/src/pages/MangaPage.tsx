@@ -165,7 +165,7 @@ function MangaReaderImage({ src, alt, index, total, onLoadNext }: { src: string;
       <img
         src={src}
         alt={alt}
-        loading={index < 2 ? "eager" : "lazy"}
+        loading={index === 0 ? "eager" : "lazy"}
         decoding="async"
         referrerPolicy="no-referrer"
         style={{ width: "100%", display: "block", borderRadius: 12, border: "1px solid var(--border)", background: "var(--bg-surface2)" }}

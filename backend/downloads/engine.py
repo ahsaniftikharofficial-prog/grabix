@@ -557,6 +557,15 @@ def _run_ytdlp(dl_id: str, item: dict, pause_ev: threading.Event, cancel_ev: thr
 
     ffmpeg_path = _resolve_tool_binary("ffmpeg", ["ffmpeg.exe", "ffmpeg"])
 
+    # FIX (RC5): Throttle state dict for the progress hook.
+    # Without this, yt-dlp fires the hook every ~0.5 seconds per download.
+    # With 2-3 concurrent downloads that's 4-6 GIL acquisitions per second,
+    # which starves the uvicorn async event loop and causes /health/ping to
+    # time out — making the watchdog falsely show "backend offline".
+    # Throttling to once every 2 seconds per download reduces GIL contention
+    # by ~4x with no meaningful loss of progress visibility.
+    _last_progress_update: dict[str, float] = {}
+
     # ── Progress hook ─────────────────────────────────────────────────────────
     def _progress_hook(d: dict) -> None:
         status = d.get("status")
@@ -576,6 +585,14 @@ def _run_ytdlp(dl_id: str, item: dict, pause_ev: threading.Event, cancel_ev: thr
             raise _CancelledError()
 
         if status == "downloading":
+            # RC5 throttle: skip updates that arrive less than 2 seconds after
+            # the last one for this download. "finished" and other status values
+            # always pass through so state transitions are never dropped.
+            _now = time.monotonic()
+            if _now - _last_progress_update.get(dl_id, 0.0) < 2.0:
+                return
+            _last_progress_update[dl_id] = _now
+
             downloaded = int(d.get("downloaded_bytes") or 0)
             total = int(d.get("total_bytes") or d.get("total_bytes_estimate") or 0)
             speed = float(d.get("speed") or 0)

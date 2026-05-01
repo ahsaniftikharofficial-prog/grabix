@@ -571,16 +571,16 @@ def run_server() -> None:
         _probe.bind(("127.0.0.1", port))
         _probe.close()
     except OSError:
-        _sys.stderr.write(
-            f"\n ==========================================\n"
-            f"   GRABIX Backend — STARTUP FAILED\n"
-            f"   Port {port} is already in use.\n"
-            f"   Another GRABIX backend is already running.\n"
-            f"   Close it (or its terminal window) first,\n"
-            f"   then restart.\n"
-            f" ==========================================\n\n"
+        # FIX (RC2): Raise a catchable RuntimeError instead of calling sys.exit(1).
+        # sys.exit() raises SystemExit which PyO3 cannot recover from — it permanently
+        # kills the embedded interpreter. RuntimeError is caught by the Rust restart
+        # loop in lib.rs, which waits 8 seconds for the OS to release the port, then
+        # retries. This makes port conflicts on crash/restart fully self-healing.
+        raise RuntimeError(
+            f"port_in_use: Port {port} is already in use. "
+            f"Another GRABIX backend is still running (or the OS has not yet released "
+            f"the port after a crash). The backend will retry automatically."
         )
-        _sys.exit(1)
 
     loop = asyncio.SelectorEventLoop() if os.name == "nt" else asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
