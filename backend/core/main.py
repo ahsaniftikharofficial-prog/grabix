@@ -80,7 +80,7 @@ from library_helpers import migrate_db, _build_library_index, _reconcile_library
 from streaming_helpers import (
     _extract_iframe_src, _fetch_json, _normalize_request_headers,
     _rewrite_hls_playlist, _extract_hls_variants, _looks_like_playable_media_url,
-    _extract_stream_url, _resolve_embed_target, resolve_embed, stream_proxy,
+    _resolve_embed_target, resolve_embed, stream_proxy,
     stream_variants, _extract_stream_url_via_browser, extract_stream,
 )
 
@@ -94,7 +94,12 @@ from core.health import (
     _diagnostics_payload,
     router as health_router,
 )
-from core.cache_ops import router as cache_router
+from core.cache_ops import (
+    router as cache_router,
+    _sqlite_cache_get,
+    _sqlite_cache_set,
+    _cache_trigger_bg_refresh,
+)
 from core.download_helpers import (
     _normalize_download_target,
     _infer_download_category,
@@ -126,6 +131,19 @@ download_controls: dict = runtime_state.download_controls
 FFMPEG_PATH = shutil.which("ffmpeg")
 ARIA2_PATH = shutil.which("aria2c")
 SELF_BASE_URL = public_base_url()
+
+# ── Internal file guard (used by library_helpers via lazy import) ─────────────
+_INTERNAL_FILE_SUFFIXES = {".db", ".db-wal", ".db-shm", ".json", ".log", ".lock"}
+
+def _is_internal_managed_file(path) -> bool:
+    """Return True for GRABIX-internal files that should not appear in the library index."""
+    from pathlib import Path as _Path
+    p = _Path(path)
+    if p.suffix.lower() in _INTERNAL_FILE_SUFFIXES:
+        return True
+    if p.name.startswith("."):
+        return True
+    return False
 STREAM_EXTRACT_CACHE_TTL_SECONDS = 900
 stream_extract_cache: dict[str, tuple[float, dict]] = runtime_state.stream_extract_cache
 ADULT_UNLOCK_WINDOW_SECONDS = 300
@@ -250,7 +268,6 @@ async def _grabix_lifespan(app: FastAPI):
     cache_ops.set_event_loop(_app_event_loop)   # allow background cache refresh
     ensure_runtime_bootstrap()
     recover_download_jobs()
-    asyncio.create_task(run_key_health_worker(interval_seconds=1200.0))
     yield
 
 
