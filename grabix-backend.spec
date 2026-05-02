@@ -36,6 +36,17 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('curl_cffi')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+# FIX (downloads stuck "Queued" in EXE): yt_dlp loads its 1000+ extractor
+# plugins dynamically via importlib at runtime. PyInstaller's static analysis
+# only sees the top-level `import yt_dlp` and misses every extractor submodule.
+# Without collect_all, YoutubeDL() crashes in the frozen exe the moment it
+# tries to enumerate extractors — the background download thread dies with a
+# BaseException BEFORE it can set status to "downloading", so the task stays
+# permanently "Queued" in the UI. collect_all bundles every extractor + all
+# yt_dlp data files (cookies templates, etc.) into the package.
+tmp_ret = collect_all('yt_dlp')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
 # ── Analysis ──────────────────────────────────────────────────────────────────
 a = Analysis(
     ['backend\\main.py'],

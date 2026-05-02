@@ -174,6 +174,18 @@ download_helpers.init(
     start_download_thread=lambda dl_id: _downloads_engine._start_download_thread(dl_id),
 )
 
+# FIX (downloads stuck "Queued" in EXE — root cause #1):
+# downloads/engine.py holds its OWN private _downloads / _download_controls
+# dicts (initialised to {} at module load). main.py creates a separate
+# RuntimeStateRegistry and binds `downloads` / `download_controls` to THOSE
+# dicts. Without this init() call the two sides of the app were talking to
+# completely different dicts: start_download() stored the record into engine's
+# private dict but list_downloads() / the SSE stream read from the registry
+# dict — so the UI always saw an empty queue and nothing ever started.
+# engine.init() replaces the engine's private references with the same objects
+# that main.py, download_helpers, and network_monitor already share.
+_downloads_engine.init(downloads, download_controls)
+
 # ── Loggers ───────────────────────────────────────────────────────────────────
 backend_logger = get_logger("backend")
 downloads_logger = get_logger("downloads")

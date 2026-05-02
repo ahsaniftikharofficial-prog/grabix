@@ -101,6 +101,24 @@ def _lazy_import() -> None:
     except Exception as exc:
         logger.warning("runtime_config import failed: %s", exc)
 
+    # FIX (downloads stuck "Queued" in EXE — root cause #2):
+    # In a PyInstaller frozen executable the import machinery uses a per-module
+    # lock. If a background download thread is the FIRST code to import yt_dlp
+    # (which happens when _run_ytdlp() does `import yt_dlp as ytdl`), and the
+    # main thread is simultaneously doing any other import, the two locks can
+    # interact badly: the background thread stalls inside the frozen importer
+    # and never reaches _mark("downloading"), so the task stays on "Queued"
+    # forever. Pre-importing here — during startup, on the main thread — puts
+    # yt_dlp (and all its extractor sub-packages if collect_all was used in the
+    # spec) into sys.modules before any worker thread ever touches it. After
+    # this point `import yt_dlp` in a thread is a single dict lookup, not a
+    # real import, so the lock is never needed.
+    try:
+        import yt_dlp as _yt_dlp_preload  # noqa: F401 — side-effect only
+        logger.debug("yt_dlp pre-import OK (version: %s)", getattr(_yt_dlp_preload, '__version__', 'unknown'))
+    except Exception as exc:
+        logger.warning("yt_dlp pre-import failed — downloads will not work in this build: %s", exc)
+
 
 def _windows_hidden_subprocess_kwargs() -> dict[str, Any]:
     if platform.system() != "Windows":
@@ -494,6 +512,27 @@ def _download_worker(dl_id: str) -> None:
               recoverable=bool(partial),
               failure_code="download_failed",
               stage_label="Failed")
+    except BaseException as exc:
+        # FIX (downloads stuck "Queued" in EXE — root cause #3):
+        # yt_dlp and the frozen importer can raise SystemExit or other
+        # BaseException subclasses (not just Exception). In dev mode these
+        # propagate up and are visible. In the frozen EXE the background thread
+        # silently dies, the status dict is never updated from "downloading"
+        # back to "failed", and the UI shows "Queued" forever.
+        # Catching BaseException here guarantees _mark("failed") always runs.
+        logger.error("Download %s crashed with BaseException: %s", dl_id, exc, exc_info=True)
+        try:
+            _mark("failed",
+                  error=f"Internal error: {type(exc).__name__}: {exc}"[:300],
+                  speed="",
+                  eta="",
+                  can_pause=False,
+                  recoverable=False,
+                  failure_code="internal_crash",
+                  stage_label="Failed")
+        except Exception:
+            pass
+        raise  # re-raise so the thread's unhandled-exception handler still logs it
 
 
 class _CancelledError(Exception):
