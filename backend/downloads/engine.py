@@ -29,7 +29,17 @@ from typing import Any
 
 from fastapi import APIRouter
 
-logger = logging.getLogger("downloads.engine")
+# FIX (Root Cause #4 — silent log black-hole):
+# logging.getLogger("downloads.engine") creates a bare logger with NO file
+# handler. In the frozen EXE every logger.warning/error in the worker thread
+# was silently discarded — the BaseException catch, the "Download failed"
+# message, the yt_dlp pre-import failure warning — ALL of it went nowhere.
+# This made it impossible to diagnose what was actually crashing. Switch to
+# get_logger("downloads") which writes to ~/Downloads/GRABIX/logs/downloads.log
+# with a RotatingFileHandler, so errors are visible after a bad run.
+# NOTE: get_logger is imported lazily in _lazy_import() to avoid circular
+# imports at module load time. We keep a module-level fallback until then.
+logger = logging.getLogger("grabix.downloads")  # same name get_logger uses
 
 # ── Shared mutable state (injected by main.py via init()) ────────────────────
 _downloads: dict[str, dict] = {}
@@ -68,6 +78,18 @@ def _lazy_import() -> None:
     global _db_list_download_jobs, _format_bytes, _format_eta
     global _has_ffmpeg, _has_aria2, _default_download_dir, _app_state_root
     global _sanitize_download_engine, _runtime_tools_dir, _bundled_tools_dir
+    global logger  # upgrade the fallback logger to the file-backed one
+
+    # FIX (Root Cause #4 cont.): Attach the file-backed RotatingFileHandler
+    # as soon as logging_utils is importable (which it always is by the time
+    # init() is called from main.py). This replaces the bare stdlib fallback
+    # logger set at module level, so any subsequent log output goes to
+    # ~/Downloads/GRABIX/logs/downloads.log instead of /dev/null.
+    try:
+        from app.services.logging_utils import get_logger as _get_logger
+        logger = _get_logger("downloads")
+    except Exception:
+        pass  # keep the bare fallback logger if logging_utils is unavailable
 
     try:
         from db_helpers import (
@@ -113,10 +135,17 @@ def _lazy_import() -> None:
     # spec) into sys.modules before any worker thread ever touches it. After
     # this point `import yt_dlp` in a thread is a single dict lookup, not a
     # real import, so the lock is never needed.
+    #
+    # FIX (Root Cause #4 cont.): Catch BaseException (not just Exception) here.
+    # A corrupt or incomplete yt_dlp bundle can raise SystemExit during import.
+    # Catching only Exception would let that propagate out of _lazy_import(),
+    # out of init(), and crash main.py's module-level startup sequence —
+    # leaving _downloads still pointing at the private empty dict so every
+    # subsequent download stays "Queued" forever.
     try:
         import yt_dlp as _yt_dlp_preload  # noqa: F401 — side-effect only
         logger.debug("yt_dlp pre-import OK (version: %s)", getattr(_yt_dlp_preload, '__version__', 'unknown'))
-    except Exception as exc:
+    except BaseException as exc:
         logger.warning("yt_dlp pre-import failed — downloads will not work in this build: %s", exc)
 
 
@@ -187,6 +216,19 @@ def ensure_runtime_bootstrap() -> None:
         dl_dir.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
         logger.warning("Could not create download dir: %s", exc)
+
+    # FIX (Root Cause #5 — missing DB init):
+    # init_db() was listed in the docstring ("and DB tables") but the call was
+    # never actually here. Without it the download_jobs table doesn't exist, so
+    # every _persist_download_record / recover_download_jobs call silently fails
+    # with "no such table: download_jobs" — swallowed by the try/except — and
+    # download history is never stored or recovered across restarts.
+    try:
+        from db_helpers import init_db as _init_db
+        _init_db()
+        logger.debug("DB tables initialized.")
+    except Exception as exc:
+        logger.warning("init_db failed (non-fatal — downloads still work in-memory): %s", exc)
 
 
 def recover_download_jobs() -> None:
@@ -465,7 +507,17 @@ def _download_worker(dl_id: str) -> None:
                 _db_update_status(dl_id, status)
             except Exception:
                 pass
-        _persist_download_record(dl_id)
+        # FIX (Root Cause #4 cont.): Wrap _persist_download_record in a
+        # try/except BaseException. _mark("downloading") is called BEFORE the
+        # main try block in _download_worker. If _persist_download_record raises
+        # anything (DB locked, filesystem error, etc.), the thread would die
+        # silently with status still "queued". The in-memory dict update above
+        # already happened, so we only lose the DB write — acceptable.
+        try:
+            _persist_download_record(dl_id)
+        except BaseException as _persist_exc:
+            logger.warning("_persist_download_record raised in _mark(%s) for %s: %s",
+                           status, dl_id, _persist_exc)
 
     def _abort_check():
         if cancel_ev.is_set():

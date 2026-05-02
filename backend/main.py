@@ -458,6 +458,40 @@ def home():
     return {"status": "GRABIX Backend Running"}
 
 
+@app.get("/debug/download-state")
+def debug_download_state():
+    """
+    FIX (Root Cause #4 — diagnostics): Returns the full in-memory download
+    dict so you can verify that _downloads_engine.init() correctly wired the
+    engine's _downloads to the RuntimeStateRegistry dict.
+
+    To use in EXE: open http://127.0.0.1:8000/debug/download-state in a
+    browser right after clicking Download. You should see the download record
+    with status "downloading" (not "queued"). If it shows "queued" the engine
+    is using a different dict than main.py — init() didn't take effect.
+
+    Also reports which dict object IDs are in play so you can confirm they
+    match across the engine / download_helpers / runtime_state triangle.
+    """
+    import downloads.engine as _eng
+    return {
+        "engine_downloads_id": id(_eng._downloads),
+        "registry_downloads_id": id(downloads),
+        "dicts_are_same": _eng._downloads is downloads,
+        "download_count": len(_eng._downloads),
+        "downloads": [
+            {
+                "id": dl_id,
+                "status": item.get("status"),
+                "stage_label": item.get("stage_label"),
+                "error": item.get("error", ""),
+                "title": item.get("title", "")[:60],
+            }
+            for dl_id, item in list(_eng._downloads.items())
+        ],
+    }
+
+
 @app.get("/check-link")
 def check_link(url: str):
     def _normalize_check_link_input(raw_url: str) -> str:
