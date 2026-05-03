@@ -680,7 +680,7 @@ def _run_ytdlp(dl_id: str, item: dict, pause_ev: threading.Event, cancel_ev: thr
             # the last one for this download. "finished" and other status values
             # always pass through so state transitions are never dropped.
             _now = time.monotonic()
-            if _now - _last_progress_update.get(dl_id, 0.0) < 2.0:
+            if _now - _last_progress_update.get(dl_id, 0.0) < 1.0:
                 return
             _last_progress_update[dl_id] = _now
 
@@ -744,10 +744,11 @@ def _run_ytdlp(dl_id: str, item: dict, pause_ev: threading.Event, cancel_ev: thr
         "quiet": True,
         "no_warnings": True,
         "no_color": True,
-        "concurrent_fragments": 16,          # <-- KEY: parallel fragment downloads
-        "http_chunk_size": 10 * 1024 * 1024, # 10 MB chunks for speed
-        "retries": 5,
-        "fragment_retries": 5,
+        "concurrent_fragments": 8,           # parallel fragment downloads (8 is optimal — 16 triggers YouTube IP throttling)
+        "http_chunk_size": 1 * 1024 * 1024,  # 1 MB chunks — smaller chunks bypass YouTube's per-request throttle (10 MB was too large)
+        "throttledratelimit": 524288,         # 512 KB/s — if a fragment drops below this, yt-dlp restarts it (bypasses YouTube end-of-video slowdown)
+        "retries": 10,
+        "fragment_retries": 10,
         "socket_timeout": 30,
         "continuedl": True,                  # resume partial downloads
     }
@@ -779,6 +780,23 @@ def _run_ytdlp(dl_id: str, item: dict, pause_ev: threading.Event, cancel_ev: thr
                 final_path = ydl.prepare_filename(info)
             if final_path:
                 _downloads[dl_id]["file_path"] = final_path
+                # FIX: yt-dlp downloads video and audio as separate streams for
+                # high-quality formats (e.g. 1080p). The progress hook reports
+                # each stream's size individually, so the last stream's size
+                # (usually the small audio track) ends up as the displayed total.
+                # Read the actual merged file size from disk so the UI always
+                # shows the correct combined size.
+                try:
+                    actual = Path(final_path).stat().st_size
+                    fmt = _fmt_bytes(actual)
+                    _downloads[dl_id].update({
+                        "size": fmt,
+                        "total": fmt,
+                        "bytes_total": actual,
+                        "bytes_downloaded": actual,
+                    })
+                except Exception:
+                    pass
         if dl_id in _download_controls:
             _download_controls[dl_id]["ydl_ref"] = None
 

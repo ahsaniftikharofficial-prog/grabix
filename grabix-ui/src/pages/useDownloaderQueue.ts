@@ -82,7 +82,8 @@ export function useDownloaderQueue() {
         if (!active) return;
 
         // 1. Fetch current state right away so the UI doesn't go stale.
-        void fetch(`${API}/downloads?_t=${Date.now()}`)
+        // FIX: use backendFetch so the auth header is sent in release EXE mode.
+        void backendFetch(`${API}/downloads?_t=${Date.now()}`, undefined, { sensitive: true })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => { if (data && active) applyServerData(data as any[]); })
           .catch(() => undefined);
@@ -125,7 +126,12 @@ export function useDownloaderQueue() {
         // Add a cache-busting timestamp so WebView2's HTTP cache never returns
         // a stale "queued" response. Without this, Chromium embedded in Tauri
         // caches the first GET response and _pollTask sees "queued" forever.
-        const pr  = await fetch(`${API}/download-status/${serverTaskId}?_t=${Date.now()}`);
+        // FIX: use backendFetch (not plain fetch) so the X-Grabix-Desktop-Auth
+        // header is included. In a release EXE desktop auth is required; plain
+        // fetch() has no auth header → every poll returns 401 → after
+        // MAX_CONSECUTIVE_ERRORS the polling stops and the item stays
+        // "Queued" forever. backendFetch attaches the token transparently.
+        const pr  = await backendFetch(`${API}/download-status/${serverTaskId}?_t=${Date.now()}`, undefined, { sensitive: true });
         if (!pr.ok) throw new Error(`status ${pr.status}`);
         const pd  = await pr.json();
         consecutiveErrors = 0; // reset on success

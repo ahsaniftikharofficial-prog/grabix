@@ -33,9 +33,25 @@ def requires_desktop_auth(method: str, path: str) -> bool:
         normalized_path = f"/{normalized_path}"
 
     for prefix, methods in _SENSITIVE_ROUTES:
-        if normalized_path == prefix or normalized_path.startswith(prefix):
-            if normalized_method in methods:
-                return True
+        # FIX: use precise boundary matching so that "/download" does NOT match
+        # "/download-status/...", "/downloads/stream", or "/downloads".
+        # Previously `startswith(prefix)` caused every path beginning with
+        # "/download" — including the read-only polling and SSE endpoints — to
+        # require the desktop auth header.  In a release EXE the header is
+        # required but _pollTask uses plain fetch() with no header, so every
+        # status poll got a 401, silently hit MAX_CONSECUTIVE_ERRORS (8 tries),
+        # then stopped — leaving the queue item stuck on "Queued" forever.
+        # Precise matching: strip any trailing slash from the prefix, then
+        # require the path to be exact, or continue with "/" or "?".
+        prefix_base = prefix.rstrip("/")
+        path_matches = (
+            normalized_path == prefix_base          # exact (no trailing slash)
+            or normalized_path == prefix            # exact (with trailing slash)
+            or normalized_path.startswith(prefix_base + "/")   # sub-resource
+            or normalized_path.startswith(prefix_base + "?")   # query string
+        )
+        if path_matches and normalized_method in methods:
+            return True
     return False
 
 
