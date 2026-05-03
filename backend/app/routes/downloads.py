@@ -17,7 +17,7 @@ import json
 import logging
 import shutil
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -113,17 +113,26 @@ def start_download_post(payload: DownloadRequest):
 
 
 @router.get("/download-status/{dl_id}")
-def download_status(dl_id: str):
+def download_status(dl_id: str, response: Response):
+    # Prevent WebView2 / any HTTP cache from returning a stale "queued" snapshot.
+    # Without these headers, Chromium-based embedded browsers cache the first
+    # response and _pollTask never sees the status transition to "downloading".
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
     return _safe("download_status", None, dl_id)
 
 
 @router.get("/progress/{dl_id}")
-def progress_alias(dl_id: str):
+def progress_alias(dl_id: str, response: Response):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
     return _safe("progress_alias", None, dl_id)
 
 
 @router.get("/downloads")
-def list_downloads():
+def list_downloads(response: Response):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
     return _safe("list_downloads", [])
 
 

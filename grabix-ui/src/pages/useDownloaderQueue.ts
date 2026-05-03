@@ -68,7 +68,7 @@ export function useDownloaderQueue() {
         es = null;
       }
 
-      es = new EventSource(`${API}/downloads/stream`);
+      es = new EventSource(`${API}/downloads/stream?_t=${Date.now()}`);
 
       es.onmessage = (e) => {
         try { applyServerData(JSON.parse(e.data) as any[]); } catch { /* ignore malformed frames */ }
@@ -82,7 +82,7 @@ export function useDownloaderQueue() {
         if (!active) return;
 
         // 1. Fetch current state right away so the UI doesn't go stale.
-        void fetch(`${API}/downloads`)
+        void fetch(`${API}/downloads?_t=${Date.now()}`)
           .then((r) => r.ok ? r.json() : null)
           .then((data) => { if (data && active) applyServerData(data as any[]); })
           .catch(() => undefined);
@@ -122,7 +122,10 @@ export function useDownloaderQueue() {
 
     const interval = setInterval(async () => {
       try {
-        const pr  = await fetch(`${API}/download-status/${serverTaskId}`);
+        // Add a cache-busting timestamp so WebView2's HTTP cache never returns
+        // a stale "queued" response. Without this, Chromium embedded in Tauri
+        // caches the first GET response and _pollTask sees "queued" forever.
+        const pr  = await fetch(`${API}/download-status/${serverTaskId}?_t=${Date.now()}`);
         if (!pr.ok) throw new Error(`status ${pr.status}`);
         const pd  = await pr.json();
         consecutiveErrors = 0; // reset on success

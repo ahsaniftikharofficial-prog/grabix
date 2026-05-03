@@ -474,6 +474,35 @@ def init_db() -> None:
         """)
         con.execute("CREATE INDEX IF NOT EXISTS idx_health_log_service ON health_log(service)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_health_log_recorded ON health_log(recorded_at)")
+
+        # ── Schema migrations ──────────────────────────────────────────────────
+        # ADD COLUMN is idempotent-safe: SQLite raises OperationalError if the
+        # column already exists. We catch and ignore it per column so one failure
+        # doesn't block the rest. This handles DBs created before a column was
+        # added to the CREATE TABLE statement above (e.g. "progress" was missing
+        # from older builds, causing "table download_jobs has no column named
+        # progress" errors in every _mark() call).
+        _migration_columns = [
+            ("download_jobs", "progress",          "REAL DEFAULT 0"),
+            ("download_jobs", "speed",             "TEXT DEFAULT ''"),
+            ("download_jobs", "eta",               "TEXT DEFAULT ''"),
+            ("download_jobs", "downloaded",        "TEXT DEFAULT ''"),
+            ("download_jobs", "total",             "TEXT DEFAULT ''"),
+            ("download_jobs", "size",              "TEXT DEFAULT ''"),
+            ("download_jobs", "can_pause",         "INTEGER DEFAULT 0"),
+            ("download_jobs", "retry_count",       "INTEGER DEFAULT 0"),
+            ("download_jobs", "failure_code",      "TEXT DEFAULT ''"),
+            ("download_jobs", "recoverable",       "INTEGER DEFAULT 0"),
+            ("download_jobs", "download_strategy", "TEXT DEFAULT ''"),
+            ("download_jobs", "params_json",       "TEXT DEFAULT '{}'"),
+            ("download_jobs", "partial_file_path", "TEXT DEFAULT ''"),
+        ]
+        for table, col, col_def in _migration_columns:
+            try:
+                con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+            except Exception:
+                pass  # column already exists — expected on fresh DBs
+
         con.execute(
             """
             INSERT INTO schema_version (id, version, updated_at)
