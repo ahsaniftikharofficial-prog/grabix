@@ -492,6 +492,110 @@ def debug_download_state():
     }
 
 
+@app.get("/debug/auth-state")
+def debug_auth_state():
+    """
+    DIAGNOSTIC: Reports the desktop auth configuration.
+    Open http://127.0.0.1:8000/debug/auth-state in a browser.
+    If 'token_set' is True but you see downloads stuck, the frontend
+    is not sending the X-Grabix-Desktop-Auth header correctly.
+    If 'required' is True and 'token_set' is False → 503 on all sensitive routes.
+    """
+    from app.services.desktop_auth import desktop_auth_state_snapshot
+    snap = desktop_auth_state_snapshot()
+    return {
+        "required": snap["required"],
+        "observe_only": snap["observe_only"],
+        "token_set": snap["ready"],
+        "header_name": snap["header"],
+        "sensitive_routes_blocked": snap["required"] and not snap["ready"],
+    }
+
+
+@app.get("/debug/trigger-test-download")
+def debug_trigger_test_download():
+    """
+    DIAGNOSTIC: Directly calls start_download() on the engine — NO auth check.
+    Open http://127.0.0.1:8000/debug/trigger-test-download in a browser.
+    If download_count goes from 0 → 1, start_download() works and the bug is
+    that the authenticated GET /download route is being blocked (auth header missing).
+    If still 0, start_download() itself has a bug.
+    """
+    import downloads.engine as _eng
+    before = len(_eng._downloads)
+    try:
+        result = _eng.start_download(
+            url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            title="[GRABIX DIAGNOSTIC TEST — SAFE TO DELETE]",
+            dl_type="video",
+            quality="360p",
+        )
+        after = len(_eng._downloads)
+        dl_id = result.get("task_id", "")
+        item = _eng._downloads.get(dl_id, {})
+        return {
+            "start_download_called": True,
+            "download_count_before": before,
+            "download_count_after": after,
+            "task_id": dl_id,
+            "initial_status": item.get("status", ""),
+            "dicts_are_same": _eng._downloads is downloads,
+        }
+    except Exception as exc:
+        return {
+            "start_download_called": False,
+            "error": str(exc),
+            "download_count_before": before,
+        }
+
+
+@app.get("/debug/thread-test")
+def debug_thread_test():
+    """
+    DIAGNOSTIC: Spawns a real background thread that mimics the download worker
+    and reports whether it transitioned through queued -> downloading -> done.
+    Open http://127.0.0.1:8000/debug/thread-test in a browser and wait 3 seconds.
+    If result shows 'done', threads work. If stuck on 'queued', the thread is dying
+    before _mark('downloading') — check downloads.log for the crash reason.
+    """
+    import threading as _threading
+    import time as _time
+    import uuid as _uuid
+
+    test_id = "THREAD_TEST_" + str(_uuid.uuid4())[:8]
+    result: dict = {"status": "queued", "error": ""}
+
+    def _test_worker():
+        try:
+            result["status"] = "downloading"
+            _time.sleep(0.5)
+            # Try importing yt_dlp — the most common failure point in EXE
+            try:
+                import yt_dlp as _ytdlp
+                result["yt_dlp_version"] = getattr(_ytdlp, "__version__", "unknown")
+                result["yt_dlp_ok"] = True
+            except BaseException as exc:
+                result["yt_dlp_ok"] = False
+                result["yt_dlp_error"] = f"{type(exc).__name__}: {exc}"
+            result["status"] = "done"
+        except BaseException as exc:
+            result["status"] = "crashed"
+            result["error"] = f"{type(exc).__name__}: {exc}"
+
+    t = _threading.Thread(target=_test_worker, daemon=True, name="grabix-diag-thread")
+    t.start()
+    t.join(timeout=5.0)
+
+    return {
+        "test_id": test_id,
+        "thread_finished": not t.is_alive(),
+        "result": result,
+        "engine_downloads_id": id(_downloads_engine._downloads),
+        "registry_downloads_id": id(downloads),
+        "dicts_are_same": _downloads_engine._downloads is downloads,
+    }
+
+
 @app.get("/check-link")
 def check_link(url: str):
     def _normalize_check_link_input(raw_url: str) -> str:
