@@ -20,11 +20,12 @@ function startupRepaintPulse() {
       });
     }
   }
-  // Fire every 1 s for the first 60 s (covers PyO3/uvicorn warmup).
+  // Fire every 1 s for the first 8 s — enough to cover WebView2 render settling,
+  // without hammering the DOM for a full minute on every launch.
   let ticks = 0;
   const id = setInterval(() => {
     nudge();
-    if (++ticks >= 60) clearInterval(id);
+    if (++ticks >= 8) clearInterval(id);
   }, 1000);
   // Also fire whenever the tab/window becomes visible again.
   document.addEventListener("visibilitychange", () => {

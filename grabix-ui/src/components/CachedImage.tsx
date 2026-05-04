@@ -43,6 +43,7 @@ export default function CachedImage({
   onLoad,
 }: CachedImageProps) {
   const [resolvedSrc, setResolvedSrc] = useState(src);
+  const [visible, setVisible] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -83,12 +84,17 @@ export default function CachedImage({
     <img
       src={resolvedSrc || fallbackSrc || src}
       alt={alt}
-      style={style}
+      style={{
+        ...style,
+        opacity: visible ? 1 : 0,
+        transition: "opacity 0.2s ease",
+      }}
       className={className}
       loading={loading}
       decoding={decoding}
       referrerPolicy={referrerPolicy}
       onLoad={(event) => {
+        setVisible(true);
         if (src && resolvedSrc === src && !warmedImageSources.has(src)) {
           markImageSourceWarmed(src);
           void cacheMediaFromUrl(src).catch(() => {
@@ -98,6 +104,7 @@ export default function CachedImage({
         onLoad?.(event);
       }}
       onError={(event) => {
+        setVisible(true);
         if (fallbackSrc && (event.target as HTMLImageElement).src !== fallbackSrc) {
           (event.target as HTMLImageElement).src = fallbackSrc;
         }

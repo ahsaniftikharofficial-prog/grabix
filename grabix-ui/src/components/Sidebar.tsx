@@ -62,8 +62,15 @@ const IconClock = ({ size = 16, color = "currentColor" }: { size?: number; color
   </svg>
 );
 
+const IconHome = ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+    <polyline points="9 22 9 12 15 12 15 22" />
+  </svg>
+);
+
 export type Page =
-  "downloader" | "converter" | "library" | "manga" | "movies" | "moviebox" | "series" | "favorites" | "ratings" | "settings" | "topimdb" | "continuewatching" | "recentlyadded" | "genrepage" | "watchhistory";
+  "home" | "downloader" | "converter" | "library" | "manga" | "movies" | "moviebox" | "series" | "favorites" | "ratings" | "settings" | "topimdb" | "continuewatching" | "recentlyadded" | "genrepage" | "watchhistory";
 
 interface Props {
   page: Page;
@@ -77,6 +84,7 @@ const GROUPS = [
   {
     label: "Tools",
     items: [
+      { id: "home" as Page, label: "Home", Icon: IconHome },
       { id: "downloader" as Page, label: "Downloader", Icon: IconDownload },
       { id: "converter" as Page, label: "Converter", Icon: IconConvert },
       { id: "library" as Page, label: "Library", Icon: IconLibrary },

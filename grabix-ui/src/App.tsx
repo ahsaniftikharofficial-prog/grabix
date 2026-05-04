@@ -28,6 +28,7 @@ import { markPerf, measurePerf } from "./lib/performance";
 import { fetchMovieBoxDiscover } from "./lib/streamProviders";
 import "./index.css";
 
+const HomePage = lazy(() => import("./pages/HomePage"));
 const DownloaderPage = lazy(() => import("./pages/DownloaderPage"));
 const ConverterPage = lazy(() => import("./pages/ConverterPage"));
 const LibraryPage = lazy(() => import("./pages/LibraryPage"));
@@ -48,7 +49,15 @@ const WatchHistoryPage    = lazy(() => import("./pages/WatchHistoryPage"));
 function Inner() {
   const offlineState = useOfflineDetection(BACKEND_API);
   const watchdog = useWatchdog();
-  const [page, setPage] = useState<Page>("downloader");
+  const [page, setPage] = useState<Page>(() => {
+    const saved = localStorage.getItem("grabix:last-page") as Page | null;
+    const valid: Page[] = [
+      "home", "downloader", "converter", "library", "manga", "movies",
+      "moviebox", "series", "favorites", "ratings", "settings", "topimdb",
+      "continuewatching", "recentlyadded", "watchhistory",
+    ];
+    return saved && valid.includes(saved) ? saved : "home";
+  });
   const [genrePageParams, setGenrePageParams] = useState<{ mediaType: "movie" | "tv"; genreId: number; genreName: string } | null>(null);
   const [_pageRevision, setPageRevision] = useState(0);
   const [runtimeState, setRuntimeState] = useState<RuntimeState>("starting");
@@ -58,13 +67,18 @@ function Inner() {
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealthPayload | null>(null);
   const [startupDiagnostics, setStartupDiagnostics] = useState<StartupDiagnosticsPayload | null>(null);
 
-  // FIX (removeChild crash): stable ref for onDownloadStarting.
-  // useWatchdog returns a new notifyDownloadStarting function on every render
-  // (it is not wrapped in useCallback). If we pass it directly into the memoized
-  // pages object below, it would invalidate the memo on every render, defeating
-  // the whole point. Using a ref keeps the identity stable while always calling
-  // the latest version.
+  // FIX: stable ref for onDownloadStarting.
   const onDownloadStartingRef = useRef(watchdog.notifyDownloadStarting);
+
+  // FIX: track whether we've already fired the startup prefetch so it never runs twice.
+  const hasPrefetched = useRef(false);
+
+  // FIX: save the last active page so the app reopens where you left off.
+  useEffect(() => {
+    if (page !== "genrepage") {
+      localStorage.setItem("grabix:last-page", page);
+    }
+  }, [page]);
   useEffect(() => {
     onDownloadStartingRef.current = watchdog.notifyDownloadStarting;
   });
@@ -231,7 +245,8 @@ function Inner() {
 
   useEffect(() => {
     const backendOk = Boolean(runtimeHealth?.summary.backend_reachable);
-    if (!backendOk) return;
+    if (!backendOk || hasPrefetched.current) return;
+    hasPrefetched.current = true;
 
     const timeoutId = window.setTimeout(() => {
       void Promise.allSettled([
@@ -290,6 +305,11 @@ function Inner() {
   }, [genrePageParams]);
 
   const pages = useMemo<Record<Page, ReactNode>>(() => ({
+    home: (
+      <ErrorBoundary section="Home">
+        <HomePage />
+      </ErrorBoundary>
+    ),
     downloader: (
       <ErrorBoundary section="Downloader">
         <DownloaderPage onDownloadStarting={stableOnDownloadStarting} />
@@ -335,8 +355,6 @@ function Inner() {
           display: "flex",
           flexDirection: "column",
           background: "var(--bg-app)",
-          paddingTop: watchdog.isBannerVisible && watchdog.status !== "idle" ? 32 : 0,
-          transition: "padding-top 0.2s ease",
         }}
       >
         <RuntimeHealthProvider value={{ health: runtimeHealth, runtimeState, refreshHealth: refreshRuntimeHealth }}>
