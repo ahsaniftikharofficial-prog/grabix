@@ -22,6 +22,10 @@ use pyo3::prelude::*;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, RunEvent, State};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -52,6 +56,7 @@ struct StartupState {
 
 struct SidecarProcessState {
     consumet_child: Mutex<Option<Child>>,
+    backend_child: Mutex<Option<Child>>,
 }
 
 #[derive(Clone, Default)]
@@ -825,6 +830,112 @@ fn stop_consumet_sidecar(app: &AppHandle) {
     }
 }
 
+// ── Nuitka compiled backend ───────────────────────────────────────────────────
+// If build-nuitka.bat was run before packaging, a native grabix-backend.exe
+// lives in backend-compiled/. This starts instantly (no Python interpreter).
+// Falls back to PyO3 automatically if the compiled binary doesn't exist.
+
+fn find_nuitka_backend(app: &AppHandle) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("backend-compiled").join("grabix-backend.exe"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("resources").join("backend-compiled").join("grabix-backend.exe"));
+            candidates.push(exe_dir.join("backend-compiled").join("grabix-backend.exe"));
+        }
+    }
+    candidates.into_iter().find(|p| p.exists())
+}
+
+fn stop_nuitka_sidecar(app: &AppHandle) {
+    if let Ok(mut child_slot) = app.state::<SidecarProcessState>().backend_child.lock() {
+        if let Some(mut child) = child_slot.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn start_nuitka_sidecar(app: AppHandle, backend_exe: PathBuf) {
+    thread::Builder::new()
+        .name(String::from("nuitka-backend"))
+        .spawn(move || {
+            log_sidecar(&app, &format!("Nuitka: Launching compiled backend from {}", backend_exe.display()));
+            update_backend_status(&app, "starting", "Launching compiled Python backend (Nuitka)...", false, "");
+
+            let log_path = diagnostics_log_path(&app);
+            let stdout_log = OpenOptions::new().create(true).append(true).open(&log_path).ok();
+            let stderr_log = stdout_log.as_ref().and_then(|f| f.try_clone().ok());
+
+            let mut command = Command::new(&backend_exe);
+
+            #[cfg(target_os = "windows")]
+            command.creation_flags(0x08000008); // CREATE_NO_WINDOW | DETACHED_PROCESS
+
+            if let Some(out) = stdout_log {
+                command.stdout(Stdio::from(out));
+            }
+            if let Some(err) = stderr_log {
+                command.stderr(Stdio::from(err));
+            }
+
+            // Forward all GRABIX_ env vars the backend needs
+            for (key, val) in std::env::vars() {
+                if key.starts_with("GRABIX_") || key == "CONSUMET_API_BASE" {
+                    command.env(&key, &val);
+                }
+            }
+
+            let child = match command.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    let msg = format!("Failed to launch compiled backend: {}", e);
+                    log_sidecar(&app, &format!("Nuitka: {}", msg));
+                    update_backend_status(&app, "failed", &msg, false, "nuitka_spawn_failed");
+                    return;
+                }
+            };
+
+            if let Ok(mut slot) = app.state::<SidecarProcessState>().backend_child.lock() {
+                *slot = Some(child);
+            }
+
+            // Poll health — same as PyO3 path
+            let timeout_secs = 90;
+            let started = Instant::now();
+            log_sidecar(&app, "Nuitka: Waiting for compiled backend on port 8000...");
+
+            loop {
+                if http_ok_once(8000, "/health/ping") {
+                    let msg = "Compiled backend is healthy on port 8000.";
+                    log_sidecar(&app, &format!("Nuitka: {}", msg));
+                    update_backend_status(&app, "started", msg, true, "");
+                    break;
+                }
+
+                if started.elapsed() >= Duration::from_secs(timeout_secs) {
+                    let msg = "Compiled backend did not respond within 90s.";
+                    log_sidecar(&app, &format!("Nuitka: TIMEOUT - {}", msg));
+                    update_backend_status(&app, "timeout", msg, false, "nuitka_start_timeout");
+                    break;
+                }
+
+                thread::sleep(Duration::from_millis(100));
+            }
+
+            let snapshot = app
+                .state::<StartupState>()
+                .snapshot
+                .lock()
+                .map(|s| s.clone())
+                .unwrap_or_default();
+            write_diagnostics_snapshot(&app, &snapshot);
+        })
+        .expect("Failed to spawn nuitka-backend thread");
+}
+
 fn start_consumet_sidecar(app: &AppHandle) -> ConsumetLaunchState {
     let node_binary = match find_consumet_node(app) {
         Some(path) => path,
@@ -1093,6 +1204,18 @@ fn start_python_backend_async(app: AppHandle) {
                     std::env::remove_var("CONSUMET_API_BASE");
                 }
             }
+
+            // ── Nuitka fast path ──────────────────────────────────────────────
+            // If build-nuitka.bat was run before packaging, use the compiled
+            // native binary — no Python interpreter overhead at all.
+            // If not found, fall through to the PyO3 path below.
+            if let Some(nuitka_exe) = find_nuitka_backend(&app) {
+                log_sidecar(&app, "Nuitka: Compiled backend found. Skipping PyO3.");
+                start_nuitka_sidecar(app.clone(), nuitka_exe);
+                return; // nuitka_sidecar manages its own health poll
+            }
+
+            log_sidecar(&app, "Nuitka: No compiled backend found. Using PyO3 (run build-nuitka.bat to compile).");
 
             let python_home = match find_python_home(&app) {
                 Some(p) => p,
@@ -1438,6 +1561,13 @@ pub fn run() {
         // draw command without any visible flash to the user.
         .on_window_event(|window, event| {
             match event {
+                // ── Close to tray (Solution 2) ────────────────────────────────
+                // Intercept the X button: hide the window, keep the backend
+                // alive. User reopens via tray icon. Next "launch" is instant.
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
                 // Fire on focus regain (minimize → restore) AND on any resize,
                 // which also fires when Windows restores from a minimised state.
                 tauri::WindowEvent::Focused(true) | tauri::WindowEvent::Resized(_) => {
@@ -1459,6 +1589,7 @@ pub fn run() {
         })
         .manage(SidecarProcessState {
             consumet_child: Mutex::new(None),
+            backend_child: Mutex::new(None),
         })
         .manage(DesktopAuthState {
             context: Mutex::new(DesktopAuthContext::default()),
@@ -1516,6 +1647,55 @@ pub fn run() {
                 start_python_backend_async(app.handle().clone());
             }
 
+            // ── System tray ───────────────────────────────────────────────────
+            // Close button hides the window. Tray lets user reopen or truly quit.
+            // This makes every launch after the first completely instant.
+            {
+                let show_item = MenuItem::with_id(app.handle(), "show", "Open GRABIX", true, None::<&str>)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                let quit_item = MenuItem::with_id(app.handle(), "quit", "Quit GRABIX", true, None::<&str>)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                let menu = Menu::with_items(app.handle(), &[&show_item, &quit_item])
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+                let icon = app.default_window_icon()
+                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "No window icon available"))?
+                    .clone();
+
+                TrayIconBuilder::new()
+                    .icon(icon)
+                    .tooltip("GRABIX")
+                    .menu(&menu)
+                    .menu_on_left_click(false)
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event {
+                            let app = tray.app_handle();
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    })
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .build(app.handle())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1535,6 +1715,7 @@ pub fn run() {
     app.run(|app_handle, event| {
         if matches!(event, RunEvent::Exit) {
             stop_consumet_sidecar(&app_handle);
+            stop_nuitka_sidecar(&app_handle);
         }
     });
 }
