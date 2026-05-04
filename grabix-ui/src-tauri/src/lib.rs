@@ -344,8 +344,8 @@ fn chrono_stamp() -> String {
 
 fn http_ok_once(port: u16, path: &str) -> bool {
     if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(1200)));
-        let _ = stream.set_write_timeout(Some(Duration::from_millis(1200)));
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
         let request = format!(
             "GET {} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
             path
@@ -1157,9 +1157,9 @@ fn start_python_backend_async(app: AppHandle) {
 
             start_python_backend(app.clone(), python_home, backend_dir);
 
-            // Give Python a moment to spin up before polling.
-            thread::sleep(Duration::from_secs(2));
-
+            // Poll immediately — no artificial delay.
+            // PyO3 starts the interpreter on a background thread; we just
+            // need to spin until the /health/ping endpoint responds.
             let timeout_secs = 90;
             let started = Instant::now();
             log_sidecar(
@@ -1203,7 +1203,7 @@ fn start_python_backend_async(app: AppHandle) {
                     break;
                 }
 
-                thread::sleep(Duration::from_millis(450));
+                thread::sleep(Duration::from_millis(100));
             }
 
             let snapshot = app
