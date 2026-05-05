@@ -50,6 +50,21 @@ python -m nuitka ^
   --include-package=app ^
   --include-package=core ^
   --include-package=downloads ^
+  --include-package=moviebox ^
+  --include-module=db_helpers ^
+  --include-module=library_helpers ^
+  --include-module=streaming_helpers ^
+  --include-package=fastapi ^
+  --include-package=starlette ^
+  --include-package=pydantic ^
+  --include-package=pydantic_core ^
+  --include-package=httpx ^
+  --include-package=bcrypt ^
+  --include-package=curl_cffi ^
+  --include-package=imdb ^
+  --include-package=h11 ^
+  --include-package=httptools ^
+  --include-package=websockets ^
   backend\main.py
 
 if %errorlevel% neq 0 (
