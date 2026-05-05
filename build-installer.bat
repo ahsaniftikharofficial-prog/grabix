@@ -24,7 +24,27 @@ for %%F in ("%BACKEND_EXE%") do set EXE_SIZE=%%~zF
 echo [OK] Found grabix-backend.exe ^(%EXE_SIZE% bytes^)
 echo.
 
-REM ── Step 2: Install Node dependencies ────────────────────────
+REM ── Step 2: Delete Nuitka cache folders ──────────────────────
+REM    Tauri bundles everything in backend-compiled\ so we must
+REM    remove the huge Nuitka leftovers or NSIS will crash.
+echo [Cleanup] Removing Nuitka cache folders...
+
+if exist "grabix-ui\src-tauri\backend-compiled\main.dist" (
+    echo   Removing main.dist ...
+    rmdir /s /q "grabix-ui\src-tauri\backend-compiled\main.dist"
+)
+if exist "grabix-ui\src-tauri\backend-compiled\main.build" (
+    echo   Removing main.build ...
+    rmdir /s /q "grabix-ui\src-tauri\backend-compiled\main.build"
+)
+if exist "grabix-ui\src-tauri\backend-compiled\main.onefile-build" (
+    echo   Removing main.onefile-build ...
+    rmdir /s /q "grabix-ui\src-tauri\backend-compiled\main.onefile-build"
+)
+echo   Done. Only grabix-backend.exe will be bundled.
+echo.
+
+REM ── Step 3: Install Node dependencies ────────────────────────
 echo [1/2] Installing Node.js dependencies...
 cd grabix-ui
 

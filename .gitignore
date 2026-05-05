@@ -143,3 +143,4 @@ test_shape_results.txt
 direct
 *.dll
 grabix-ui/src-tauri/backend-compiled/main.dist/Crypto/Util/.keep_dir.txt
+/grabix-ui/src-tauri/backend-compiled
