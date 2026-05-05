@@ -34,7 +34,6 @@
       }
     },
     "resources": [
-      "python-runtime/**/*",
       "backend-staging/backend/**/*",
       "consumet-staging/**/*",
       "generated/**/*",

@@ -1,10 +1,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// GRABIX — lib.rs (PyO3 embedded backend edition)
+// GRABIX — lib.rs (Nuitka compiled backend edition)
 //
-// Architecture change: Python is no longer a child process.
-// PyO3 embeds the Python interpreter INSIDE this Rust binary.
-// The FastAPI/uvicorn server runs on a Rust-managed thread.
-// If the app is running, the backend is running. Crash is structurally impossible.
+// The Python backend is compiled to a native exe by Nuitka (build-grabix.bat).
+// Tauri launches it as a child process and monitors its health.
+// PyO3 has been removed — no Python headers required to build.
 // ─────────────────────────────────────────────────────────────────────────────
 
 use std::{
@@ -18,7 +17,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use pyo3::prelude::*;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, RunEvent, State};
@@ -420,64 +418,6 @@ fn find_consumet_node(app: &AppHandle) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
-// ── PyO3 runtime location helpers ─────────────────────────────────────────────
-
-fn find_python_home(app: &AppHandle) -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        candidates.push(resource_dir.join("python-runtime"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            candidates.push(exe_dir.join("resources").join("python-runtime"));
-            candidates.push(exe_dir.join("python-runtime"));
-        }
-    }
-    candidates.into_iter().find(|p| p.exists())
-}
-
-fn find_backend_dir(app: &AppHandle) -> Option<PathBuf> {
-    let backend_candidates = [backend_resource_subdir(), "backend-staging/backend", "generated/backend"];
-    let mut candidates = Vec::new();
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        for relative in backend_candidates {
-            candidates.push(resource_dir.join(relative));
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            for relative in backend_candidates {
-                candidates.push(exe_dir.join("resources").join(relative));
-                candidates.push(exe_dir.join(relative));
-            }
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            for ancestor in exe_dir.ancestors() {
-                let workspace_backend = ancestor.join("backend");
-                if workspace_backend.join("main.py").exists() {
-                    candidates.push(workspace_backend);
-                }
-            }
-        }
-    }
-    candidates
-        .into_iter()
-        .find(|p| p.join("main.py").exists())
-}
-
-#[cfg(target_os = "windows")]
-fn normalize_python_path(path: &Path) -> String {
-    let raw = path.display().to_string();
-    raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_string()
-}
-
-#[cfg(not(target_os = "windows"))]
-fn normalize_python_path(path: &Path) -> String {
-    path.display().to_string()
-}
-
 fn find_packaged_runtime_config(app: &AppHandle) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
@@ -503,34 +443,23 @@ fn sync_packaged_runtime_config(app: &AppHandle) -> Result<Option<PathBuf>, Stri
         create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    // FIX: Merge bundled config into existing user config instead of overwriting.
-    // Previously this always clobbered the user file, wiping any settings (e.g.
-    // the TMDB token) that the user had saved via the Settings page.
-    //
-    // Strategy: read both files as JSON objects and write a merged result where
-    // the USER values win for any key that is already set to a non-empty string,
-    // and the BUNDLED values fill in any key that is missing or empty.
     let bundled_raw = std::fs::read_to_string(&source).map_err(|e| e.to_string())?;
 
-    // If target does not exist yet, just write the bundled config directly.
     if !target.exists() {
         std::fs::write(&target, &bundled_raw).map_err(|e| e.to_string())?;
         return Ok(Some(target));
     }
 
-    // Both files exist — merge: user values win, bundled fills in blanks.
     let existing_raw = std::fs::read_to_string(&target).unwrap_or_default();
     let merged = merge_runtime_configs(&bundled_raw, &existing_raw);
     std::fs::write(&target, merged).map_err(|e| e.to_string())?;
     Ok(Some(target))
 }
 
-/// Merge two JSON config objects.  `user_raw` values win over `bundled_raw`
-/// for any key where the user value is a non-empty string.  Unknown keys from
-/// either side are preserved.  Falls back to `bundled_raw` on any parse error.
+/// Merge two JSON config objects. User values win over bundled values for any
+/// key where the user value is a non-empty string. Falls back to bundled on
+/// any parse error.
 fn merge_runtime_configs(bundled_raw: &str, user_raw: &str) -> String {
-    // Tiny hand-rolled merge — avoids pulling in serde_json for this one call.
-    // Parses a flat {"key":"value",...} JSON object into a Vec of (key, value).
     fn parse_flat(raw: &str) -> Vec<(String, String)> {
         let trimmed = raw.trim().trim_start_matches('{').trim_end_matches('}');
         let mut pairs = Vec::new();
@@ -549,7 +478,6 @@ fn merge_runtime_configs(bundled_raw: &str, user_raw: &str) -> String {
     let bundled = parse_flat(bundled_raw);
     let user = parse_flat(user_raw);
 
-    // Build merged map: start with bundled, let user overwrite non-empty values.
     let mut merged: Vec<(String, String)> = bundled.clone();
     for (uk, uv) in &user {
         if let Some(existing) = merged.iter_mut().find(|(k, _)| k == uk) {
@@ -557,7 +485,6 @@ fn merge_runtime_configs(bundled_raw: &str, user_raw: &str) -> String {
                 existing.1 = uv.clone();
             }
         } else {
-            // Key exists in user config but not in bundled — keep it.
             merged.push((uk.clone(), uv.clone()));
         }
     }
@@ -566,276 +493,15 @@ fn merge_runtime_configs(bundled_raw: &str, user_raw: &str) -> String {
         .iter()
         .map(|(k, v)| format!("  \"{}\":\"{}\"", k, v))
         .collect();
-    format!("{{
-{}
-}}", fields.join(",
-"))
-}
-
-// ── Windows DLL loader fix ────────────────────────────────────────────────────
-// python311.dll is hard-linked (no DELAYLOAD). Windows loads it at process
-// startup from the exe directory (installer-hooks.nsh copies it there).
-// We still call SetDllDirectoryW so Python can find its own extension DLLs
-// (.pyd files) inside python-runtime/ at runtime.
-#[cfg(target_os = "windows")]
-fn set_python_dll_directory(python_home: &PathBuf) {
-    use std::os::windows::ffi::OsStrExt;
-    extern "system" {
-        fn SetDllDirectoryW(lpPathName: *const u16) -> i32;
-    }
-    let wide: Vec<u16> = python_home
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0u16))
-        .collect();
-    let result = unsafe { SetDllDirectoryW(wide.as_ptr()) };
-    if result == 0 {
-        eprintln!("WARNING: SetDllDirectoryW failed for {:?}", python_home);
-    }
-}
-
-// ── PyO3 backend startup ──────────────────────────────────────────────────────
-
-fn start_python_backend(app: AppHandle, python_home: PathBuf, backend_dir: PathBuf) {
-    thread::Builder::new()
-        .name(String::from("pyo3-backend"))
-        .spawn(move || {
-            let python_home_for_python = normalize_python_path(&python_home);
-            let backend_dir_for_python = normalize_python_path(&backend_dir);
-            log_sidecar(
-                &app,
-                &format!(
-                    "PyO3: Initializing embedded Python. PYTHONHOME={} BACKEND={}",
-                    python_home.display(),
-                    backend_dir.display()
-                ),
-            );
-
-            // WINDOWS: Tell the OS where Python's extension DLLs live.
-            // python311.dll is already loaded at this point (hard-linked),
-            // but SetDllDirectoryW ensures Python can load .pyd extension
-            // modules from python-runtime/ at runtime.
-            #[cfg(target_os = "windows")]
-            set_python_dll_directory(&python_home);
-
-            // CRITICAL: Set PYTHONHOME before interpreter initializes.
-            // PYTHONHOME tells Python where its stdlib and site-packages live.
-            // PYTHONPATH adds our backend/ source directory to the import path.
-            std::env::set_var("PYTHONHOME", &python_home_for_python);
-            std::env::set_var("PYTHONPATH", &backend_dir_for_python);
-            std::env::set_var("PYTHONDONTWRITEBYTECODE", "1");
-            std::env::set_var("PYTHONUNBUFFERED", "1");
-
-            // FIX (RC1): prepare_freethreaded_python() MUST be called exactly once —
-            // before any with_gil() call — and must NOT be inside the restart loop.
-            // Calling it more than once is a no-op but calling it after the interpreter
-            // is already running causes undefined behaviour.
-            pyo3::prepare_freethreaded_python();
-
-            // WINDOWS (release only): Free any console that PyO3 allocated.
-            // prepare_freethreaded_python() calls AllocConsole() internally to
-            // give Python's stdio a handle, even though this exe is built with
-            // windows_subsystem = "windows".  Calling FreeConsole() immediately
-            // afterwards detaches that console before Windows draws the CMD window.
-            // The sys.stdout / sys.stderr redirect below is kept as a second layer
-            // so Python never tries to write to a console handle again.
-            #[cfg(all(target_os = "windows", not(debug_assertions)))]
-            {
-                extern "system" {
-                    fn FreeConsole() -> i32;
-                }
-                unsafe {
-                    FreeConsole();
-                }
-            }
-
-            // FIX (RC1): Wrap the backend run in a restart loop.
-            // Previously the thread exited on any failure and the backend stayed dead
-            // forever. Now it retries up to MAX_RESTARTS times, sleeping between
-            // attempts. Port-conflict errors (RC2) get a longer sleep so the OS has
-            // time to release the port after a crash/hard-restart.
-            const MAX_RESTARTS: u32 = 10;
-            let mut attempt: u32 = 0;
-            let mut is_first_run = true;
-
-            loop {
-                attempt += 1;
-                if attempt > MAX_RESTARTS {
-                    let msg = format!(
-                        "Embedded Python backend failed {} consecutive times — giving up. Check startup log for details.",
-                        MAX_RESTARTS
-                    );
-                    log_sidecar(&app, &format!("PyO3: {}", msg));
-                    update_backend_status(&app, "failed", &msg, false, "max_restarts_exceeded");
-                    break;
-                }
-
-                if !is_first_run {
-                    log_sidecar(
-                        &app,
-                        &format!("PyO3: Restart attempt {}/{}...", attempt, MAX_RESTARTS),
-                    );
-                    update_backend_status(
-                        &app,
-                        "starting",
-                        &format!(
-                            "Restarting embedded Python backend (attempt {}/{})...",
-                            attempt, MAX_RESTARTS
-                        ),
-                        false,
-                        "",
-                    );
-                }
-                is_first_run = false;
-
-                let result = Python::with_gil(|py| -> PyResult<()> {
-                    // Put backend_dir at front of sys.path so `import main` works.
-                    // On restarts sys.path already has this entry — inserting again
-                    // is harmless (Python uses the first match).
-                    let sys = py.import_bound("sys")?;
-                    let path = sys.getattr("path")?;
-                    path.call_method1("insert", (0, &backend_dir_for_python))?;
-
-                    // WINDOWS (release only): redirect Python's sys.stdout / sys.stderr
-                    // to the NUL device so that the embedded interpreter does not call
-                    // AllocConsole() looking for a console handle.  Without this, a
-                    // "Console Window Host" subprocess appears in Task Manager and a
-                    // blank CMD window flashes on startup.  The backend uses the
-                    // `logging` module (→ log file) for all its output, so no useful
-                    // output is lost.  Only redirect on the first run — on restarts
-                    // the handles are already pointing at NUL.
-                    #[cfg(not(debug_assertions))]
-                    if attempt == 1 {
-                        py.run_bound(
-                            "import sys\n\
-                             try:\n\
-                             \x20\x20nul = open('nul', 'w')\n\
-                             \x20\x20sys.stdout = nul\n\
-                             \x20\x20sys.stderr = nul\n\
-                             except Exception:\n\
-                             \x20\x20pass\n",
-                            None,
-                            None,
-                        )?;
-                    }
-
-                    if attempt == 1 {
-                        log_sidecar(&app, "PyO3: Importing backend main module...");
-                    }
-                    // On restarts, import_bound returns the cached module from
-                    // sys.modules — no re-execution, which is what we want.
-                    let main_mod = py.import_bound("main")?;
-
-                    if attempt == 1 {
-                        log_sidecar(&app, "PyO3: Calling main.run_server() — uvicorn starting...");
-                    } else {
-                        log_sidecar(
-                            &app,
-                            &format!("PyO3: Calling main.run_server() (restart {})...", attempt),
-                        );
-                    }
-                    // run_server() blocks here for the lifetime of the uvicorn server.
-                    // It returns/raises when the server exits for any reason.
-                    main_mod.call_method0("run_server")?;
-
-                    Ok(())
-                });
-
-                // Determine if this was a port-in-use failure (RC2 interop).
-                // backend/main.py raises RuntimeError("port_in_use: ...") instead of
-                // sys.exit(1) so we can detect it here and wait longer.
-                let error_str = match &result {
-                    Err(e) => e.to_string(),
-                    Ok(_) => String::new(),
-                };
-                let is_port_conflict = error_str.contains("port_in_use");
-                let sleep_secs: u64 = if is_port_conflict { 8 } else { 3 };
-
-                let reason_msg = if is_port_conflict {
-                    format!(
-                        "Port conflict on attempt {}. Waiting {}s for the OS to release the port...",
-                        attempt, sleep_secs
-                    )
-                } else if result.is_ok() {
-                    format!(
-                        "Backend exited cleanly on attempt {}. Restarting in {}s...",
-                        attempt, sleep_secs
-                    )
-                } else {
-                    format!(
-                        "Backend crashed on attempt {}: {}. Restarting in {}s...",
-                        attempt, error_str, sleep_secs
-                    )
-                };
-
-                log_sidecar(&app, &format!("PyO3: {}", reason_msg));
-                update_backend_status(&app, "restarting", &reason_msg, false, "restarting");
-                thread::sleep(Duration::from_secs(sleep_secs));
-            }
-        })
-        .expect("Failed to spawn pyo3-backend thread");
-}
-
-fn update_backend_status(
-    app: &AppHandle,
-    status: &str,
-    message: &str,
-    ready: bool,
-    failure_code: &str,
-) {
-    if let Ok(mut snapshot) = app.state::<StartupState>().snapshot.lock() {
-        snapshot.backend.status = status.to_string();
-        snapshot.backend.message = message.to_string();
-        snapshot.backend.failure_code = failure_code.to_string();
-        snapshot.startup_ready = ready;
-        let current = snapshot.clone();
-        drop(snapshot);
-        write_diagnostics_snapshot(app, &current);
-    }
-}
-
-fn update_consumet_status(
-    app: &AppHandle,
-    status: &str,
-    message: &str,
-    failure_code: &str,
-    port: u16,
-    binary_path: &str,
-) {
-    if let Ok(mut snapshot) = app.state::<StartupState>().snapshot.lock() {
-        snapshot.consumet.status = status.to_string();
-        snapshot.consumet.message = message.to_string();
-        snapshot.consumet.failure_code = failure_code.to_string();
-        snapshot.consumet.port = port;
-        snapshot.consumet.binary_path = binary_path.to_string();
-        let current = snapshot.clone();
-        drop(snapshot);
-        write_diagnostics_snapshot(app, &current);
-    }
-}
-
-#[derive(Copy, Clone, Eq, PartialEq)]
-enum ConsumetLaunchState {
-    Ready,
-    Starting,
-    Failed,
-}
-
-fn stop_consumet_sidecar(app: &AppHandle) {
-    if let Ok(mut child_slot) = app.state::<SidecarProcessState>().consumet_child.lock() {
-        if let Some(mut child) = child_slot.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
+    format!("{{\n{}\n}}", fields.join(",\n"))
 }
 
 // ── Nuitka compiled backend ───────────────────────────────────────────────────
-// If build-nuitka.bat was run before packaging, a native grabix-backend.exe
-// lives in backend-compiled/. This starts instantly (no Python interpreter).
-// Falls back to PyO3 automatically if the compiled binary doesn't exist.
 
 fn find_nuitka_backend(app: &AppHandle) -> Option<PathBuf> {
+    // Also check the backend_resource_subdir env (set by build script)
+    let _subdir = backend_resource_subdir();
+
     let mut candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.push(resource_dir.join("backend-compiled").join("grabix-backend.exe"));
@@ -881,7 +547,6 @@ fn start_nuitka_sidecar(app: AppHandle, backend_exe: PathBuf) {
                 command.stderr(Stdio::from(err));
             }
 
-            // Forward all GRABIX_ env vars the backend needs
             for (key, val) in std::env::vars() {
                 if key.starts_with("GRABIX_") || key == "CONSUMET_API_BASE" {
                     command.env(&key, &val);
@@ -902,7 +567,6 @@ fn start_nuitka_sidecar(app: AppHandle, backend_exe: PathBuf) {
                 *slot = Some(child);
             }
 
-            // Poll health — same as PyO3 path
             let timeout_secs = 90;
             let started = Instant::now();
             log_sidecar(&app, "Nuitka: Waiting for compiled backend on port 8000...");
@@ -1170,27 +834,67 @@ fn start_consumet_sidecar(app: &AppHandle) -> ConsumetLaunchState {
     ConsumetLaunchState::Starting
 }
 
-fn backend_terminal_failure(app: &AppHandle) -> Option<(String, String)> {
-    app.state::<StartupState>()
-        .snapshot
-        .lock()
-        .ok()
-        .and_then(|snapshot| {
-            let status = snapshot.backend.status.clone();
-            if matches!(status.as_str(), "failed" | "missing" | "port_in_use") {
-                Some((
-                    snapshot.backend.failure_code.clone(),
-                    snapshot.backend.message.clone(),
-                ))
-            } else {
-                None
-            }
-        })
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum ConsumetLaunchState {
+    Ready,
+    Starting,
+    Failed,
 }
 
-fn start_python_backend_async(app: AppHandle) {
+fn stop_consumet_sidecar(app: &AppHandle) {
+    if let Ok(mut child_slot) = app.state::<SidecarProcessState>().consumet_child.lock() {
+        if let Some(mut child) = child_slot.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn update_backend_status(
+    app: &AppHandle,
+    status: &str,
+    message: &str,
+    ready: bool,
+    failure_code: &str,
+) {
+    if let Ok(mut snapshot) = app.state::<StartupState>().snapshot.lock() {
+        snapshot.backend.status = status.to_string();
+        snapshot.backend.message = message.to_string();
+        snapshot.backend.failure_code = failure_code.to_string();
+        snapshot.startup_ready = ready;
+        let current = snapshot.clone();
+        drop(snapshot);
+        write_diagnostics_snapshot(app, &current);
+    }
+}
+
+fn update_consumet_status(
+    app: &AppHandle,
+    status: &str,
+    message: &str,
+    failure_code: &str,
+    port: u16,
+    binary_path: &str,
+) {
+    if let Ok(mut snapshot) = app.state::<StartupState>().snapshot.lock() {
+        snapshot.consumet.status = status.to_string();
+        snapshot.consumet.message = message.to_string();
+        snapshot.consumet.failure_code = failure_code.to_string();
+        snapshot.consumet.port = port;
+        snapshot.consumet.binary_path = binary_path.to_string();
+        let current = snapshot.clone();
+        drop(snapshot);
+        write_diagnostics_snapshot(app, &current);
+    }
+}
+
+// ── Backend orchestrator ──────────────────────────────────────────────────────
+// Starts Consumet (HiAnime gateway) then launches the Nuitka-compiled backend.
+// If the compiled exe is missing, reports a clear error instead of crashing.
+
+fn start_backend_async(app: AppHandle) {
     thread::Builder::new()
-        .name(String::from("pyo3-orchestrator"))
+        .name(String::from("backend-orchestrator"))
         .spawn(move || {
             let consumet_state = start_consumet_sidecar(&app);
             match consumet_state {
@@ -1205,139 +909,19 @@ fn start_python_backend_async(app: AppHandle) {
                 }
             }
 
-            // ── Nuitka fast path ──────────────────────────────────────────────
-            // If build-nuitka.bat was run before packaging, use the compiled
-            // native binary — no Python interpreter overhead at all.
-            // If not found, fall through to the PyO3 path below.
-            if let Some(nuitka_exe) = find_nuitka_backend(&app) {
-                log_sidecar(&app, "Nuitka: Compiled backend found. Skipping PyO3.");
-                start_nuitka_sidecar(app.clone(), nuitka_exe);
-                return; // nuitka_sidecar manages its own health poll
-            }
-
-            log_sidecar(&app, "Nuitka: No compiled backend found. Using PyO3 (run build-nuitka.bat to compile).");
-
-            let python_home = match find_python_home(&app) {
-                Some(p) => p,
+            match find_nuitka_backend(&app) {
+                Some(nuitka_exe) => {
+                    log_sidecar(&app, "Nuitka: Compiled backend found.");
+                    start_nuitka_sidecar(app.clone(), nuitka_exe);
+                }
                 None => {
-                    let msg = "ERROR: python-runtime/ not found. Run scripts/setup-python-runtime.ps1 then rebuild.";
+                    let msg = "ERROR: grabix-backend.exe not found in app resources. Reinstall GRABIX or run build-grabix.bat.";
                     log_sidecar(&app, msg);
-                    update_backend_status(
-                        &app,
-                        "missing",
-                        msg,
-                        false,
-                        "python_runtime_missing",
-                    );
-                    return;
+                    update_backend_status(&app, "missing", msg, false, "nuitka_exe_missing");
                 }
-            };
-
-            let backend_dir = match find_backend_dir(&app) {
-                Some(p) => p,
-                None => {
-                    let msg = "ERROR: backend/ not found in app resources. Reinstall GRABIX.";
-                    log_sidecar(&app, msg);
-                    update_backend_status(
-                        &app,
-                        "missing",
-                        msg,
-                        false,
-                        "backend_resource_missing",
-                    );
-                    return;
-                }
-            };
-
-            log_sidecar(
-                &app,
-                &format!(
-                    "PyO3: Resources located. python_home={} backend={}",
-                    python_home.display(),
-                    backend_dir.display()
-                ),
-            );
-
-            if !is_port_available(8000) {
-                // FIX (RC1 + RC2): Previously this returned early, permanently killing
-                // the backend with no retry. Now we log it and continue — the restart
-                // loop inside start_python_backend will detect the port_in_use error
-                // (raised as RuntimeError by backend/main.py instead of sys.exit) and
-                // wait 8 seconds for the OS to release the port before retrying.
-                let msg = "Backend port 8000 is occupied at startup. The restart loop will wait for it to free up and retry automatically.";
-                log_sidecar(&app, &format!("PyO3: {}", msg));
-                update_backend_status(&app, "restarting", msg, false, "port_in_use_retry");
-                // ← intentionally NOT returning; fall through to start_python_backend()
             }
-
-            update_backend_status(
-                &app,
-                "starting",
-                "Embedded Python backend initializing...",
-                false,
-                "",
-            );
-
-            start_python_backend(app.clone(), python_home, backend_dir);
-
-            // Poll immediately — no artificial delay.
-            // PyO3 starts the interpreter on a background thread; we just
-            // need to spin until the /health/ping endpoint responds.
-            let timeout_secs = 90;
-            let started = Instant::now();
-            log_sidecar(
-                &app,
-                &format!(
-                    "PyO3: Waiting for uvicorn on port 8000 (timeout: {}s)...",
-                    timeout_secs
-                ),
-            );
-
-            loop {
-                if http_ok_once(8000, "/health/ping") {
-                    let msg = "Embedded Python backend is healthy on port 8000.";
-                    log_sidecar(&app, &format!("PyO3: {}", msg));
-                    update_backend_status(&app, "started", msg, true, "");
-                    break;
-                }
-
-                if let Some((failure_code, message)) = backend_terminal_failure(&app) {
-                    log_sidecar(
-                        &app,
-                        &format!(
-                            "PyO3: backend startup aborted early [{}] {}",
-                            failure_code, message
-                        ),
-                    );
-                    break;
-                }
-
-                if started.elapsed() >= Duration::from_secs(timeout_secs) {
-                    let msg =
-                        "Backend did not respond within 90s. Check startup log for embedded Python errors.";
-                    log_sidecar(&app, &format!("PyO3: TIMEOUT - {}", msg));
-                    update_backend_status(
-                        &app,
-                        "timeout",
-                        msg,
-                        false,
-                        "backend_start_timeout",
-                    );
-                    break;
-                }
-
-                thread::sleep(Duration::from_millis(100));
-            }
-
-            let snapshot = app
-                .state::<StartupState>()
-                .snapshot
-                .lock()
-                .map(|s| s.clone())
-                .unwrap_or_default();
-            write_diagnostics_snapshot(&app, &snapshot);
         })
-        .expect("Failed to spawn pyo3-orchestrator thread");
+        .expect("Failed to spawn backend-orchestrator thread");
 }
 
 // ── Initial diagnostics ───────────────────────────────────────────────────────
@@ -1371,11 +955,11 @@ fn initial_diagnostics(app: &AppHandle) -> StartupDiagnostics {
             message: if cfg!(debug_assertions) {
                 String::from("Debug mode — run backend manually: python backend/main.py")
             } else {
-                String::from("Embedded Python backend initializing via PyO3...")
+                String::from("Compiled Python backend initializing (Nuitka)...")
             },
             failure_code: String::new(),
             port: 8000,
-            binary_path: String::from("(embedded via PyO3 - no separate process)"),
+            binary_path: String::from("backend-compiled/grabix-backend.exe"),
         },
         consumet: SidecarDiagnostic {
             name: String::from("consumet"),
@@ -1417,32 +1001,12 @@ fn initial_diagnostics(app: &AppHandle) -> StartupDiagnostics {
 }
 
 // ── Ad-block JavaScript injection ─────────────────────────────────────────────
-//
-// This script is injected into every page the WebView loads (including inside
-// iframes where possible). It activates only when the user has ad blocking
-// enabled (checked via localStorage key "grabix_adblock" !== "false").
-//
-// Three layers of protection:
-//   1. window.open() blocker — kills popup/redirect ads before they open
-//   2. MutationObserver — removes ad overlay DOM elements continuously
-//   3. fetch / XHR intercept — cancels requests to known ad network domains
-//
-// The domain blocklist here is a hardcoded fast-path (~30 worst offenders).
-// The full 50k-domain list lives in the Python backend service.
 
 const AD_BLOCK_SCRIPT: &str = r#"
 (function() {
   try {
     var protocol = String(location.protocol || '').toLowerCase();
     var host = String(location.hostname || '').toLowerCase();
-    // FIX: Tauri v2 serves the app shell on http://tauri.localhost — NOT tauri://
-    // or plain localhost. The old guard only checked 'localhost' (exact) so it
-    // missed 'tauri.localhost', meaning the MutationObserver below was running
-    // INSIDE the React app and removing React-managed DOM nodes (anything whose
-    // class contains "overlay", "popup", etc.) on every DOM mutation.
-    // React's fiber tree still referenced those removed nodes, so every
-    // reconciliation threw "removeChild: node is not a child of this node".
-    // The fix: exclude any *.localhost hostname, not just bare localhost.
     if (
       protocol === 'tauri:' ||
       protocol === 'asset:' ||
@@ -1450,13 +1014,10 @@ const AD_BLOCK_SCRIPT: &str = r#"
       host === '127.0.0.1' ||
       host.endsWith('.localhost')
     ) return;
-    // ── Check if ad blocker is enabled (toggle stored in localStorage) ──
     if (localStorage.getItem('grabix_adblock') === 'false') return;
 
-    // ── 1. Block all popup windows ──────────────────────────────────────
     window.open = function() { return null; };
 
-    // ── 2. Known ad network domains (fast hardcoded list) ───────────────
     var AD_DOMAINS = [
       'doubleclick.net','googlesyndication.com','googletagmanager.com',
       'adnxs.com','juicyads.com','exoclick.com','trafficjunky.com',
@@ -1481,7 +1042,6 @@ const AD_BLOCK_SCRIPT: &str = r#"
       return false;
     }
 
-    // ── 3. Intercept fetch ───────────────────────────────────────────────
     var _origFetch = window.fetch;
     window.fetch = function(input, init) {
       var url = (typeof input === 'string') ? input : (input && input.url) || '';
@@ -1489,7 +1049,6 @@ const AD_BLOCK_SCRIPT: &str = r#"
       return _origFetch.apply(this, arguments);
     };
 
-    // ── 4. Intercept XMLHttpRequest ──────────────────────────────────────
     var _origOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, url) {
       if (isAdUrl(url)) {
@@ -1504,7 +1063,6 @@ const AD_BLOCK_SCRIPT: &str = r#"
       return _origSend.apply(this, arguments);
     };
 
-    // ── 5. DOM cleanup: remove ad overlay elements ───────────────────────
     var AD_SELECTORS = [
       '[class*="popup"]','[id*="popup"]',
       '[class*="overlay"]:not(video):not(canvas)',
@@ -1523,14 +1081,12 @@ const AD_BLOCK_SCRIPT: &str = r#"
         var els = document.querySelectorAll(AD_SELECTORS);
         for (var i = 0; i < els.length; i++) {
           var el = els[i];
-          // Don't remove the video player itself
           if (el.tagName === 'VIDEO' || el.querySelector('video')) continue;
           if (el && el.parentNode) el.parentNode.removeChild(el);
         }
       } catch(e) {}
     }
 
-    // Run immediately and on every DOM change
     cleanAds();
     var observer = new MutationObserver(cleanAds);
     observer.observe(document.documentElement || document.body, {
@@ -1554,22 +1110,12 @@ pub fn run() {
                 let _ = webview.eval(AD_BLOCK_SCRIPT);
             }
         })
-        // ── Fix: WebView2 white screen on Windows after minimize/restore ──────
-        // WebView2 sometimes stops painting when the window is unfocused and
-        // then focused again (e.g. after minimise → restore).  Nudging the
-        // body opacity by a fraction forces the compositor to issue a new
-        // draw command without any visible flash to the user.
         .on_window_event(|window, event| {
             match event {
-                // ── Close to tray (Solution 2) ────────────────────────────────
-                // Intercept the X button: hide the window, keep the backend
-                // alive. User reopens via tray icon. Next "launch" is instant.
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
                     let _ = window.hide();
                 }
-                // Fire on focus regain (minimize → restore) AND on any resize,
-                // which also fires when Windows restores from a minimised state.
                 tauri::WindowEvent::Focused(true) | tauri::WindowEvent::Resized(_) => {
                     for webview in window.webviews() {
                         let _ = webview.eval(
@@ -1599,8 +1145,7 @@ pub fn run() {
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             let runtime_config_sync = sync_packaged_runtime_config(app.handle());
             apply_backend_runtime_env(&desktop_auth);
-            // Tell the Python backend where Tauri's bundled resources live so it
-            // can find aria2c.exe (and any other bundled tools) without downloading.
+
             if let Ok(resource_dir) = app.path().resource_dir() {
                 std::env::set_var("GRABIX_RESOURCE_DIR", resource_dir.display().to_string());
             }
@@ -1635,7 +1180,7 @@ pub fn run() {
             log_sidecar(
                 app.handle(),
                 &format!(
-                    "GRABIX started (PyO3 embedded backend edition). build_id={} backend_hash={} desktop_auth_ready={} app_state_root={}",
+                    "GRABIX started (Nuitka compiled backend edition). build_id={} backend_hash={} desktop_auth_ready={} app_state_root={}",
                     build_id(),
                     backend_resource_hash(),
                     initial.desktop_auth.ready,
@@ -1644,12 +1189,10 @@ pub fn run() {
             );
 
             if !cfg!(debug_assertions) {
-                start_python_backend_async(app.handle().clone());
+                start_backend_async(app.handle().clone());
             }
 
             // ── System tray ───────────────────────────────────────────────────
-            // Close button hides the window. Tray lets user reopen or truly quit.
-            // This makes every launch after the first completely instant.
             {
                 let show_item = MenuItem::with_id(app.handle(), "show", "Open GRABIX", true, None::<&str>)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
@@ -1710,8 +1253,6 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
 
-    // Python lives inside this process and dies automatically.
-    // The bundled HiAnime gateway is a child process and must be stopped.
     app.run(|app_handle, event| {
         if matches!(event, RunEvent::Exit) {
             stop_consumet_sidecar(&app_handle);
