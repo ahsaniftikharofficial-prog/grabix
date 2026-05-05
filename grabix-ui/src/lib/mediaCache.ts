@@ -15,7 +15,29 @@
  * the singleton is cleared and the next call re-establishes it.
  */
 
-import { readLocalAppSettings } from "./appSettings";
+import { readLocalAppSettings, type AppSettings } from "./appSettings";
+
+// ── Settings cache ────────────────────────────────────────────────────────────
+// readLocalAppSettings() hits localStorage on every call. With 60+ images per
+// page that means 60+ localStorage reads per render. Fix: cache the result for
+// 5 seconds so we re-read at most once per page navigation, not once per image.
+let _cachedSettings: AppSettings | null = null;
+let _settingsCachedAt = 0;
+const SETTINGS_TTL_MS = 5_000;
+
+function getSettings(): AppSettings {
+  const now = Date.now();
+  if (!_cachedSettings || now - _settingsCachedAt > SETTINGS_TTL_MS) {
+    _cachedSettings = readLocalAppSettings();
+    _settingsCachedAt = now;
+  }
+  return _cachedSettings;
+}
+
+// Call this after writing settings so the cache doesn't serve stale values.
+export function invalidateSettingsCache(): void {
+  _cachedSettings = null;
+}
 
 const DB_NAME    = "grabix-media-cache";
 const DB_VERSION = 1;
@@ -137,7 +159,7 @@ export async function pruneExpiredMediaCache(): Promise<void> {
 }
 
 export async function getCachedMediaObjectUrl(url: string): Promise<string | null> {
-  const settings = readLocalAppSettings();
+  const settings = getSettings();
   if (!settings.enable_media_cache || !url) return null;
   try {
     const record = await runTransaction<CachedMediaRecord | undefined>(
@@ -157,7 +179,7 @@ export async function getCachedMediaObjectUrl(url: string): Promise<string | nul
 }
 
 export async function cacheMediaFromUrl(url: string): Promise<string> {
-  const settings = readLocalAppSettings();
+  const settings = getSettings();
   if (!settings.enable_media_cache || !url) return url;
 
   const existing = await getCachedMediaObjectUrl(url);

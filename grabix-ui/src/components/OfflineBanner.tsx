@@ -1,8 +1,7 @@
 /**
  * OfflineBanner — Modern floating status pill.
- * Replaces the 2011-era full-width top bar with a subtle animated
- * pill that slides up from the bottom-right. Only visible after the
- * app has finished bootstrapping (suppressed via offlineState.isOffline = false).
+ * Shows "Backend starting… (Xs)" with a live elapsed counter so users
+ * know something is happening and roughly how long to expect.
  */
 import { useEffect, useState } from "react";
 import type { OfflineState } from "../lib/useOfflineDetection";
@@ -13,22 +12,42 @@ interface Props {
 
 export function OfflineBanner({ offlineState }: Props) {
   const [visible, setVisible] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
+  // Show/hide the pill with a small delay to avoid flashing on fast reconnects.
   useEffect(() => {
     if (offlineState.isOffline) {
       const t = window.setTimeout(() => setVisible(true), 400);
       return () => window.clearTimeout(t);
     } else {
       setVisible(false);
+      setElapsedSeconds(0);
     }
   }, [offlineState.isOffline]);
+
+  // Tick up a seconds counter while the banner is visible.
+  // Only active when the banner is showing — stops as soon as backend is ready.
+  useEffect(() => {
+    if (!visible) return;
+    setElapsedSeconds(0);
+    const t = window.setInterval(() => {
+      setElapsedSeconds(s => s + 1);
+    }, 1000);
+    return () => window.clearInterval(t);
+  }, [visible]);
 
   if (!offlineState.isOffline && !visible) return null;
 
   const isNetwork = offlineState.reason === "network";
-  const label = isNetwork ? "No internet connection" : "Backend starting\u2026";
-  const icon = isNetwork ? "📶" : "⏳";
   const accent = isNetwork ? "#e87c3e" : "#8b5cf6";
+
+  // For backend starting: show elapsed time + a hint after 10 seconds.
+  const backendLabel = elapsedSeconds < 10
+    ? `Backend starting… (${elapsedSeconds}s)`
+    : `Backend starting… (${elapsedSeconds}s — first launch takes ~20s)`;
+
+  const label = isNetwork ? "No internet connection" : backendLabel;
+  const icon = isNetwork ? "📶" : "⏳";
 
   return (
     <>
