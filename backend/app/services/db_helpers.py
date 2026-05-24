@@ -611,3 +611,23 @@ def init_db() -> None:
         _log_event(_get_backend_logger(), logging.INFO, event="db_init", message="Database initialized successfully.")
     except Exception as e:
         _log_event(_get_backend_logger(), logging.ERROR, event="db_init_failed", message="Database initialization failed.", details={"error": str(e)})
+
+# ── Backward-compat lazy exports ──────────────────────────────────────────────
+# library_helpers.py and others do `from db_helpers import library_logger` etc.
+# Python 3.7+ calls module __getattr__ when a name isn't in __dict__, so the
+# loggers and DOWNLOAD_DIR are still importable but still initialised lazily.
+
+def __getattr__(name: str):
+    if name == "backend_logger":
+        return _get_backend_logger()
+    if name == "downloads_logger":
+        return _get_downloads_logger()
+    if name == "library_logger":
+        return _get_library_logger()
+    if name == "DOWNLOAD_DIR":
+        return _get_download_dir()
+    if name == "DB_PATH":
+        return _get_db_path()
+    if name == "SETTINGS_PATH":
+        return _get_settings_path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -2,11 +2,10 @@ from typing import Any
 
 from fastapi import Request
 
-from app.services.runtime_config import (
-    desktop_auth_token,
-    is_desktop_auth_observe_only,
-    is_desktop_auth_required,
-)
+# B6.3 — runtime_config imports moved out of module scope.
+# desktop_auth_token(), is_desktop_auth_required(), and
+# is_desktop_auth_observe_only() are resolved lazily inside the functions
+# that use them. No callers change.
 
 DESKTOP_AUTH_HEADER = "X-Grabix-Desktop-Auth"
 
@@ -56,6 +55,7 @@ def requires_desktop_auth(method: str, path: str) -> bool:
 
 
 def desktop_auth_state_snapshot() -> dict[str, Any]:
+    from app.services.runtime_config import desktop_auth_token, is_desktop_auth_required, is_desktop_auth_observe_only
     return {
         "required": is_desktop_auth_required(),
         "observe_only": is_desktop_auth_observe_only(),
@@ -65,6 +65,7 @@ def desktop_auth_state_snapshot() -> dict[str, Any]:
 
 
 def validate_desktop_auth_request(request: Request) -> dict[str, Any] | None:
+    from app.services.runtime_config import desktop_auth_token, is_desktop_auth_required, is_desktop_auth_observe_only
     if not requires_desktop_auth(request.method, request.url.path):
         return None
 

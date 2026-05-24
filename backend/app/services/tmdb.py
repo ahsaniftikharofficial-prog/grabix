@@ -3,7 +3,10 @@ from typing import Any
 import httpx
 from fastapi import HTTPException
 
-from app.services.runtime_config import has_tmdb_token, tmdb_bearer_token
+# B6.1 — runtime_config import moved out of module scope.
+# has_tmdb_token() and tmdb_bearer_token() are resolved lazily inside
+# fetch_tmdb_json() so this module can be imported without pulling in
+# runtime_config. No callers change.
 
 TMDB_API_BASE = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
@@ -47,6 +50,7 @@ def _tmdb_http_error(detail: str, status_code: int = 502, *, code: str = "tmdb_r
 
 
 async def fetch_tmdb_json(path: str, *, params: dict[str, Any] | None = None, ttl_seconds: int = 600) -> Any:
+    from app.services.runtime_config import has_tmdb_token, tmdb_bearer_token
     if not has_tmdb_token():
         raise _tmdb_http_error(
             "TMDB is not configured for this build.",
