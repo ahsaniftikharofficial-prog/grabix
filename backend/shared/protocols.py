@@ -1,17 +1,33 @@
-from typing import Protocol, Any, runtime_checkable
+"""
+shared/protocols.py — Contracts (interfaces) for GRABIX backend services.
+
+Uses typing.Protocol — NOT ABC, NOT inheritance.
+Any class that already has these methods automatically satisfies the protocol.
+No rewrites needed in existing code.
+
+No internal GRABIX imports — safe to import from anywhere.
+"""
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
 class LoggerProtocol(Protocol):
-    def info(self, msg: str, *args, **kwargs) -> None: ...
-    def error(self, msg: str, *args, **kwargs) -> None: ...
-    def warning(self, msg: str, *args, **kwargs) -> None: ...
-    def debug(self, msg: str, *args, **kwargs) -> None: ...
+    """Matches the standard logging.Logger interface used throughout GRABIX."""
+    def info(self, msg: str, *args: Any, **kwargs: Any) -> None: ...
+    def error(self, msg: str, *args: Any, **kwargs: Any) -> None: ...
+    def warning(self, msg: str, *args: Any, **kwargs: Any) -> None: ...
+    def debug(self, msg: str, *args: Any, **kwargs: Any) -> None: ...
 
 
 @runtime_checkable
 class ConfigProtocol(Protocol):
+    """
+    Matches _GrabixConfig from runtime_config.py.
+    Files that need config receive this — they never import runtime_config directly.
+    """
     def get_download_dir(self) -> Path: ...
     def get_db_path(self) -> Path: ...
     def get_logs_dir(self) -> Path: ...
@@ -21,6 +37,10 @@ class ConfigProtocol(Protocol):
 
 @runtime_checkable
 class DatabaseProtocol(Protocol):
+    """
+    Matches the public interface of db_helpers.py.
+    Routes and services receive this — they never import db_helpers directly.
+    """
     def load_settings(self) -> dict: ...
     def save_settings(self, settings: dict) -> None: ...
     def load_library(self) -> list: ...
@@ -29,6 +49,10 @@ class DatabaseProtocol(Protocol):
 
 @runtime_checkable
 class CacheProtocol(Protocol):
+    """
+    Matches manga_cache.py and any other cache implementation.
+    Manga providers receive this — they never import manga_cache directly.
+    """
     def get(self, key: str) -> Any: ...
     def set(self, key: str, value: Any) -> None: ...
     def clear(self, key: str) -> None: ...
@@ -36,6 +60,7 @@ class CacheProtocol(Protocol):
 
 @runtime_checkable
 class DownloadEngineProtocol(Protocol):
+    """Matches the public API surface of downloads/engine.py."""
     def start_download(self, url: str, options: dict) -> str: ...
     def get_status(self, dl_id: str) -> dict: ...
     def list_downloads(self) -> list: ...
@@ -44,10 +69,15 @@ class DownloadEngineProtocol(Protocol):
 
 @runtime_checkable
 class SecurityProtocol(Protocol):
+    """Matches security.py public functions."""
     def validate_url(self, url: str) -> bool: ...
     def redact_for_logs(self, data: Any) -> Any: ...
 
 
 @runtime_checkable
 class NetworkPolicyProtocol(Protocol):
+    """
+    Matches network_policy.py.
+    security.py receives this — it never imports network_policy directly.
+    """
     def validate_outbound_target(self, url: str) -> None: ...
