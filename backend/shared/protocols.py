@@ -79,5 +79,7 @@ class NetworkPolicyProtocol(Protocol):
     """
     Matches network_policy.py.
     security.py receives this — it never imports network_policy directly.
+    The real validate_outbound_target accepts mode= and allowed_hosts= kwargs;
+    the protocol covers the minimal contract callers rely on.
     """
-    def validate_outbound_target(self, url: str) -> None: ...
+    def validate_outbound_target(self, url: str, *, mode: str, allowed_hosts: tuple = ()) -> Any: ...

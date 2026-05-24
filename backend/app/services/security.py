@@ -4,7 +4,10 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import HTTPException
-from app.services.network_policy import validate_outbound_target
+
+# B4.3 — network_policy import moved out of module scope.
+# validate_outbound_url() lazy-imports validate_outbound_target() on first
+# call instead of binding it at import time. No callers change.
 
 DEFAULT_LOCAL_APP_ORIGINS = [
     "http://127.0.0.1:1420",
@@ -86,6 +89,7 @@ DEFAULT_APPROVED_MEDIA_HOSTS = (
 
 
 def validate_outbound_url(url: str, *, allowed_hosts: tuple[str, ...] = DEFAULT_APPROVED_MEDIA_HOSTS) -> str:
+    from app.services.network_policy import validate_outbound_target
     result = validate_outbound_target(
         url,
         mode="approved_provider_target",

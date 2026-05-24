@@ -17,6 +17,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+# ── Logging bootstrap — MUST run before any service/route imports ─────────────
+# db_helpers.py (and other service modules) call get_logger() at module level.
+# initialize_logging() must be called first, otherwise those module-level calls
+# raise RuntimeError before main.py finishes loading. The full service import
+# block below will import the same already-cached module; the second
+# initialize_logging() call there becomes a safe no-op (_CONFIGURED guard).
+from app.services.logging_utils import initialize_logging as _init_logging
+from app.services.runtime_config import logs_dir as _get_logs_dir
+_init_logging(logs_dir=_get_logs_dir())
+
 # ── Router imports ────────────────────────────────────────────────────────────
 from app.routes.downloads import router as downloads_router
 from app.routes.manga import router as manga_router
@@ -75,16 +85,16 @@ from app.services.security import (
     validate_outbound_url as security_validate_outbound_url,
 )
 
-# ── Split helpers (Phase 6 — pre-existing) ───────────────────────────────────
-from db_helpers import (
+# ── Split helpers (B0: ghost files removed — import directly from app.services) ─
+from app.services.db_helpers import (
     get_db_connection, db_insert, db_update_status, db_upsert_download_job,
     db_delete_download_job, db_list_download_jobs, DEFAULT_SETTINGS,
     load_settings, save_settings_to_disk, _strip_ansi, _format_bytes,
     _format_bytes_int, _format_eta, _sanitize_download_engine, _get_file_size,
     _guess_dl_type_from_path, has_ffmpeg, has_aria2, init_db,
 )
-from library_helpers import migrate_db, _build_library_index, _reconcile_library_state
-from streaming_helpers import (
+from app.services.library_helpers import migrate_db, _build_library_index, _reconcile_library_state
+from app.services.streaming_helpers import (
     _extract_iframe_src, _fetch_json, _normalize_request_headers,
     _rewrite_hls_playlist, _extract_hls_variants, _looks_like_playable_media_url,
     _resolve_embed_target, resolve_embed, stream_proxy,
