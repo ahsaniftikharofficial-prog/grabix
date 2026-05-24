@@ -4,7 +4,10 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
-LOG_DIR: Path | None = None  # set by initialize_logging() — not imported from runtime_config
+# LOG_DIR is no longer set at import time.
+# Call initialize_logging(logs_dir=...) at app startup (in main.py) before
+# any get_logger() calls. After that one call, all subsequent calls are no-ops.
+LOG_DIR: Path | None = None
 MAX_LOG_BYTES = 1_000_000
 BACKUP_COUNT = 3
 _CONFIGURED = False
@@ -24,24 +27,29 @@ class JsonLineFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=True, default=str)
 
 
-def initialize_logging(logs_dir: Path) -> None:
+def initialize_logging(logs_dir: Path | None = None) -> None:
     global _CONFIGURED, LOG_DIR
     if _CONFIGURED:
         return
-    LOG_DIR = logs_dir
+    if logs_dir is not None:
+        LOG_DIR = logs_dir
+    if LOG_DIR is None:
+        raise RuntimeError(
+            "initialize_logging() must be called with logs_dir= before any logger is used. "
+            "Call it in main.py at startup: initialize_logging(logs_dir=get_logs_dir())"
+        )
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     _CONFIGURED = True
 
 
 def get_logger(service: str) -> logging.Logger:
-    _log_dir = LOG_DIR or (Path.home() / "Downloads" / "GRABIX" / "logs")
-    _log_dir.mkdir(parents=True, exist_ok=True)
+    initialize_logging()
     logger = logging.getLogger(f"grabix.{service}")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     if not logger.handlers:
         handler = RotatingFileHandler(
-            _log_dir / f"{service}.log",
+            LOG_DIR / f"{service}.log",
             maxBytes=MAX_LOG_BYTES,
             backupCount=BACKUP_COUNT,
             encoding="utf-8",
@@ -73,14 +81,14 @@ def log_event(
 
 
 def backend_log_path() -> str:
-    _log_dir = LOG_DIR or (Path.home() / "Downloads" / "GRABIX" / "logs")
-    return str((_log_dir / "backend.log").resolve())
+    initialize_logging()
+    return str((LOG_DIR / "backend.log").resolve())
 
 
 def read_recent_log_events(limit: int = 30, levels: set[str] | None = None) -> list[dict[str, Any]]:
-    _log_dir = LOG_DIR or (Path.home() / "Downloads" / "GRABIX" / "logs")
+    initialize_logging()
     events: list[dict[str, Any]] = []
-    for path in sorted(_log_dir.glob("*.log")):
+    for path in sorted(LOG_DIR.glob("*.log")):
         try:
             with path.open("r", encoding="utf-8", errors="replace") as handle:
                 for line in handle:

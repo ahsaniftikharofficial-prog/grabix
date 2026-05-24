@@ -179,7 +179,7 @@ class TestUnit_LooksLikePlayableUrl(unittest.TestCase):
     """_looks_like_playable_media_url detects URLs containing playable media tokens."""
 
     def setUp(self):
-        from streaming_helpers import _looks_like_playable_media_url
+        from app.services.streaming_helpers import _looks_like_playable_media_url
         self.fn = _looks_like_playable_media_url
 
     def test_m3u8_url(self):
@@ -199,7 +199,7 @@ class TestUnit_ProxyHlsResourcePath(unittest.TestCase):
     """_proxy_hls_resource_path maps resource URLs to the correct proxy endpoint."""
 
     def setUp(self):
-        from streaming_helpers import _proxy_hls_resource_path
+        from app.services.streaming_helpers import _proxy_hls_resource_path
         self.fn = _proxy_hls_resource_path
 
     def test_m3u8_goes_to_playlist(self):
@@ -224,7 +224,7 @@ class TestUnit_ExtractIframeSrc(unittest.TestCase):
     """_extract_iframe_src pulls the src URL out of an iframe HTML tag."""
 
     def setUp(self):
-        from streaming_helpers import _extract_iframe_src
+        from app.services.streaming_helpers import _extract_iframe_src
         self.fn = _extract_iframe_src
 
     def test_standard_iframe(self):
@@ -245,7 +245,7 @@ class TestUnit_ExtractHlsVariants(unittest.TestCase):
     """_extract_hls_variants parses an HLS master playlist into a list of quality options."""
 
     def setUp(self):
-        from streaming_helpers import _extract_hls_variants
+        from app.services.streaming_helpers import _extract_hls_variants
         self.fn = _extract_hls_variants
 
     def test_parses_two_variants(self):
@@ -320,7 +320,7 @@ class TestUnit_NormalizeHeaders(unittest.TestCase):
     """_normalize_request_headers always returns a dict with a User-Agent."""
 
     def setUp(self):
-        from streaming_helpers import _normalize_request_headers
+        from app.services.streaming_helpers import _normalize_request_headers
         self.fn = _normalize_request_headers
 
     def test_none_input_has_user_agent(self):

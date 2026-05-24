@@ -42,13 +42,13 @@ from downloads.engine import (
 
 # ── Service imports ───────────────────────────────────────────────────────────
 from app.services.errors import json_error_response
-from app.services.logging_utils import LOG_DIR, backend_log_path, get_logger, log_event, read_recent_log_events
+from app.services.logging_utils import backend_log_path, get_logger, initialize_logging, log_event, read_recent_log_events
 from app.services.archive_installer import parse_checksum_manifest, safe_extract_zip, sha256_file
 from app.services.desktop_auth import DESKTOP_AUTH_HEADER, desktop_auth_state_snapshot, validate_desktop_auth_request
 from app.services.network_policy import validate_outbound_target
 from app.services.runtime_config import (
     app_state_root, backend_port, bundled_tools_dir,
-    db_path as runtime_db_path, default_download_dir, public_base_url,
+    db_path as runtime_db_path, default_download_dir, logs_dir, public_base_url,
     runtime_config_snapshot, runtime_tools_dir,
     settings_path as runtime_settings_path,
 )
@@ -69,15 +69,15 @@ from app.services.security import (
 )
 
 # ── Split helpers (Phase 6 — pre-existing) ───────────────────────────────────
-from app.services.db_helpers import (
+from db_helpers import (
     get_db_connection, db_insert, db_update_status, db_upsert_download_job,
     db_delete_download_job, db_list_download_jobs, DEFAULT_SETTINGS,
     load_settings, save_settings_to_disk, _strip_ansi, _format_bytes,
     _format_bytes_int, _format_eta, _sanitize_download_engine, _get_file_size,
     _guess_dl_type_from_path, has_ffmpeg, has_aria2, init_db,
 )
-from app.services.library_helpers import migrate_db, _build_library_index, _reconcile_library_state
-from app.services.streaming_helpers import (
+from library_helpers import migrate_db, _build_library_index, _reconcile_library_state
+from streaming_helpers import (
     _extract_iframe_src, _fetch_json, _normalize_request_headers,
     _rewrite_hls_playlist, _extract_hls_variants, _looks_like_playable_media_url,
     _resolve_embed_target, resolve_embed, stream_proxy,
@@ -164,6 +164,7 @@ download_helpers.init(
 )
 
 # ── Loggers ───────────────────────────────────────────────────────────────────
+initialize_logging(logs_dir=logs_dir())
 backend_logger = get_logger("backend")
 downloads_logger = get_logger("downloads")
 library_logger = get_logger("library")
