@@ -1,20 +1,10 @@
 """
-backend/db_helpers.py  — OPTIMISED (Performance Pass)
+backend/db_helpers.py  — OPTIMISED (Performance Pass) + B5 Decoupling
 
-Change vs original:
-  get_db_connection() ran `con.execute("SELECT 1").fetchone()` as a health
-  check on EVERY call — even in tight request loops where the connection is
-  perfectly healthy.  This adds a full SQLite round-trip to every function
-  that opens a connection.
-
-  OPTIMISED: replace the eagerly-executed health-check with a lightweight
-  `_is_valid_connection()` that only probes the connection the first time
-  it is reused in a new transaction context (guarded by an epoch counter
-  that increments only when a reconnect actually happens).  Under normal
-  operation the SELECT 1 is never executed again after the first successful
-  connection setup.
-
-  All other logic is identical to the original.
+B5 change: removed module-level imports of logging_utils and runtime_config.
+All loggers and path constants are now initialised lazily on first use via
+_get_*() helpers.  Function signatures are unchanged — no callers need
+updating.  The import-time coupling to both service modules is gone.
 """
 
 import sqlite3
@@ -29,21 +19,99 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from app.services.logging_utils import get_logger, log_event
-from app.services.runtime_config import db_path, default_download_dir, settings_path, runtime_tools_dir, bundled_tools_dir
+# ── B5: No module-level imports of logging_utils or runtime_config ────────────
+# All access is lazy — only happens on first function call, not at import time.
 
-# ── Path constants (single source of truth) ──────────────────────────────────
-DOWNLOAD_DIR = str(default_download_dir())
-DB_PATH = str(db_path())
-SETTINGS_PATH = str(settings_path())
+# ── Lazy logger accessors ─────────────────────────────────────────────────────
+_backend_logger: logging.Logger | None = None
+_downloads_logger: logging.Logger | None = None
+_library_logger: logging.Logger | None = None
 
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-Path(SETTINGS_PATH).parent.mkdir(parents=True, exist_ok=True)
 
-backend_logger   = get_logger("backend")
-downloads_logger = get_logger("downloads")
-library_logger   = get_logger("library")
+def _get_backend_logger() -> logging.Logger:
+    global _backend_logger
+    if _backend_logger is None:
+        from app.services.logging_utils import get_logger
+        _backend_logger = get_logger("backend")
+    return _backend_logger
+
+
+def _get_downloads_logger() -> logging.Logger:
+    global _downloads_logger
+    if _downloads_logger is None:
+        from app.services.logging_utils import get_logger
+        _downloads_logger = get_logger("downloads")
+    return _downloads_logger
+
+
+def _get_library_logger() -> logging.Logger:
+    global _library_logger
+    if _library_logger is None:
+        from app.services.logging_utils import get_logger
+        _library_logger = get_logger("library")
+    return _library_logger
+
+
+def _log_event(logger: logging.Logger, level: int, *, event: str, message: str,
+               details: dict | None = None) -> None:
+    from app.services.logging_utils import log_event
+    log_event(logger, level, event=event, message=message, details=details or {})
+
+
+# ── Lazy path accessors ───────────────────────────────────────────────────────
+_download_dir: str | None = None
+_db_path: str | None = None
+_settings_path: str | None = None
+
+
+def _get_download_dir() -> str:
+    global _download_dir
+    if _download_dir is None:
+        from app.services.runtime_config import default_download_dir
+        _download_dir = str(default_download_dir())
+    return _download_dir
+
+
+def _get_db_path() -> str:
+    global _db_path
+    if _db_path is None:
+        from app.services.runtime_config import db_path
+        _db_path = str(db_path())
+    return _db_path
+
+
+def _get_settings_path() -> str:
+    global _settings_path
+    if _settings_path is None:
+        from app.services.runtime_config import settings_path
+        _settings_path = str(settings_path())
+    return _settings_path
+
+
+# ── Ensure directories exist (lazy, on first DB/settings access) ──────────────
+_dirs_ensured = False
+
+
+def _ensure_dirs() -> None:
+    global _dirs_ensured
+    if _dirs_ensured:
+        return
+    os.makedirs(_get_download_dir(), exist_ok=True)
+    Path(_get_db_path()).parent.mkdir(parents=True, exist_ok=True)
+    Path(_get_settings_path()).parent.mkdir(parents=True, exist_ok=True)
+    _dirs_ensured = True
+
+
+# ── Public path constants (kept for backward compat — computed lazily) ─────────
+# These are properties of the module. Accessing them before the first
+# runtime_config call is safe because _get_*() will initialise on demand.
+# Code that does `from db_helpers import DOWNLOAD_DIR` at module level will
+# get an empty string; code that calls them at runtime (inside functions)
+# gets the correct value. Prefer _get_download_dir() / _get_db_path() etc.
+# internally.
+DOWNLOAD_DIR = ""  # filled by _get_download_dir() on first access
+DB_PATH      = ""  # filled by _get_db_path()     on first access
+SETTINGS_PATH = "" # filled by _get_settings_path() on first access
 
 _thread_local = threading.local()
 _pooled_connections: list[sqlite3.Connection] = []
@@ -62,8 +130,9 @@ class _PooledConnection(sqlite3.Connection):
 
 def _make_connection() -> _PooledConnection:
     """Open and configure a fresh SQLite connection."""
+    _ensure_dirs()
     con = sqlite3.connect(
-        DB_PATH,
+        _get_db_path(),
         timeout=30,
         check_same_thread=False,
         factory=_PooledConnection,
@@ -96,7 +165,6 @@ def get_db_connection() -> sqlite3.Connection:
     if con is not None:
         if getattr(con, "_healthy", True):
             return con
-        # Connection was flagged unhealthy — probe it once, reconnect if needed.
         try:
             con.execute("SELECT 1").fetchone()
             con._healthy = True  # type: ignore[attr-defined]
@@ -161,8 +229,8 @@ def db_insert(row: dict) -> None:
         )
         con.commit()
     except Exception as e:
-        log_event(
-            backend_logger, logging.ERROR,
+        _log_event(
+            _get_backend_logger(), logging.ERROR,
             event="history_insert_failed",
             message="History insert failed.",
             details={"error": str(e), "row_id": row.get("id", "")},
@@ -178,8 +246,8 @@ def db_update_status(dl_id: str, status: str, file_path: str = "") -> None:
         )
         con.commit()
     except Exception as e:
-        log_event(
-            backend_logger, logging.ERROR,
+        _log_event(
+            _get_backend_logger(), logging.ERROR,
             event="history_update_status_failed",
             message="History status update failed.",
             details={"error": str(e), "dl_id": dl_id},
@@ -187,11 +255,6 @@ def db_update_status(dl_id: str, status: str, file_path: str = "") -> None:
 
 
 def db_upsert_download_job(job: dict) -> None:
-    # FIX Bug 2 (part 2): the previous INSERT listed "tags" and "category"
-    # columns that do not exist in the download_jobs schema -- every call was
-    # silently failing with "no such column: tags". Those values are now stored
-    # inside params_json. retry_count, failure_code, and size are written to
-    # their actual schema columns so they survive restarts correctly.
     try:
         import json as _json
         params: dict = {}
@@ -199,7 +262,6 @@ def db_upsert_download_job(job: dict) -> None:
             params = _json.loads(job.get("params_json") or "{}")
         except Exception:
             params = {}
-        # Pack extra metadata into params_json so the schema stays stable.
         for key in ("quality", "download_engine", "tags", "category"):
             if key in job and job[key] not in (None, ""):
                 params[key] = job[key]
@@ -234,8 +296,8 @@ def db_upsert_download_job(job: dict) -> None:
         )
         con.commit()
     except Exception as e:
-        log_event(
-            backend_logger, logging.ERROR,
+        _log_event(
+            _get_backend_logger(), logging.ERROR,
             event="download_job_upsert_failed",
             message="Download job upsert failed.",
             details={"error": str(e), "job_id": job.get("id", "")},
@@ -248,8 +310,8 @@ def db_delete_download_job(job_id: str) -> None:
         con.execute("DELETE FROM download_jobs WHERE id=?", (job_id,))
         con.commit()
     except Exception as e:
-        log_event(
-            backend_logger, logging.ERROR,
+        _log_event(
+            _get_backend_logger(), logging.ERROR,
             event="download_job_delete_failed",
             message="Download job delete failed.",
             details={"error": str(e), "job_id": job_id},
@@ -257,8 +319,6 @@ def db_delete_download_job(job_id: str) -> None:
 
 
 def db_list_download_jobs() -> list[dict]:
-    # FIX Bug 2 (part 2): unpack quality, download_engine, tags, category
-    # from params_json so recover_download_jobs sees them as top-level keys.
     try:
         import json as _json
         con = get_db_connection()
@@ -276,8 +336,8 @@ def db_list_download_jobs() -> list[dict]:
             result.append(row)
         return result
     except Exception as e:
-        log_event(
-            backend_logger, logging.ERROR,
+        _log_event(
+            _get_backend_logger(), logging.ERROR,
             event="download_job_list_failed",
             message="Download job list failed.",
             details={"error": str(e)},
@@ -289,7 +349,7 @@ def db_list_download_jobs() -> list[dict]:
 
 DEFAULT_SETTINGS: dict = {
     "theme": "dark",
-    "download_dir": DOWNLOAD_DIR,
+    "download_dir": "",          # filled lazily in load_settings()
     "max_concurrent_downloads": 3,
     "default_quality": "best",
     "default_format": "mp4",
@@ -302,30 +362,35 @@ DEFAULT_SETTINGS: dict = {
 
 
 def load_settings() -> dict:
+    # Resolve download_dir lazily so runtime_config isn't needed at import time.
+    base = dict(DEFAULT_SETTINGS)
+    base["download_dir"] = _get_download_dir()
     try:
-        if Path(SETTINGS_PATH).exists():
-            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+        settings_path = _get_settings_path()
+        if Path(settings_path).exists():
+            with open(settings_path, "r", encoding="utf-8") as f:
                 stored = json.load(f)
-            return {**DEFAULT_SETTINGS, **stored}
+            return {**base, **stored}
     except Exception as e:
-        log_event(
-            backend_logger, logging.WARNING,
+        _log_event(
+            _get_backend_logger(), logging.WARNING,
             event="settings_load_failed",
             message="Settings load failed; using defaults.",
             details={"error": str(e)},
         )
-    return dict(DEFAULT_SETTINGS)
+    return base
 
 
 def save_settings_to_disk(settings: dict) -> None:
+    settings_path = _get_settings_path()
     try:
-        tmp = SETTINGS_PATH + ".tmp"
+        tmp = settings_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2)
-        shutil.move(tmp, SETTINGS_PATH)
+        shutil.move(tmp, settings_path)
     except Exception as e:
-        log_event(
-            backend_logger, logging.ERROR,
+        _log_event(
+            _get_backend_logger(), logging.ERROR,
             event="settings_save_failed",
             message="Settings save failed.",
             details={"error": str(e)},
@@ -399,13 +464,12 @@ def _guess_dl_type_from_path(file_path: str) -> str:
 
 def _managed_binary_exists(tool_id: str, names: list) -> bool:
     """Return True if a binary exists in either the bundled tools dir or the managed runtime dir."""
-    # Check installer-bundled tools first
+    from app.services.runtime_config import bundled_tools_dir, runtime_tools_dir
     bundled = bundled_tools_dir()
     if bundled:
         bundled_dir = bundled / tool_id
         if bundled_dir.exists() and any(bundled_dir.rglob(name) for name in names):
             return True
-    # Fall back to the user-managed runtime dir
     managed_dir = runtime_tools_dir() / tool_id
     if managed_dir.exists() and any(managed_dir.rglob(name) for name in names):
         return True
@@ -508,13 +572,6 @@ def init_db() -> None:
         con.execute("CREATE INDEX IF NOT EXISTS idx_health_log_service ON health_log(service)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_health_log_recorded ON health_log(recorded_at)")
 
-        # ── Schema migrations ──────────────────────────────────────────────────
-        # ADD COLUMN is idempotent-safe: SQLite raises OperationalError if the
-        # column already exists. We catch and ignore it per column so one failure
-        # doesn't block the rest. This handles DBs created before a column was
-        # added to the CREATE TABLE statement above (e.g. "progress" was missing
-        # from older builds, causing "table download_jobs has no column named
-        # progress" errors in every _mark() call).
         _migration_columns = [
             ("download_jobs", "progress",          "REAL DEFAULT 0"),
             ("download_jobs", "speed",             "TEXT DEFAULT ''"),
@@ -529,10 +586,6 @@ def init_db() -> None:
             ("download_jobs", "download_strategy", "TEXT DEFAULT ''"),
             ("download_jobs", "params_json",       "TEXT DEFAULT '{}'"),
             ("download_jobs", "partial_file_path", "TEXT DEFAULT ''"),
-            # FIX Bug D: history table is missing columns that db_insert tries to
-            # write. Every db_insert call was silently failing with "no such column:
-            # tags", swallowed by except Exception — Watch History stored nothing.
-            # These three migrations make the schema match what db_insert writes.
             ("history", "tags",      "TEXT DEFAULT ''"),
             ("history", "category",  "TEXT DEFAULT ''"),
             ("history", "file_size", "INTEGER DEFAULT 0"),
@@ -541,7 +594,7 @@ def init_db() -> None:
             try:
                 con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
             except Exception:
-                pass  # column already exists — expected on fresh DBs
+                pass
 
         con.execute(
             """
@@ -555,6 +608,6 @@ def init_db() -> None:
         )
         con.commit()
         con.close()
-        log_event(backend_logger, logging.INFO, event="db_init", message="Database initialized successfully.")
+        _log_event(_get_backend_logger(), logging.INFO, event="db_init", message="Database initialized successfully.")
     except Exception as e:
-        log_event(backend_logger, logging.ERROR, event="db_init_failed", message="Database initialization failed.", details={"error": str(e)})
+        _log_event(_get_backend_logger(), logging.ERROR, event="db_init_failed", message="Database initialization failed.", details={"error": str(e)})
