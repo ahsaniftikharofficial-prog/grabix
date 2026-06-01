@@ -155,7 +155,12 @@ dependency_install_jobs: dict[str, dict] = runtime_state.dependency_install_jobs
 _app_event_loop: asyncio.AbstractEventLoop | None = None
 
 # Inject shared mutable state into core modules.
-network_monitor.init(downloads, download_controls)
+network_monitor.init(
+    downloads,
+    download_controls,
+    persist_fn=_persist_download_record,
+    start_fn=_start_download_thread,
+)
 download_helpers.init(
     downloads, download_controls,
     db_update_status=db_update_status,

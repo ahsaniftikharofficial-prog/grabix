@@ -28,6 +28,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter
+from downloads.utils import (
+    _fmt_bytes, _fmt_eta_secs, _fmt_speed, _quality_label_to_height,
+    _title_from_url, _windows_hidden_subprocess_kwargs,
+    _is_direct_media_url, _is_direct_subtitle_url,
+    DIRECT_MEDIA_EXTS, DIRECT_SUBTITLE_EXTS,
+)
 
 # FIX (Root Cause #4 — silent log black-hole):
 # logging.getLogger("downloads.engine") creates a bare logger with NO file
@@ -57,8 +63,6 @@ _db_update_status = None
 _db_upsert_download_job = None
 _db_delete_download_job = None
 _db_list_download_jobs = None
-_format_bytes = None
-_format_eta = None
 _has_ffmpeg = None
 _has_aria2 = None
 _default_download_dir = None
@@ -82,7 +86,7 @@ def init(downloads: dict, download_controls: dict) -> None:
 def _lazy_import() -> None:
     """Pull in helpers that can't be imported at module load time."""
     global _db_update_status, _db_upsert_download_job, _db_delete_download_job
-    global _db_list_download_jobs, _format_bytes, _format_eta
+    global _db_list_download_jobs
     global _has_ffmpeg, _has_aria2, _default_download_dir, _app_state_root
     global _sanitize_download_engine, _runtime_tools_dir, _bundled_tools_dir
     global logger  # upgrade the fallback logger to the file-backed one
@@ -101,15 +105,13 @@ def _lazy_import() -> None:
     try:
         from app.services.db_helpers import (
             db_update_status, db_upsert_download_job, db_delete_download_job,
-            db_list_download_jobs, _format_bytes as fmt_bytes, _format_eta as fmt_eta,
+            db_list_download_jobs,
             has_ffmpeg, has_aria2, _sanitize_download_engine as san_engine,
         )
         _db_update_status = db_update_status
         _db_upsert_download_job = db_upsert_download_job
         _db_delete_download_job = db_delete_download_job
         _db_list_download_jobs = db_list_download_jobs
-        _format_bytes = fmt_bytes
-        _format_eta = fmt_eta
         _has_ffmpeg = has_ffmpeg
         _has_aria2 = has_aria2
         _sanitize_download_engine = san_engine
@@ -154,26 +156,6 @@ def _lazy_import() -> None:
         logger.debug("yt_dlp pre-import OK (version: %s)", getattr(_yt_dlp_preload, '__version__', 'unknown'))
     except BaseException as exc:
         logger.warning("yt_dlp pre-import failed — downloads will not work in this build: %s", exc)
-
-
-def _windows_hidden_subprocess_kwargs() -> dict[str, Any]:
-    if platform.system() != "Windows":
-        return {}
-
-    creationflags = 0
-    startupinfo = None
-    try:
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 0
-    except Exception:
-        startupinfo = None
-
-    return {
-        "creationflags": creationflags,
-        "startupinfo": startupinfo,
-    }
 
 
 def _resolve_tool_binary(tool_id: str, names: list[str]) -> str | None:
@@ -296,26 +278,6 @@ def recover_download_jobs() -> None:
 
 
 # ── URL helpers ───────────────────────────────────────────────────────────────
-
-_DIRECT_MEDIA_EXTS = {
-    ".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".ts", ".m2ts",
-    ".mpeg", ".mpg", ".wmv", ".3gp", ".mp3", ".aac", ".ogg", ".flac",
-    ".wav", ".m4a", ".opus", ".m4v",
-}
-_DIRECT_SUBTITLE_EXTS = {".srt", ".vtt", ".ass", ".ssa", ".sub", ".sbv"}
-
-
-def _is_direct_media_url(url: str) -> bool:
-    from urllib.parse import urlparse
-    path = urlparse(url or "").path.lower().rstrip("/")
-    return any(path.endswith(ext) for ext in _DIRECT_MEDIA_EXTS) or ".m3u8" in path
-
-
-def _is_direct_subtitle_url(url: str) -> bool:
-    from urllib.parse import urlparse
-    path = urlparse(url or "").path.lower().rstrip("/")
-    return any(path.endswith(ext) for ext in _DIRECT_SUBTITLE_EXTS)
-
 
 # ── DB persistence ────────────────────────────────────────────────────────────
 
@@ -497,13 +459,6 @@ def _pick_engine(requested: str, dl_type: str, *, url: str = "", force_hls: bool
             return "aria2", ""
         return "standard", "aria2 is not available. GRABIX used Standard instead."
     return "standard", ""
-
-
-def _title_from_url(url: str) -> str:
-    from urllib.parse import urlparse, unquote
-    path = urlparse(url or "").path
-    stem = Path(unquote(path)).stem
-    return re.sub(r"[_\-]+", " ", stem).strip() or "Download"
 
 
 # ── The actual download worker ────────────────────────────────────────────────
@@ -1401,52 +1356,6 @@ def install_runtime_dependency(dep_id: str) -> dict:
 
 
 # ── Formatting helpers ────────────────────────────────────────────────────────
-
-def _fmt_bytes(n: int | float) -> str:
-    if _format_bytes:
-        try:
-            return _format_bytes(int(n))
-        except Exception:
-            pass
-    n = int(n)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-        n //= 1024
-    return f"{n} PB"
-
-
-def _fmt_eta_secs(eta: int | float | None) -> str:
-    if eta is None:
-        return ""
-    if _format_eta:
-        try:
-            return _format_eta(int(eta))
-        except Exception:
-            pass
-    eta = int(eta)
-    if eta <= 0:
-        return ""
-    if eta < 60:
-        return f"{eta}s"
-    if eta < 3600:
-        return f"{eta // 60}m {eta % 60}s"
-    return f"{eta // 3600}h {(eta % 3600) // 60}m"
-
-
-def _fmt_speed(speed: float) -> str:
-    if not speed or speed <= 0:
-        return ""
-    return _fmt_bytes(speed) + "/s"
-
-
-def _quality_label_to_height(label: str) -> int:
-    m = re.search(r"(\d{3,4})p", label.lower())
-    if m:
-        return int(m.group(1))
-    mapping = {"4k": 2160, "2k": 1440, "hd": 1080, "sd": 480}
-    return mapping.get(label.lower(), 1080)
-
 
 def _get_download_dir() -> Path:
     try:

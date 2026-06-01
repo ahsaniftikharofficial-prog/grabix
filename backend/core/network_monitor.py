@@ -10,7 +10,6 @@ import threading
 import time
 
 from app.services.logging_utils import get_logger
-from downloads.engine import _persist_download_record, _start_download_thread
 
 # ---------------------------------------------------------------------------
 # Module-level state injected by main.py via init()
@@ -22,14 +21,22 @@ _backend_logger = get_logger("backend")
 _network_was_online: bool = True
 _network_monitor_started: bool = False
 
+# Functions injected by main.py — never imported from engine directly
+_persist_fn = None
+_start_fn = None
 
-def init(downloads: dict, download_controls: dict, backend_logger=None) -> None:
+
+def init(downloads: dict, download_controls: dict, backend_logger=None, persist_fn=None, start_fn=None) -> None:
     """Called once by main.py after runtime_state is created."""
-    global _downloads, _download_controls, _backend_logger
+    global _downloads, _download_controls, _backend_logger, _persist_fn, _start_fn
     _downloads = downloads
     _download_controls = download_controls
     if backend_logger is not None:
         _backend_logger = backend_logger
+    if persist_fn is not None:
+        _persist_fn = persist_fn
+    if start_fn is not None:
+        _start_fn = start_fn
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +72,8 @@ def _network_monitor_worker() -> None:
                             item["status"] = "paused"
                             item["stage_label"] = "Waiting for network..."
                             item["error"] = ""
-                            _persist_download_record(dl_id, force=True)
+                            if _persist_fn:
+                                _persist_fn(dl_id, force=True)
 
             elif online and not _network_was_online:
                 _network_was_online = True
@@ -80,8 +88,10 @@ def _network_monitor_worker() -> None:
                             item["status"] = item.pop("paused_from", "downloading")
                             item["stage_label"] = "Reconnecting..."
                             item["error"] = ""
-                            _persist_download_record(dl_id, force=True)
-                            _start_download_thread(dl_id)
+                            if _persist_fn:
+                                _persist_fn(dl_id, force=True)
+                            if _start_fn:
+                                _start_fn(dl_id)
 
         except Exception as _exc:
             _backend_logger.warning(
