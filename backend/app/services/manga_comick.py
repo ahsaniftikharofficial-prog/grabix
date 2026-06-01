@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from app.services.manga_cache import get_cached, set_cached
+from shared.protocols import CacheProtocol
 
 COMICK_API = "https://comick-source-api.notaspider.dev/api"
 COMICK_HEADERS = {
@@ -119,9 +119,9 @@ async def _comick_request(path: str, payload: dict[str, Any]) -> str:
         return response.text
 
 
-async def search_manga(title: str) -> list[dict[str, Any]]:
+async def search_manga(title: str, *, cache: CacheProtocol) -> list[dict[str, Any]]:
     cache_key = f"comick:search:{title.strip().lower()}"
-    cached = await get_cached(cache_key)
+    cached = await cache.get(cache_key)
     if cached:
         return list(cached["data"])
 
@@ -140,13 +140,13 @@ async def search_manga(title: str) -> list[dict[str, Any]]:
 
     ranked = sorted(results, key=lambda item: _score_result(title, item))
     mapped = [_map_search_item(item) for item in ranked[:24]]
-    await set_cached(cache_key, mapped, "comick", expires_hours=6)
+    await cache.set(cache_key, mapped, "comick", 6)
     return mapped
 
 
-async def get_frontpage(section: str = "trending", page: int = 1, limit: int = 12, days: int = 7) -> list[dict[str, Any]]:
+async def get_frontpage(section: str = "trending", page: int = 1, limit: int = 12, days: int = 7, *, cache: CacheProtocol) -> list[dict[str, Any]]:
     cache_key = f"comick:frontpage:{section}:{page}:{limit}:{days}"
-    cached = await get_cached(cache_key)
+    cached = await cache.get(cache_key)
     if cached:
         return list(cached["data"])
 
@@ -185,25 +185,25 @@ async def get_frontpage(section: str = "trending", page: int = 1, limit: int = 1
         for item in items
         if isinstance(item, dict)
     ]
-    await set_cached(cache_key, mapped, "comick", expires_hours=1)
+    await cache.set(cache_key, mapped, "comick", 1)
     return mapped
 
 
-async def get_best_match(title: str) -> dict[str, Any] | None:
-    results = await search_manga(title)
+async def get_best_match(title: str, *, cache: CacheProtocol) -> dict[str, Any] | None:
+    results = await search_manga(title, cache=cache)
     return results[0] if results else None
 
 
-async def get_chapter_list(title: str) -> dict[str, Any]:
+async def get_chapter_list(title: str, *, cache: CacheProtocol) -> dict[str, Any]:
     cache_key = f"comick:chapters:{title.strip().lower()}"
-    cached = await get_cached(cache_key)
+    cached = await cache.get(cache_key)
     if cached:
         return dict(cached["data"])
 
-    match = await get_best_match(title)
+    match = await get_best_match(title, cache=cache)
     if not match or not match.get("comick_url"):
         result = {"match": None, "items": [], "total": 0}
-        await set_cached(cache_key, result, "comick", expires_hours=6)
+        await cache.set(cache_key, result, "comick", 6)
         return result
 
     raw = await _comick_request(
@@ -248,13 +248,13 @@ async def get_chapter_list(title: str) -> dict[str, Any]:
         "items": mapped,
         "total": payload.get("totalChapters") or len(mapped),
     }
-    await set_cached(cache_key, result, "comick", expires_hours=12)
+    await cache.set(cache_key, result, "comick", 12)
     return result
 
 
-async def get_chapter_pages(chapter_url: str) -> list[str]:
+async def get_chapter_pages(chapter_url: str, *, cache: CacheProtocol) -> list[str]:
     cache_key = f"comick:pages:{chapter_url}"
-    cached = await get_cached(cache_key)
+    cached = await cache.get(cache_key)
     if cached:
         return list(cached["data"])
 
@@ -264,5 +264,5 @@ async def get_chapter_pages(chapter_url: str) -> list[str]:
         html = response.text
 
     pages = _parse_page_urls(html)
-    await set_cached(cache_key, pages, "comick", expires_hours=1)
+    await cache.set(cache_key, pages, "comick", 1)
     return pages

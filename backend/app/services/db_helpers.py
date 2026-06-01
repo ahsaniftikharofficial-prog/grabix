@@ -117,6 +117,14 @@ _thread_local = threading.local()
 _pooled_connections: list[sqlite3.Connection] = []
 _pooled_connections_lock = threading.Lock()
 
+# Lazy one-time schema bootstrap.
+# init_db() is normally called from the FastAPI lifespan, but TestClient and
+# direct-import scenarios may never run the lifespan.  _make_connection() calls
+# init_db() on the very first connection so the tables always exist regardless.
+# Thread-safe: _db_schema_initialized is only written under _db_schema_init_lock.
+_db_schema_initialized: bool = False
+_db_schema_init_lock = threading.Lock()
+
 
 class _PooledConnection(sqlite3.Connection):
     """Connection whose public close() is a no-op for thread-local reuse."""
@@ -130,6 +138,7 @@ class _PooledConnection(sqlite3.Connection):
 
 def _make_connection() -> _PooledConnection:
     """Open and configure a fresh SQLite connection."""
+    global _db_schema_initialized
     _ensure_dirs()
     con = sqlite3.connect(
         _get_db_path(),
@@ -144,6 +153,26 @@ def _make_connection() -> _PooledConnection:
     con.execute("PRAGMA temp_store=MEMORY")
     with _pooled_connections_lock:
         _pooled_connections.append(con)
+
+    # Bootstrap schema on first ever connection.
+    # IMPORTANT: set thread-local BEFORE calling init_db() so that when
+    # init_db() calls get_db_connection() it finds this connection and
+    # returns it immediately — no infinite recursion.
+    if not _db_schema_initialized:
+        with _db_schema_init_lock:
+            if not _db_schema_initialized:
+                _thread_local.connection = con
+                try:
+                    init_db()
+                    _db_schema_initialized = True
+                except Exception as _exc:
+                    _log_event(
+                        _get_backend_logger(), logging.WARNING,
+                        event="db_schema_bootstrap_failed",
+                        message="Lazy schema bootstrap failed (tables may be missing).",
+                        details={"error": str(_exc)},
+                    )
+
     return con  # type: ignore[return-value]
 
 

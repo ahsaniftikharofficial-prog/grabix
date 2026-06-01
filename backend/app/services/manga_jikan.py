@@ -3,7 +3,7 @@ from typing import Any
 
 import httpx
 
-from app.services.manga_cache import get_cached, set_cached
+from shared.protocols import CacheProtocol
 
 JIKAN_BASE = "https://api.jikan.moe/v4"
 _jikan_lock = asyncio.Lock()
@@ -78,37 +78,37 @@ async def jikan_request(endpoint: str, params: dict[str, Any] | None = None) -> 
     return {}
 
 
-async def get_manga_by_query(title: str) -> dict | None:
+async def get_manga_by_query(title: str, *, cache: CacheProtocol) -> dict | None:
     cache_key = f"jikan:search:{title.strip().lower()}"
-    cached = await get_cached(cache_key)
+    cached = await cache.get(cache_key)
     if cached:
         return dict(cached["data"]) if cached["data"] else None
 
     data = await jikan_request("/manga", {"q": title, "limit": 1})
     items = data.get("data") or []
     if not items:
-        await set_cached(cache_key, {}, "jikan", expires_hours=6)
+        await cache.set(cache_key, {}, "jikan", 6)
         return None
     result = _map_manga(items[0])
-    await set_cached(cache_key, result, "jikan", expires_hours=6)
+    await cache.set(cache_key, result, "jikan", 6)
     return result
 
 
-async def get_manga_by_mal_id(mal_id: int) -> dict:
+async def get_manga_by_mal_id(mal_id: int, *, cache: CacheProtocol) -> dict:
     cache_key = f"jikan:manga:{mal_id}"
-    cached = await get_cached(cache_key)
+    cached = await cache.get(cache_key)
     if cached:
         return dict(cached["data"])
 
     data = await jikan_request(f"/manga/{mal_id}")
     item = _map_manga(data.get("data") or {})
-    await set_cached(cache_key, item, "jikan", expires_hours=24)
+    await cache.set(cache_key, item, "jikan", 24)
     return item
 
 
-async def get_manga_characters(mal_id: int) -> list[dict]:
+async def get_manga_characters(mal_id: int, *, cache: CacheProtocol) -> list[dict]:
     cache_key = f"jikan:manga-characters:{mal_id}"
-    cached = await get_cached(cache_key)
+    cached = await cache.get(cache_key)
     if cached:
         return list(cached["data"])
 
@@ -123,13 +123,13 @@ async def get_manga_characters(mal_id: int) -> list[dict]:
                 "image": _image_url(character),
             }
         )
-    await set_cached(cache_key, items, "jikan", expires_hours=24)
+    await cache.set(cache_key, items, "jikan", 24)
     return items
 
 
-async def get_related_manga(mal_id: int) -> list[dict]:
+async def get_related_manga(mal_id: int, *, cache: CacheProtocol) -> list[dict]:
     cache_key = f"jikan:related:{mal_id}"
-    cached = await get_cached(cache_key)
+    cached = await cache.get(cache_key)
     if cached:
         return list(cached["data"])
 
@@ -146,13 +146,13 @@ async def get_related_manga(mal_id: int) -> list[dict]:
                     "title": entry.get("name") or "Unknown",
                 }
             )
-    await set_cached(cache_key, items, "jikan", expires_hours=24)
+    await cache.set(cache_key, items, "jikan", 24)
     return items
 
 
-async def get_top_manga(page: int = 1) -> list[dict]:
+async def get_top_manga(page: int = 1, *, cache: CacheProtocol) -> list[dict]:
     cache_key = f"jikan:top:{page}"
-    cached = await get_cached(cache_key)
+    cached = await cache.get(cache_key)
     if cached:
         return list(cached["data"])
 
@@ -160,14 +160,14 @@ async def get_top_manga(page: int = 1) -> list[dict]:
     items = []
     for item in data.get("data") or []:
         items.append(_map_manga(item))
-    await set_cached(cache_key, items, "jikan", expires_hours=6)
+    await cache.set(cache_key, items, "jikan", 6)
     return items
 
 
-async def get_popular_manga_jikan(page: int = 1) -> list[dict]:
+async def get_popular_manga_jikan(page: int = 1, *, cache: CacheProtocol) -> list[dict]:
     """Fetch popular manga sorted by member count (distinct from score-based get_top_manga)."""
     cache_key = f"jikan:popular:{page}"
-    cached = await get_cached(cache_key)
+    cached = await cache.get(cache_key)
     if cached:
         return list(cached["data"])
 
@@ -175,5 +175,5 @@ async def get_popular_manga_jikan(page: int = 1) -> list[dict]:
     items = []
     for item in data.get("data") or []:
         items.append(_map_manga(item))
-    await set_cached(cache_key, items, "jikan", expires_hours=6)
+    await cache.set(cache_key, items, "jikan", 6)
     return items

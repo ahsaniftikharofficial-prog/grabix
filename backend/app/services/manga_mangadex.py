@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from app.services.manga_cache import get_cached, set_cached
+from shared.protocols import CacheProtocol
 
 MANGADEX_BASE = "https://api.mangadex.org"
 MANGADEX_UPLOADS = "https://uploads.mangadex.org"
@@ -78,9 +78,9 @@ def get_cover_url_sync(manga_id: str, cover_filename: str) -> str:
     return f"{MANGADEX_UPLOADS}/covers/{manga_id}/{cover_filename}.256.jpg"
 
 
-async def search_manga(title: str) -> list[dict]:
+async def search_manga(title: str, *, cache: CacheProtocol) -> list[dict]:
     cache_key = f"mangadex:search:{title.strip().lower()}"
-    cached = await get_cached(cache_key)
+    cached = await cache.get(cache_key)
     if cached:
         return list(cached["data"])
 
@@ -94,13 +94,13 @@ async def search_manga(title: str) -> list[dict]:
         },
     )
     items = [_map_search_item(item) for item in (data.get("data") or [])]
-    await set_cached(cache_key, items, "mangadex", expires_hours=6)
+    await cache.set(cache_key, items, "mangadex", 6)
     return items
 
 
-async def get_manga_details(manga_id: str) -> dict:
+async def get_manga_details(manga_id: str, *, cache: CacheProtocol) -> dict:
     cache_key = f"mangadex:details:{manga_id}"
-    cached = await get_cached(cache_key)
+    cached = await cache.get(cache_key)
     if cached:
         return dict(cached["data"])
 
@@ -110,13 +110,13 @@ async def get_manga_details(manga_id: str) -> dict:
     )
     item = data.get("data") or {}
     mapped = _map_search_item(item) if item else {}
-    await set_cached(cache_key, mapped, "mangadex", expires_hours=24)
+    await cache.set(cache_key, mapped, "mangadex", 24)
     return mapped
 
 
-async def get_chapter_list(manga_id: str, language: str = "en") -> list[dict]:
+async def get_chapter_list(manga_id: str, language: str = "en", *, cache: CacheProtocol) -> list[dict]:
     cache_key = f"mangadex:chapters:{manga_id}:{language}"
-    cached = await get_cached(cache_key)
+    cached = await cache.get(cache_key)
     if cached:
         return list(cached["data"])
 
@@ -149,13 +149,13 @@ async def get_chapter_list(manga_id: str, language: str = "en") -> list[dict]:
                 "published_at": attrs.get("publishAt") or attrs.get("readableAt") or "",
             }
         )
-    await set_cached(cache_key, items, "mangadex", expires_hours=12)
+    await cache.set(cache_key, items, "mangadex", 12)
     return items
 
 
-async def get_chapter_pages(chapter_id: str) -> list[str]:
+async def get_chapter_pages(chapter_id: str, *, cache: CacheProtocol) -> list[str]:
     cache_key = f"mangadex:pages:{chapter_id}"
-    cached = await get_cached(cache_key)
+    cached = await cache.get(cache_key)
     if cached:
         return list(cached["data"])
 
@@ -169,7 +169,7 @@ async def get_chapter_pages(chapter_id: str) -> list[str]:
         return []
 
     items = [f"{base_url}/data/{file_hash}/{filename}" for filename in page_files]
-    await set_cached(cache_key, items, "mangadex", expires_hours=0.17)
+    await cache.set(cache_key, items, "mangadex", 0.17)
     return items
 
 

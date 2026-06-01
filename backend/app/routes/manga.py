@@ -32,6 +32,7 @@ from app.services.manga_comick import (
     get_frontpage as get_comick_frontpage,
     search_manga as comick_search_manga,
 )
+from app.services.manga_cache import get_cached, set_cached, invalidate
 from app.services.logging_utils import get_logger
 
 router = APIRouter()
@@ -48,12 +49,35 @@ ALLOWED_MANGA_IMAGE_HOST_TOKENS = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Cache adapter — satisfies CacheProtocol. Built once at module load.
+# The route is the assembler; it is the only file allowed to import manga_cache.
+# ---------------------------------------------------------------------------
+
+class MangaCacheAdapter:
+    async def get(self, key: str):
+        return await get_cached(key)
+
+    async def set(self, key: str, value, source: str = "route", expires_hours: int = 6):
+        await set_cached(key, value, source, expires_hours)
+
+    async def clear(self, key: str):
+        await invalidate(key)
+
+
+_cache = MangaCacheAdapter()
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
 async def _pick_best_mangadex_match(title: str, items: list[dict]) -> dict | None:
     lowered = title.strip().lower()
     for item in items:
         if item.get("title", "").strip().lower() == lowered:
             try:
-                chapters = await get_chapter_list(item["mangadex_id"], "en")
+                chapters = await get_chapter_list(item["mangadex_id"], "en", cache=_cache)
                 if chapters:
                     return item
             except (httpx.HTTPError, ValueError, KeyError) as exc:
@@ -62,7 +86,7 @@ async def _pick_best_mangadex_match(title: str, items: list[dict]) -> dict | Non
 
     for item in items[:5]:
         try:
-            chapters = await get_chapter_list(item["mangadex_id"], "en")
+            chapters = await get_chapter_list(item["mangadex_id"], "en", cache=_cache)
             if chapters:
                 return item
         except (httpx.HTTPError, ValueError, KeyError) as exc:
@@ -80,45 +104,49 @@ def _is_allowed_manga_image_url(url: str) -> bool:
     return any(token in hostname for token in ALLOWED_MANGA_IMAGE_HOST_TOKENS)
 
 
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
 @router.get("/trending")
 async def manga_trending(page: int = 1):
-    return {"items": await get_trending_manga(page=page)}
+    return {"items": await get_trending_manga(page=page, cache=_cache)}
 
 
 @router.get("/popular")
 async def manga_popular(page: int = 1):
-    return {"items": await get_popular_manga(page=page)}
+    return {"items": await get_popular_manga(page=page, cache=_cache)}
 
 
 @router.get("/top-rated")
 async def manga_top_rated(page: int = 1):
-    return {"items": await get_top_rated_manga(page=page)}
+    return {"items": await get_top_rated_manga(page=page, cache=_cache)}
 
 
 @router.get("/search")
 async def manga_search(query: str = Query(..., min_length=1), source: str = "anilist", page: int = 1):
     if source == "mangadex":
-        return {"source": "mangadex", "items": await mangadex_search_manga(query)}
+        return {"source": "mangadex", "items": await mangadex_search_manga(query, cache=_cache)}
     if source == "comick":
-        return {"source": "comick", "items": await comick_search_manga(query)}
-    return {"source": "anilist", "items": await anilist_search_manga(query, page=page)}
+        return {"source": "comick", "items": await comick_search_manga(query, cache=_cache)}
+    return {"source": "anilist", "items": await anilist_search_manga(query, page=page, cache=_cache)}
 
 
 @router.get("/frontpage")
 async def manga_frontpage(section: str = "trending", page: int = 1, limit: int = 12, days: int = 7):
-    return {"source": "comick", "items": await get_comick_frontpage(section=section, page=page, limit=limit, days=days)}
+    return {"source": "comick", "items": await get_comick_frontpage(section=section, page=page, limit=limit, days=days, cache=_cache)}
 
 
 @router.get("/seasonal")
 async def manga_seasonal(year: int | None = None, season: str = "WINTER"):
     safe_year = year or datetime.now(timezone.utc).year
     safe_season = season.upper()
-    return {"items": await get_seasonal_manga(safe_year, safe_season)}
+    return {"items": await get_seasonal_manga(safe_year, safe_season, cache=_cache)}
 
 
 @router.get("/recommendations/{anilist_id}")
 async def manga_recommendations(anilist_id: int):
-    return {"items": await get_manga_recommendations(anilist_id)}
+    return {"items": await get_manga_recommendations(anilist_id, cache=_cache)}
 
 
 @router.get("/{manga_id}/details")
@@ -131,39 +159,39 @@ async def manga_details(
     mangadex_data = None
 
     if source == "anilist_id":
-        anilist_data = await get_manga_by_id(int(manga_id))
+        anilist_data = await get_manga_by_id(int(manga_id), cache=_cache)
         if not anilist_data:
             raise HTTPException(status_code=404, detail="Manga not found on AniList")
         if anilist_data.get("mal_id"):
             try:
-                jikan_data = await get_manga_by_mal_id(int(anilist_data["mal_id"]))
+                jikan_data = await get_manga_by_mal_id(int(anilist_data["mal_id"]), cache=_cache)
             except (ValueError, TypeError, httpx.HTTPError) as exc:
                 logger.warning("Jikan MAL lookup failed for anilist_id=%s mal_id=%s: %s", manga_id, anilist_data.get("mal_id"), exc)
                 jikan_data = None
         else:
-            jikan_data = await get_manga_by_query(anilist_data["title"])
+            jikan_data = await get_manga_by_query(anilist_data["title"], cache=_cache)
         try:
-            mdx_matches = await mangadex_search_manga(anilist_data["title"])
+            mdx_matches = await mangadex_search_manga(anilist_data["title"], cache=_cache)
             mangadex_data = await _pick_best_mangadex_match(anilist_data["title"], mdx_matches)
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             logger.warning("MangaDex lookup failed for anilist_id=%s title=%s: %s", manga_id, anilist_data["title"], exc)
             mangadex_data = None
     elif source == "mal_id":
-        jikan_data = await get_manga_by_mal_id(int(manga_id))
+        jikan_data = await get_manga_by_mal_id(int(manga_id), cache=_cache)
         if not jikan_data:
             raise HTTPException(status_code=404, detail="Manga not found on Jikan")
         try:
-            mdx_matches = await mangadex_search_manga(jikan_data["title"])
+            mdx_matches = await mangadex_search_manga(jikan_data["title"], cache=_cache)
             mangadex_data = await _pick_best_mangadex_match(jikan_data["title"], mdx_matches)
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             logger.warning("MangaDex lookup failed for mal_id=%s title=%s: %s", manga_id, jikan_data["title"], exc)
             mangadex_data = None
     elif source == "mangadex_id":
-        mangadex_data = await get_mangadex_manga_details(manga_id)
+        mangadex_data = await get_mangadex_manga_details(manga_id, cache=_cache)
         if not mangadex_data:
             raise HTTPException(status_code=404, detail="Manga not found on MangaDex")
         try:
-            jikan_data = await get_manga_by_query(mangadex_data["title"])
+            jikan_data = await get_manga_by_query(mangadex_data["title"], cache=_cache)
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             logger.warning("Jikan search failed for mangadex_id=%s title=%s: %s", manga_id, mangadex_data["title"], exc)
             jikan_data = None
@@ -173,7 +201,7 @@ async def manga_details(
     related = []
     if jikan_data and jikan_data.get("mal_id"):
         try:
-            related = await get_related_manga(int(jikan_data["mal_id"]))
+            related = await get_related_manga(int(jikan_data["mal_id"]), cache=_cache)
         except (ValueError, TypeError, httpx.HTTPError) as exc:
             logger.warning("Related manga lookup failed for mal_id=%s: %s", jikan_data.get("mal_id"), exc)
             related = []
@@ -181,7 +209,7 @@ async def manga_details(
     chapter_count = 0
     if mangadex_data and mangadex_data.get("mangadex_id"):
         try:
-            chapter_count = len(await get_chapter_list(mangadex_data["mangadex_id"], "en"))
+            chapter_count = len(await get_chapter_list(mangadex_data["mangadex_id"], "en", cache=_cache))
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             logger.warning("Chapter count lookup failed for mangadex_id=%s: %s", mangadex_data.get("mangadex_id"), exc)
             chapter_count = 0
@@ -195,7 +223,7 @@ async def manga_details(
             or ""
         )
         if title:
-            comick_match = await get_comick_best_match(title)
+            comick_match = await get_comick_best_match(title, cache=_cache)
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         logger.warning("Comick match lookup failed for manga_id=%s title=%s: %s", manga_id, title, exc)
         comick_match = None
@@ -212,7 +240,7 @@ async def manga_details(
 
 @router.get("/comick/chapters")
 async def manga_comick_chapters(title: str = Query(..., min_length=1)):
-    data = await get_comick_chapter_list(title)
+    data = await get_comick_chapter_list(title, cache=_cache)
     return {
         "match": data.get("match"),
         "items": data.get("items") or [],
@@ -223,7 +251,7 @@ async def manga_comick_chapters(title: str = Query(..., min_length=1)):
 @router.get("/comick/pages")
 async def manga_comick_pages(url: str = Query(..., min_length=1)):
     try:
-        return {"pages": await get_comick_chapter_pages(url)}
+        return {"pages": await get_comick_chapter_pages(url, cache=_cache)}
     except (httpx.HTTPError, ValueError) as exc:
         logger.error("Comick page fetch failed for url=%s: %s", url, exc)
         raise HTTPException(status_code=502, detail={"error_code": "MANGA_COMICK_PAGE_FETCH_FAILED", "message": str(exc)}) from exc
@@ -232,7 +260,7 @@ async def manga_comick_pages(url: str = Query(..., min_length=1)):
 @router.get("/{mangadex_id}/chapters")
 async def manga_chapters(mangadex_id: str, language: str = "en"):
     try:
-        return {"items": await get_chapter_list(mangadex_id, language=language)}
+        return {"items": await get_chapter_list(mangadex_id, language=language, cache=_cache)}
     except (httpx.HTTPError, ValueError) as exc:
         logger.error("MangaDex chapter fetch failed for mangadex_id=%s language=%s: %s", mangadex_id, language, exc)
         raise HTTPException(status_code=502, detail={"error_code": "MANGADEX_CHAPTER_FETCH_FAILED", "message": str(exc)}) from exc
@@ -241,7 +269,7 @@ async def manga_chapters(mangadex_id: str, language: str = "en"):
 @router.get("/chapter/{chapter_id}/pages")
 async def manga_pages(chapter_id: str):
     try:
-        return {"pages": await get_chapter_pages(chapter_id)}
+        return {"pages": await get_chapter_pages(chapter_id, cache=_cache)}
     except (httpx.HTTPError, ValueError) as exc:
         logger.error("MangaDex page fetch failed for chapter_id=%s: %s", chapter_id, exc)
         raise HTTPException(status_code=502, detail={"error_code": "MANGADEX_PAGE_FETCH_FAILED", "message": str(exc)}) from exc

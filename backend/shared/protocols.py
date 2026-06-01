@@ -50,12 +50,15 @@ class DatabaseProtocol(Protocol):
 @runtime_checkable
 class CacheProtocol(Protocol):
     """
-    Matches manga_cache.py and any other cache implementation.
+    Matches manga_cache.py and any other async cache implementation.
     Manga providers receive this — they never import manga_cache directly.
+
+    All methods are async to match the SQLite-backed manga_cache implementation.
+    The route assembles a MangaCacheAdapter that satisfies this protocol.
     """
-    def get(self, key: str) -> Any: ...
-    def set(self, key: str, value: Any) -> None: ...
-    def clear(self, key: str) -> None: ...
+    async def get(self, key: str) -> Any: ...
+    async def set(self, key: str, value: Any, source: str = "", expires_hours: int = 6) -> None: ...
+    async def clear(self, key: str) -> None: ...
 
 
 @runtime_checkable
